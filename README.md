@@ -132,3 +132,8 @@ FauxSSH can serve as an interesting case study for **Deception Technology** and 
 > *   **Isolation**: Run this in an isolated environment (VM, VPS, or container).
 > *   **Monitoring**: High traffic or scripted attacks can consume your API quota quickly.
 > *   **Network**: Be careful exposing this on your primary network.
+
+## Contact
+
+For questions, feedback, or educational collaboration:
+*   **Email**: royans@tharakan.org

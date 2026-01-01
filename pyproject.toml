@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-  {name = "Antigravity", email = "maintainer@example.com"}
+  {name = "Royans Tharakan", email = "royans@tharakan.org"}
 ]
 dependencies = [
     "paramiko",
