@@ -335,3 +335,78 @@ class TestCommandHandler:
         assert len(parts) == 2
         assert parts[0] == "1" # lines
         assert parts[1] == "1" # words
+
+    def test_nproc(self, handler):
+        cmd = "nproc"
+        context = {}
+        # helper wrapper calls system_handler directly, returning 2 val
+        res, _ = handler.handle_nproc(cmd, context)
+        assert res.strip() == "192"
+
+    def test_uptime_command(self, handler):
+        res, _ = handler.handle_uptime("uptime", {})
+        assert "up 14 days" in res
+        assert "load average" in res
+
+    def test_proc_uptime(self, handler):
+        # /proc/uptime via handle_cat
+        context = {'cwd': '/root'}
+        res, _, meta = handler.handle_cat("cat /proc/uptime", context)
+        parts = res.strip().split()
+        assert len(parts) == 2
+        assert float(parts[0]) > 1000000 
+        assert meta['source'] == 'local'
+
+    def test_handle_grep_basic(self, handler):
+        # Basic grep via pipe
+        cmd = "grep hello"
+        context = {'stdin': "hello\nworld\nhello world"}
+        res, _, _ = handler.handle_grep(cmd, context)
+        assert len(res.strip().split('\n')) == 2
+        assert "hello" in res
+        assert "world" in res # third line "hello world"
+
+        # -v invert
+        cmd = "grep -v hello"
+        res, _, _ = handler.handle_grep(cmd, context)
+        assert res.strip() == "world"
+
+    def test_grep_regex_m1(self, handler):
+        from unittest.mock import MagicMock
+        cpuinfo = """model name	: AMD EPYC 9654
+model name	: AMD EPYC 9654
+Hardware	: FakeHardware
+Other		: Something
+"""
+        # Mock content retrieval
+        handler._generate_or_get_content = MagicMock(return_value=(cpuinfo, 'local'))
+        
+        cmd = 'grep -m1 -E "model name|Hardware" /proc/cpuinfo'
+        context = {'cwd': '/root'}
+        
+        res, _, _ = handler.handle_grep(cmd, context)
+        lines = res.strip().split('\n')
+        assert len(lines) == 1
+        res, _, _ = handler.handle_grep(cmd, context)
+        lines = res.strip().split('\n')
+        assert len(lines) == 1
+        assert "model name" in lines[0]
+
+    def test_pipe_parsing_quotes(self, handler):
+        # Regression test: Ensure | inside quotes is NOT treated as pipe
+        cmd = 'echo "hello|world"'
+        context = {}
+        # Should return "hello|world" (echo handles cleanup, or at least handler sees full arg)
+        # handle_echo strips quotes? 
+        # let's mock handle_echo or just see output
+        res, _, meta = handler.process_command(cmd, context)
+        # Verify it did NOT recurse. If it recursed, source would be pipe? or echo output differs.
+        # If split, left=`echo "hello`, right=`world"`.
+        assert "hello|world" in res
+        assert "command not found" not in res
+        assert meta['source'] == 'local' # or whatever echo returns
+        
+        # Test REAL pipe works
+        cmd = 'echo hello | grep hello'
+        res, _, _ = handler.process_command(cmd, context)
+        assert "hello" in res

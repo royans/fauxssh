@@ -15,6 +15,7 @@ try:
     from .config_manager import config
 except ImportError:
     from config_manager import config
+import shlex
 
 class CommandHandler:
     def __init__(self, llm_interface, db):
@@ -52,7 +53,7 @@ class CommandHandler:
             'whoami', 'id', 'sudo', 'su',
             'history', 'help', 'man',
             'ps', 'top', 'kill', 'killall',
-            'uname', 'hostname', 'uptime', 'date', 'df', 'du', 'free',
+            'uname', 'hostname', 'uptime', 'date', 'df', 'du', 'free', 'nproc',
             'grep', 'awk', 'sed', 'find', 'locate', 'head', 'tail', 'more', 'less', 'wc', 'diff',
             'tar', 'zip', 'unzip', 'gzip', 'gunzip', 'md5sum',
             'ssh', 'ping',
@@ -153,10 +154,32 @@ class CommandHandler:
                 except: pass
 
         # 0.5 Pipe Support (Simple Grep)
-        if '|' in cmd:
-            parts = cmd.split('|', 1)
-            left_cmd = parts[0].strip()
-            right_cmd = parts[1].strip()
+        # 0.5 Pipe Support (Context-Aware)
+        pipe_pos = -1
+        in_sq = False
+        in_dq = False
+        escaped = False
+        
+        for i, char in enumerate(cmd):
+            if escaped:
+                escaped = False
+                continue
+            
+            if char == '\\':
+                escaped = True
+                continue
+                
+            if char == "'" and not in_dq:
+                in_sq = not in_sq
+            elif char == '"' and not in_sq:
+                in_dq = not in_dq
+            elif char == '|' and not in_sq and not in_dq:
+                pipe_pos = i
+                break
+        
+        if pipe_pos != -1:
+            left_cmd = cmd[:pipe_pos].strip()
+            right_cmd = cmd[pipe_pos+1:].strip()
             
             # Generalized Pipe Support
             # Recursive execution: Execute left, pass output as stdin to right
@@ -284,37 +307,103 @@ class CommandHandler:
     def _simple_grep(self, text, grep_cmd):
         """
         Rudimentary grep implementation for VFS checks.
-        Supports: grep pattern, grep -i pattern, grep -v pattern
+        Supports: grep pattern, -i, -v, -E (regex), -m N (max count)
         """
-        args = grep_cmd.split()
+        try:
+            args = shlex.split(grep_cmd)
+        except:
+            args = grep_cmd.split()
+            
         if len(args) < 2: return text
         
-        # Assumption: pattern is the last argument
-        # TODO: Handle quoted patterns
-        pattern = args[-1] 
-        
+        # Naive Argument Parsing
         case_insensitive = '-i' in args
         invert = '-v' in args
+        use_regex = '-E' in args or '--extended-regexp' in args
+        
+        max_count = None
+        pattern = None
+        
+        # Iterate to find flags and pattern
+        # Skip 'grep' (args[0])
+        i = 1
+        while i < len(args):
+            arg = args[i]
+            
+            if arg == '-i' or arg == '-v' or arg == '-E' or arg == '--extended-regexp':
+                i += 1
+                continue
+                
+            if arg.startswith('-m'):
+                if arg == '-m':
+                    if i + 1 < len(args):
+                        try:
+                            max_count = int(args[i+1])
+                            i += 1
+                        except: pass
+                else:
+                    try:
+                        max_count = int(arg[2:])
+                    except: pass
+                i += 1
+                continue
+            
+            if arg.startswith('-') and len(arg) > 1:
+                # Handle combined flags roughly? e.g. -iv
+                # Just ignore unknown flags for now to avoid consuming pattern
+                pass
+                
+            # If not a flag, assume Pattern (first positional)
+            if pattern is None and not arg.startswith('-'):
+                pattern = arg
+            
+            i += 1
+
+        if pattern is None:
+             # Fallback: Last arg?
+             pattern = args[-1]
         
         filtered = []
-        for line in text.split('\n'):
-            # Strip ANSI for matching (optional, but good for grep)
+        count = 0
+        
+        # Pre-compile regex if needed
+        regex_obj = None
+        if use_regex:
+            flags = 0
+            if case_insensitive: flags |= re.IGNORECASE
+            try:
+                regex_obj = re.compile(pattern, flags)
+            except:
+                pass # Fail gracefully, match nothing? or strings?
+        
+        for line in text.splitlines():
+            # Strip ANSI for matching check (keep in output)
             clean_line = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', line)
             
-            line_check = clean_line
-            pat_check = pattern
+            match = False
             
-            if case_insensitive:
-                line_check = line_check.lower()
-                pat_check = pat_check.lower()
-            
-            match = pat_check in line_check
+            if regex_obj:
+                if regex_obj.search(clean_line):
+                    match = True
+            else:
+                # Substring match
+                check_l = clean_line
+                check_p = pattern
+                if case_insensitive:
+                    check_l = check_l.lower()
+                    check_p = check_p.lower()
+                
+                if check_p in check_l:
+                    match = True
             
             if invert:
                 match = not match
             
             if match:
-                filtered.append(line) # Return original line with formatting
+                filtered.append(line)
+                count += 1
+                if max_count is not None and count >= max_count:
+                    break
         
         return '\n'.join(filtered)
 
@@ -605,6 +694,9 @@ class CommandHandler:
     def handle_netstat(self, cmd, context):
         return self.system_handler.handle_netstat(cmd, context)
 
+    def handle_nproc(self, cmd, context):
+        return self.system_handler.handle_nproc(cmd, context)
+
 
 
 
@@ -624,8 +716,12 @@ class CommandHandler:
              # print(f"[Session: {session_id}] [{cmd_name}] User DB HIT for {abs_path}")
              return user_node['content'], 'local'
         
-        # Check Static Persona Files
+        # Check Static/Dynamic Persona Files
         if hasattr(self, 'system_handler'):
+            dyn_content = self.system_handler.get_dynamic_file(abs_path)
+            if dyn_content:
+                return dyn_content, 'local'
+            
             static_content = self.system_handler.get_static_file(abs_path)
             if static_content:
                 return static_content, 'local'
@@ -676,8 +772,12 @@ class CommandHandler:
         return content + "\n", {}, {'source': source, 'cached': source == 'local'}
 
     def handle_grep(self, cmd, context):
-        # Delegate to _simple_grep for consistent logic (flags -i, -v)
-        parts = cmd.split()
+        # Delegate to _simple_grep for consistent logic (flags -i, -v, -E, -m)
+        try:
+            parts = shlex.split(cmd)
+        except:
+            parts = cmd.split()
+            
         if len(parts) < 2: return "", {}, {}
         
         content = ""
@@ -691,6 +791,12 @@ class CommandHandler:
         else:
             if len(parts) < 3: return "", {}, {'source': 'local', 'cached': False}
             target_path = parts[-1]
+            # Reconstruct cmd without the filename so _simple_grep handles pattern/flags correctly
+            try:
+                grep_cmd_for_parsing = shlex.join(parts[:-1])
+            except AttributeError:
+                 # Python < 3.8 fallback
+                 grep_cmd_for_parsing = " ".join([shlex.quote(p) for p in parts[:-1]])
             content, source = self._generate_or_get_content("grep", target_path, context)
             
             # Remove filename from cmd so _simple_grep parses pattern correctly from last arg

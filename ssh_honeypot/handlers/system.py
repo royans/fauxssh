@@ -32,6 +32,33 @@ SUPPORT_URL="https://www.debian.org/support"
 BUG_REPORT_URL="https://bugs.debian.org/"
 """
         }
+        
+        self.DYNAMIC_FILES = {
+            '/proc/uptime': self.generate_proc_uptime
+        }
+
+    def generate_proc_uptime(self):
+        # Match handle_uptime's "14 days, 3:12" roughly.
+        # 14 days = 1209600s
+        # 3h 12m = 11520s
+        # Total ~ 1.22 million seconds
+        # We add some randomness to simulated "now" vs boot
+        base_uptime = 1221120.0 
+        idle_time = base_uptime * 0.98 # Mostly idle
+        
+        # Add small jitter based on time of day (minutes)
+        now_min = datetime.datetime.now().minute
+        jitter = now_min * 60
+        
+        up = base_uptime + jitter
+        idle = idle_time + jitter
+        
+        return f"{up:.2f} {idle:.2f}\n"
+
+    def get_dynamic_file(self, path):
+        if path in self.DYNAMIC_FILES:
+            return self.DYNAMIC_FILES[path]()
+        return None
 
     def handle_hostname(self, cmd, context):
         h = config.get('server', 'hostname') or 'npc-main-server-01'
@@ -172,6 +199,11 @@ tcp        0    232 {hp_ip}:22            {client_ip}:54321         ESTABLISHED
 udp        0      0 0.0.0.0:68              0.0.0.0:*                          
 """
         return out, {}
+
+    def handle_nproc(self, cmd, context):
+        # Consistent with AMD EPYC 9654 (96 cores, 192 threads)
+        # /proc/cpuinfo says "siblings : 192"
+        return "192\n", {}
 
 
     def get_static_file(self, path):
