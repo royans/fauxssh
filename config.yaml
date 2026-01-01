@@ -1,0 +1,6 @@
+server:
+  hostname: "web.blogofy.com"
+  port: 2222
+
+llm:
+  model_name: "gemma-3-27b-it" 

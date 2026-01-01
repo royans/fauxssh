@@ -1,0 +1,1628 @@
+import json
+import re
+import os
+import datetime
+import time
+import hashlib
+try:
+    from .utils import random_response_delay
+except ImportError:
+    from utils import random_response_delay
+
+class CommandHandler:
+    def __init__(self, llm_interface, db):
+        self.llm = llm_interface
+        self.db = db
+
+
+        
+        try:
+            from .config_manager import config
+        except ImportError:
+            from config_manager import config
+
+        try:
+            from .security_filter import SecurityFilter
+        except ImportError:
+            from security_filter import SecurityFilter
+            
+        try:
+            from .handlers.system import SystemHandler
+        except ImportError:
+            from handlers.system import SystemHandler
+
+        self.security = SecurityFilter()
+        self.system_handler = SystemHandler(db, llm_interface)
+        
+        # Expanded whitelist maps commands to handler functions or generic
+        self.STATE_COMMANDS = {
+            'cd', 'touch', 'mkdir', 'rm', 'mv', 'cp', 'rmdir',
+            'chmod', 'chown', 'wget', 'curl', 'scp',
+            'export', 'alias', 'unalias', 'source', '.'
+        }
+        self.READ_ONLY_COMMANDS = {
+            'ls', 'pwd', 'echo', 'cat', 
+            'whoami', 'id', 'sudo', 'su',
+            'history', 'help', 'man',
+            'ps', 'top', 'kill', 'killall',
+            'uname', 'hostname', 'uptime', 'date', 'df', 'du', 'free',
+            'grep', 'awk', 'sed', 'find', 'locate', 'head', 'tail', 'more', 'less', 'wc', 'diff',
+            'tar', 'zip', 'unzip', 'gzip', 'gunzip', 'md5sum',
+            'ssh', 'ping',
+            'ifconfig', 'ip', 'netstat', 'ss', 'route', 'mount',
+            'python', 'python3', 'perl', 'bash', 'sh', 'base64'
+        }
+        self.HONEYTOKENS = {"aws_keys.txt", "id_rsa_backup", "wallet.dat"}
+        self.FILESYSTEMS = [
+            {"fs": "/dev/sda1", "mount": "/", "size": "40G", "used": "8.2G", "avail": "30G", "use": "22%", "type": "ext4"},
+            {"fs": "udev", "mount": "/dev", "size": "3.9G", "used": "0", "avail": "3.9G", "use": "0%", "type": "devtmpfs"},
+            {"fs": "tmpfs", "mount": "/run", "size": "796M", "used": "1.2M", "avail": "795M", "use": "1%", "type": "tmpfs"},
+            {"fs": "/dev/sda15", "mount": "/boot/efi", "size": "124M", "used": "6.1M", "avail": "118M", "use": "5%", "type": "vfat"}
+        ]
+
+
+    def process_command(self, cmd, context):
+        """
+        Input: cmd (str), context (dict)
+        Output: (response_text_for_user, updates_dict, metadata)
+        updates_dict = {'new_cwd': str, 'file_modifications': list}
+        metadata = {'source': 'llm'|'cache'|'local', 'cached': bool}
+        """
+        cwd = context.get('cwd', '/')
+        vfs = context.get('vfs', {})
+        history = context.get('history', [])
+        client_ip = context.get('client_ip', 'Unknown')
+        honeypot_ip = context.get('honeypot_ip', '192.168.1.55')
+        llm_call_count = context.get('llm_call_count', 0)
+
+        # 0. Security / Injection Check
+        is_safe, reason = self.security.validate_input(cmd)
+        if not is_safe:
+            print(f"[SECURITY] Blocked Input: {cmd} Reason: {reason}")
+            # Log this? self.db.log_interaction(...) - Optional
+            return f"bash: command blocked by security policy: {reason}\n", {}, {'source': 'security', 'cached': False}
+
+        # 0. Complex Chain / Long Command Handling
+        # If the command is very long or involves complex chaining/logic that our simple emulation
+        # can't handle (and would benefit from LLM reasoning), offload it immediately.
+        # Thresholds: > 150 chars, > 2 semicolons, > 2 pipes, or presence of logical AND/OR (&&, ||)
+        is_complex = (len(cmd) > 150) or (cmd.count(';') > 2) or (cmd.count('|') > 2) or ('&&' in cmd) or ('||' in cmd)
+        
+        if is_complex:
+             # Check if we should log/print this event
+             # Calculate signature for debug/cache key (though handle_generic uses raw cmd)
+             sig = hashlib.md5(cmd.encode()).hexdigest()
+             print(f"[Command] Complex chain detected (Len: {len(cmd)}, Sig: {sig[:8]}). Offloading entire chain to LLM.")
+             
+             # handle_generic checks cache internally and calls LLM if needed
+             # This effectively treats the long chain as a single script execution
+             return self.handle_generic(cmd, context)
+
+        try:
+            base_cmd = cmd.split()[0]
+        except IndexError:
+            return "", {}, {'source': 'local', 'cached': False}
+        
+        # 0. Command Chaining Support (;)
+        # We need to handle this BEFORE pipe support, as ; has lower precedence.
+        # e.g. "echo A ; echo B" -> [echo A, echo B]
+        # But we must be careful not to split inside quotes (simplistic split for now)
+        if ';' in cmd:
+            parts = [p.strip() for p in cmd.split(';') if p.strip()]
+            if len(parts) > 1:
+                final_out = []
+                final_updates = {}
+                current_context = context.copy()
+                
+                for part in parts:
+                    out, updates, meta = self.process_command(part, current_context)
+                    final_out.append(out)
+                    
+                    # Update context for next command in chain
+                    if updates:
+                        if updates.get('new_cwd'):
+                            current_context['cwd'] = updates['new_cwd']
+                        # Merge updates
+                        for k, v in updates.items():
+                             if k == 'new_cwd': 
+                                 final_updates[k] = v # Last one wins
+                             elif k == 'file_modifications':
+                                 if 'file_modifications' not in final_updates: final_updates['file_modifications'] = []
+                                 final_updates['file_modifications'].extend(v)
+
+                return "".join(final_out), final_updates, {'source': 'chain', 'cached': False}
+
+        # 0. Tarpitting & Honeytoken Detection
+        if llm_call_count > 30:
+            time.sleep(3) # Heavy tarpit
+        elif llm_call_count > 15:
+            time.sleep(1) # Light tarpit
+
+        for token in self.HONEYTOKENS:
+            if token in cmd:
+                print(f"[!!!] HONEYTOKEN TRIGGERED: {token} by {client_ip}")
+                try:
+                     self.db.log_interaction(context.get('session_id', 'unknown'), f"ALERT: Token {token}", "User accessed bait file", "ALERT: Honeytoken Triggered", source="system", was_cached=False)
+                except: pass
+
+        # 0.5 Pipe Support (Simple Grep)
+        if '|' in cmd:
+            parts = cmd.split('|', 1)
+            left_cmd = parts[0].strip()
+            right_cmd = parts[1].strip()
+            
+            # Only intercept if it looks like a grep commands
+            if right_cmd.startswith('grep'):
+                # Execute Left Side
+                # Recurse
+                out_text, updates, meta = self.process_command(left_cmd, context)
+                
+                # Filter Output
+                return self._simple_grep(out_text, right_cmd), updates, meta
+
+        # 0.7 Execution Simulation (Malware/Script Execution)
+        # Check if the command refers to a local file (uploaded or generated)
+        # We need to handle ./ prefix explicitly or rely on resolve
+        potential_path = base_cmd
+        if not potential_path.startswith('/') and './' not in potential_path:
+             # If just "script.sh", technically shell looks in PATH. 
+             # But for honeypot, if it's in CWD, we might allow it if clearly user intent?
+             # Standard Linux: must be ./script.sh unless in PATH.
+             # We stick to standard: only check if it resolves to absolute path AND (is absolute OR starts with ./)
+             pass 
+        
+        abs_path = self._resolve_path(cwd, potential_path)
+        
+        # Only check DB if it looks like a path execution (contains /) OR if we want to be generous
+        if '/' in potential_path: 
+            node = self.db.get_fs_node(abs_path)
+            if node and node.get('type') == 'file':
+                 print(f"[DEBUG] Execution attempt on {abs_path}")
+                 content = node.get('content', '')
+                 
+                 # Basic Executable Check (permissions would be better but we rely on content validty)
+                 # Limit size sent to LLM
+                 if not content:
+                     return f"bash: {base_cmd}: Permission denied\n", {}, {'source': 'local', 'cached': False}
+                 
+                 if len(content) > 10000:
+                     return f"bash: {base_cmd}: text file busy (simulated)\n", {}, {'source': 'local', 'cached': False}
+
+                 print(f"[Execution] Simulating script via LLM: {abs_path}")
+                 
+                 prompt = f"The user is executing a script found at '{abs_path}' with content:\n---\n{content}\n---\n(INSTRUCTION: Act as the interpreter. EXECUTE this script virtually and return the Standard Output. Do not describe what it does, just show the output. If it modifies files, include file_modifications in JSON.)"
+                 
+                 resp = self.llm.generate_response(
+                    cmd, # Use full cmd (args included)
+                    cwd, 
+                    history, 
+                    [], 
+                    [],
+                    client_ip=client_ip, 
+                honeypot_ip=honeypot_ip,
+                    override_prompt=prompt
+                 )
+                 j, t = self._extract_json_or_text(resp)
+                 out, ups = self._process_llm_json(j, t)
+                 return out, ups, {'source': 'llm_exec', 'cached': False}
+
+        # 1. Access Control
+        if not self._is_allowed(cmd):
+            return f"bash: {base_cmd}: command not found", {}, {'source': 'denied', 'cached': False}
+
+        # 2. Cache Check Moved to handle_generic to allow overrides
+
+        # 3. Rate Limit Check (if not cached)
+        if llm_call_count >= 50:
+            return "bash: fork: retry: Resource temporarily unavailable", {}, {'source': 'ratelimit', 'cached': False}
+
+        # 4. Dispatch to Specific Handlers (or generic LLM)
+        handler_name = f"handle_{base_cmd}"
+        if hasattr(self, handler_name):
+            # Deception: Add random delay to local commands to match LLM latency timing
+            random_response_delay(0.5, 1.5)
+            res = getattr(self, handler_name)(cmd, context)
+            
+            # Allow handlers to return custom metadata (esp. for hybrid handlers like cat)
+            if len(res) == 3:
+                return res[0], res[1], res[2]
+            else:
+                return res[0], res[1], {'source': 'local', 'cached': False}
+        else:
+            return self.handle_generic(cmd, context)
+
+    def _is_allowed(self, cmd):
+        base_cmd = cmd.split()[0]
+        if '/' in base_cmd: return True
+        if '=' in base_cmd: return True
+        if base_cmd in self.STATE_COMMANDS: return True
+        if base_cmd in self.READ_ONLY_COMMANDS: return True
+        return False
+
+    def _process_llm_json(self, r_json, r_text, vfs=None, cwd=None):
+        """
+        Standardizes return format.
+        Output: (text_output, updates)
+        """
+        output_text = ""
+        updates = {}
+
+        if r_json:
+            output_text = r_json.get('output', '')
+            updates['new_cwd'] = r_json.get('new_cwd')
+            updates['file_modifications'] = r_json.get('file_modifications')
+        else:
+            output_text = r_text
+        
+        return output_text, updates
+
+    def _simple_grep(self, text, grep_cmd):
+        """
+        Rudimentary grep implementation for VFS checks.
+        Supports: grep pattern, grep -i pattern, grep -v pattern
+        """
+        args = grep_cmd.split()
+        if len(args) < 2: return text
+        
+        # Assumption: pattern is the last argument
+        # TODO: Handle quoted patterns
+        pattern = args[-1] 
+        
+        case_insensitive = '-i' in args
+        invert = '-v' in args
+        
+        filtered = []
+        for line in text.split('\n'):
+            # Strip ANSI for matching (optional, but good for grep)
+            clean_line = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', line)
+            
+            line_check = clean_line
+            pat_check = pattern
+            
+            if case_insensitive:
+                line_check = line_check.lower()
+                pat_check = pat_check.lower()
+            
+            match = pat_check in line_check
+            
+            if invert:
+                match = not match
+            
+            if match:
+                filtered.append(line) # Return original line with formatting
+        
+        return '\n'.join(filtered)
+
+    # --- SPECIFIC HANDLERS ---
+    
+    # Generic Handler uses the standard big prompt from llm_interface
+    def handle_generic(self, cmd, context):
+        cwd = context.get('cwd')
+        vfs = context.get('vfs')
+        history = context.get('history')
+        session_id = context.get('session_id', 'unknown')
+        
+        # 1. Check Cache (Moved here)
+        print(f"[Session: {session_id}] [Cache] Checking cache for '{cmd}' in '{cwd}'")
+        cached_resp = self.db.get_cached_response(cmd, cwd)
+        response_json, response_text = self._extract_json_or_text(cached_resp)
+        if response_json or response_text:
+            if "Resource temporarily unavailable" not in str(response_json) and "Resource temporarily unavailable" not in response_text:
+                 print(f"[Session: {session_id}] [Cache] HIT")
+                 out, up = self._process_llm_json(response_json, response_text, vfs=vfs, cwd=cwd)
+                 return out, up, {'source': 'cache', 'cached': True}
+        
+        print(f"[Session: {session_id}] [Cache] MISS")
+        print(f"[Session: {session_id}] [LLM] Calling LLM API for generic command...")
+
+        # Call LLM
+        # Note: llm_interface.generate_response uses the 'generic' prompt internally. 
+        # Ideally we refactor LLMInterface to accept a prompt, but for now we reuse it.
+        resp = self.llm.generate_response(
+            cmd, 
+            cwd, 
+            history, 
+            context.get('file_list', []), 
+            context.get('known_paths', []), 
+            client_ip=context.get('client_ip'), 
+            honeypot_ip=context.get('honeypot_ip')
+        )
+        
+        # Parse logic
+        j, t = self._extract_json_or_text(resp)
+        
+        # Cache logic
+        if "Error: AI Core Offline" not in resp and "Resource temporarily unavailable" not in resp:
+            self.db.cache_response(cmd, cwd, resp)
+
+        out, up = self._process_llm_json(j, t)
+        return out, up, {'source': 'llm', 'cached': False}
+
+    def handle_ls(self, cmd, context):
+        # 1. Parse Args
+        parts = cmd.split()
+        flags = set()
+        target_path = context.get('cwd') # Default to CWD
+        
+        for p in parts[1:]:
+            if p.startswith('-'):
+                for char in p[1:]:
+                     flags.add(char)
+            else:
+                target_path = p
+        
+        # 2. Resolve Path
+        abs_path = self._resolve_path(context.get('cwd'), target_path)
+        client_ip = context.get('client_ip')
+        user = context.get('user')
+
+        # 2a. Check if it is a specific file (Global or User)
+        # Check User FS first (override)
+        user_node = self.db.get_user_node(client_ip, user, abs_path)
+        if user_node:
+             return self._format_ls_output([user_node], flags), {}
+        
+        # Check Global FS
+        global_node = self.db.get_fs_node(abs_path)
+        if global_node and global_node.get('type') == 'file': # Only return if it's a file
+             return self._format_ls_output([global_node], flags), {}
+
+        # 3. Check Global FS Cache (Treat as Directory)
+        cached_files = self.db.list_fs_dir(abs_path)
+        
+        # 3a. Check User Persisted FS (Uploads)
+        client_ip = context.get('client_ip')
+        user = context.get('user')
+        user_files = self.db.list_user_dir(client_ip, user, abs_path)
+        
+        # Merge User files over Global files
+        # Map by filename to dedup
+        file_map = {f['path'].split('/')[-1]: f for f in cached_files}
+        
+        for uf in user_files:
+            fname = uf['path'].split('/')[-1]
+            file_map[fname] = uf # User file overrides global
+            
+        # 3b. Merge with Session VFS (if present)
+        # Session VFS is passed in context['vfs']. It is a dict of path -> [filenames] (simple strings)
+        vfs_data = context.get('vfs', {})
+        if abs_path in vfs_data:
+             for fname in vfs_data[abs_path]:
+                 # If in map, we already have metadata (either Global or User)
+                 # If NOT in map, it's a temp file created in this session (touch, or generated)
+                 if fname not in file_map:
+                     file_map[fname] = {
+                         'path': os.path.join(abs_path, fname),
+                         'parent_path': abs_path,
+                         'type': 'file', 
+                         'metadata': {'permissions': '-rw-r--r--', 'size': 0, 'owner': user or 'root', 'group': user or 'root', 'modified': datetime.datetime.now().strftime("%b %d %H:%M")}
+                     }
+                     
+        all_files = list(file_map.values())
+        
+        if all_files and len(all_files) > 0:
+            print(f"[DEBUG] LS Cache Hit for {abs_path}: {len(all_files)} files (DB: {len(cached_files)}, User/VFS: {len(all_files)-len(cached_files)})")
+            return self._format_ls_output(all_files, flags), {}
+
+
+        # 4. Fallback to LLM (Provide context if needed)
+        # We pass empty file list for external paths to avoid hallucination confusion.
+        lookup_files = []
+        if abs_path == context.get('cwd') or abs_path.startswith('/home/'): 
+             # Use vfs from context if available as fallback context
+             if abs_path in context.get('vfs', {}):
+                 lookup_files = context.get('vfs', {}).get(abs_path, [])
+             elif abs_path == context.get('cwd'):
+                 lookup_files = context.get('file_list', [])
+
+        # Strong instruction to prevent history hallucination
+        cmd_with_instruction = f"{cmd} (INSTRUCTION: List files in '{abs_path}'. Do NOT list files from {context.get('cwd')} or previous history keys. If directory is not empty, generate realistic files.)"
+
+        resp = self.llm.generate_response(
+            cmd_with_instruction, 
+            context.get('cwd'), 
+            context.get('history'), 
+            lookup_files, 
+            context.get('known_paths', []), 
+            client_ip=context.get('client_ip'), 
+            honeypot_ip=context.get('honeypot_ip')
+        )
+        
+        j, t = self._extract_json_or_text(resp)
+        
+        # 5. Save Generated Files to DB
+        if j and j.get('generated_files'):
+            print(f"[DEBUG] Saving {len(j['generated_files'])} generated files for {abs_path}")
+            for gf in j['generated_files']:
+                # Ensure metadata fields
+                if 'permissions' not in gf: gf['permissions'] = '-rw-r--r--'
+                if 'size' not in gf: gf['size'] = 1024
+                if 'owner' not in gf: gf['owner'] = 'root'
+                if 'modified' not in gf: gf['modified'] = datetime.datetime.now().strftime("%b %d %H:%M")
+                
+                fname = gf.get('name')
+                if fname:
+                    fpath = os.path.join(abs_path, fname)
+                    self.db.update_fs_node(fpath, abs_path, gf.get('type', 'file'), gf)
+        
+        if "Error: AI Core Offline" not in resp and "Resource temporarily unavailable" not in resp:
+            self.db.cache_response(cmd, context.get('cwd'), resp)
+            
+        return self._process_llm_json(j, t)
+
+    def _resolve_path(self, cwd, path):
+        if path.startswith('/'):
+            return os.path.normpath(path)
+        elif path.startswith('~'):
+             # Handle dynamic username in ~ expansion if possible, or just default to /home/user or context['cwd'] if logical
+             # For now, simplistic
+             if cwd.startswith('/home/'):
+                  user_home = cwd.split('/', 3)[:3] # /home/user
+                  return os.path.normpath(path.replace('~', '/'.join(user_home), 1))
+             return os.path.normpath(path.replace('~', '/root', 1))
+        else:
+            return os.path.normpath(os.path.join(cwd, path))
+
+    def _format_ls_output(self, files, flags):
+        # Filter hidden
+        if 'a' not in flags:
+            files = [f for f in files if not f['path'].split('/')[-1].startswith('.')]
+
+        # Sort (Name default)
+        files.sort(key=lambda x: x['path'])
+        if 'r' in flags:
+            files.reverse()
+            
+        lines = []
+        total_blocks = 0
+        
+        for f in files:
+            name = f['path'].split('/')[-1]
+            try:
+                meta = json.loads(f['metadata']) if isinstance(f['metadata'], str) else f['metadata']
+            except:
+                meta = {}
+            
+            if 'l' in flags:
+                perms = meta.get('permissions', '-rw-r--r--')
+                links = 1
+                owner = meta.get('owner', 'root')
+                group = meta.get('group', 'root')
+                size = meta.get('size', 4096)
+                date = meta.get('modified', datetime.datetime.now().strftime("%b %d %H:%M")) 
+                
+                lines.append(f"{perms} {links} {owner} {group} {str(size).rjust(5)} {date} {name}")
+                total_blocks += (int(size) // 512) + 1
+            else:
+                lines.append(name)
+                
+        if 'l' in flags:
+            return f"total {total_blocks}\n" + "\n".join(lines)
+        else:
+            return "  ".join(lines) # Simple column view approximation
+
+
+    def handle_cd(self, cmd, context):
+        # Instruct LLM to be silent on success
+        # 1. OPTIMIZATION: Check Local DB First
+        parts = cmd.strip().split()
+        target_path = parts[1] if len(parts) > 1 else "~"
+        
+        # Resolve target path relative to CWD
+        cwd = context.get('cwd', '/')
+        abs_path = self._resolve_path(cwd, target_path)
+        print(f"DEBUG handle_cd: cwd={cwd}, target={target_path}, abs={abs_path}")
+        
+        # Check integrity
+        node = self.db.get_fs_node(abs_path)
+        if node and node.get('type') == 'directory':
+            # Local Success! Return updates without LLM cost
+            print(f"[Handler] CD Optimization Hit: {abs_path}")
+            return "", {'new_cwd': abs_path}
+
+        # 2. Fallback to LLM if path not found locally (maybe simulated in cache only?)
+        # Instruct LLM to be silent on success
+        cmd_with_instruction = f"{cmd} (INSTRUCTION: Execute directory change. Return 'new_cwd'. Output text MUST be empty on success. Do NOT list files.)"
+        
+        # We don't want to show files in context for CD usually, it confuses LLM into listing them.
+        # So pass empty file list.
+        resp = self.llm.generate_response(
+            cmd_with_instruction, 
+            context.get('cwd'), 
+            context.get('history'), 
+            [], # Empty context to prevent listing
+            context.get('known_paths', []), 
+            client_ip=context.get('client_ip'), 
+            honeypot_ip=context.get('honeypot_ip')
+        )
+        j, t = self._extract_json_or_text(resp)
+        
+        # FORCE SILENCE if new_cwd is present
+        if j and j.get('new_cwd'):
+            j['output'] = ""
+            
+        if "Error: AI Core Offline" not in resp and "Resource temporarily unavailable" not in resp:
+            self.db.cache_response(cmd, context.get('cwd'), resp)
+        return self._process_llm_json(j, t)
+
+    def handle_pwd(self, cmd, context):
+        return f"{context.get('cwd', '/')}\n", {}
+
+    def handle_whoami(self, cmd, context):
+        return f"{context.get('user', 'unknown')}\n", {}
+
+    # --- DELEGATES TO SYSTEM HANDLER ---
+    
+    def handle_hostname(self, cmd, context):
+        return self.system_handler.handle_hostname(cmd, context)
+
+    def handle_uname(self, cmd, context):
+        return self.system_handler.handle_uname(cmd, context)
+
+    def handle_uptime(self, cmd, context):
+        return self.system_handler.handle_uptime(cmd, context)
+
+    def handle_ifconfig(self, cmd, context):
+        return self.system_handler.handle_ifconfig(cmd, context)
+
+    def handle_free(self, cmd, context):
+        return self.system_handler.handle_free(cmd, context)
+
+    def handle_df(self, cmd, context):
+        return self.system_handler.handle_df(cmd, context)
+
+    def handle_mount(self, cmd, context):
+        return self.system_handler.handle_mount(cmd, context)
+        
+    def handle_netstat(self, cmd, context):
+        return self.system_handler.handle_netstat(cmd, context)
+
+
+
+
+        
+    def _generate_or_get_content(self, cmd_name, target_path, context):
+        session_id = context.get('session_id', 'unknown')
+        cwd = context.get('cwd')
+        
+        # 0. Check DB (User FS overrides Global FS)
+        abs_path = self._resolve_path(cwd, target_path)
+        client_ip = context.get('client_ip')
+        user = context.get('user')
+        
+        # Check User Uploads first
+        user_node = self.db.get_user_node(client_ip, user, abs_path)
+        if user_node and user_node.get('content'):
+             # print(f"[Session: {session_id}] [{cmd_name}] User DB HIT for {abs_path}")
+             return user_node['content'], 'local'
+        
+        # Check Static Persona Files
+        if hasattr(self, 'system_handler'):
+            static_content = self.system_handler.get_static_file(abs_path)
+            if static_content:
+                return static_content, 'local'
+
+        # Check Global FS
+        node = self.db.get_fs_node(abs_path)
+        if node and node.get('content'):
+             # print(f"[Session: {session_id}] [{cmd_name}] DB HIT for {abs_path}")
+             return node['content'], 'local'
+             
+        # 1. Hardcoded Secret
+        if 'notes.txt' in target_path: return "Hint: RudolphsRedNose2025!", 'local'
+
+        print(f"[Session: {session_id}] [{cmd_name}] DB MISS for {abs_path}. Calling LLM.")
+        
+        # 2. LLM Call
+        lookup_files = context.get('file_list', [])
+        if '/' in target_path: lookup_files = []
+        
+        prompt = f"{cmd_name} {target_path} (INSTRUCTION: Return a JSON object with key 'output' containing realistic file content for '{target_path}'. Be creative.)"
+        
+        resp = self.llm.generate_response(
+            cmd_name, 
+            cwd, context.get('history'), lookup_files, 
+            context.get('known_paths', []), 
+            client_ip=context.get('client_ip'), 
+            honeypot_ip=context.get('honeypot_ip'),
+            override_prompt=prompt
+        )
+        
+        j, t = self._extract_json_or_text(resp)
+        if j and 'output' in j:
+             self.db.update_fs_node(abs_path, os.path.dirname(abs_path), 'file', {}, j['output'])
+             print(f"[Session: {session_id}] [{cmd_name}] Persisted content.")
+             return j['output'], 'llm'
+        
+        return t, 'llm'
+
+    def handle_cat(self, cmd, context):
+        parts = cmd.split()
+        target_path = parts[-1] if len(parts) > 1 else ""
+        content, source = self._generate_or_get_content("cat", target_path, context)
+        return content + "\n", {}, {'source': source, 'cached': source == 'local'}
+
+    def handle_grep(self, cmd, context):
+        # Very basic grep implementation for file targets
+        parts = cmd.split()
+        if len(parts) < 3: return "", {}, {'source': 'local', 'cached': False}
+        
+        pattern = parts[1].strip("'").strip('"')
+        target_path = parts[-1]
+        
+        content, source = self._generate_or_get_content("grep", target_path, context)
+        
+        matches = [line for line in content.split('\n') if pattern in line]
+        return '\n'.join(matches) + "\n", {}, {'source': source, 'cached': source == 'local'}
+
+    def handle_head(self, cmd, context):
+        parts = cmd.split()
+        # simplified parsing: ignore -n for now or just take last arg as file
+        target_path = parts[-1] if len(parts) > 1 else ""
+        content, source = self._generate_or_get_content("head", target_path, context)
+        lines = content.split('\n')
+        return '\n'.join(lines[:10]) + "\n", {}, {'source': source, 'cached': source == 'local'}
+
+    def handle_tail(self, cmd, context):
+        parts = cmd.split()
+        target_path = parts[-1] if len(parts) > 1 else ""
+        content, source = self._generate_or_get_content("tail", target_path, context)
+        lines = content.split('\n')
+        return '\n'.join(lines[-10:]) + "\n", {}, {'source': source, 'cached': source == 'local'}
+
+    def handle_wc(self, cmd, context):
+        parts = cmd.split()
+        target_path = parts[-1]
+        content, source = self._generate_or_get_content("wc", target_path, context)
+        lines = content.split('\n')
+        return f" {len(lines)}  {len(content.split())} {len(content)} {target_path}\n", {}, {'source': source, 'cached': source == 'local'}
+
+    def _handle_interpreter(self, cmd, context, interpreter_name="bash"):
+        import hashlib # Ensure hashlib is imported for this function
+        import json # Ensure json is imported for this function
+        parts = cmd.split()
+        if len(parts) < 2:
+             # Interactive mode not supported well, return fake prompt or error
+             return f"{interpreter_name}: missing file operand\n", {}
+             
+        target_path = parts[1] # script.sh
+        
+        # Get Content (Prioritizing User Uploads)
+        content, source = self._generate_or_get_content(interpreter_name, target_path, context)
+        
+        # If content is short and looks like error (e.g. "cat: ..."), return it as is?
+        # _generate_or_get_content returns LLM generated content if missing.
+        # Ideally we want the REAL content.
+        
+        # We passed the check in process_command? No, this is the handler.
+        
+        print(f"[{interpreter_name}] Executing script: {target_path} (Context len: {len(content)})")
+        
+        prompt = f"The user is running the following {interpreter_name} script found at '{target_path}':\n\n```\n{content}\n```\n\n(INSTRUCTION: Act as the {interpreter_name} interpreter. EXECUTE this script virtually and return ONLY the Standard Output. Do not describe what it does. If it modifies files, include file_modifications in JSON.)"
+        
+        # Call LLM directly or via heuristic?
+        # We use handle_generic logic but force specific prompt?
+        # No, we call llm directly.
+        # We should use cache. db.get_cached_response uses (cmd, cwd).
+        # But here the 'cmd' is 'bash script.sh'. If script content changes, cmd is SAME.
+        # So we MUST include content hash in the cache key.
+        # OR, we construct a "virtual command" for the cache key?
+        # Let's manually check cache with specific key?
+        
+        # Better: The LLM Interface likely doesn't cache. The DB `command_cache` does.
+        # `db.get_cached_response(command, cwd)`
+        # I should append the content hash to the command for caching purposes?
+        # e.g. cache_key_cmd = f"{cmd}::{hash(content)}"
+        
+        content_hash = hashlib.md5(content.encode('utf-8', 'ignore')).hexdigest()
+        cache_cmd_key = f"{cmd}::hash={content_hash}"
+        
+        cached = self.db.get_cached_response(cache_cmd_key, context.get('cwd'))
+        if cached:
+            return self._process_llm_json(json.loads(cached) if cached.startswith('{') else None, cached)
+            
+        # LLM Call
+        history = context.get('history', [])
+        # We pass minimal history to avoid noise, or full history?
+        # Script execution should be stateless mostly unless it uses env vars?
+        # Let's pass history.
+        resp = self.llm.generate_response(prompt, context.get('cwd'), history, context.get('file_list'), context.get('known_paths'))
+        
+        # Cache it
+        self.db.cache_response(cache_cmd_key, context.get('cwd'), resp)
+        
+        j, t = self._extract_json_or_text(resp)
+        res, updates = self._process_llm_json(j, t)
+        return res, updates, {'source': 'llm', 'cached': False}
+
+    def handle_bash(self, cmd, context):
+        return self._handle_interpreter(cmd, context, "bash")
+
+    def handle_sh(self, cmd, context):
+        return self._handle_interpreter(cmd, context, "sh")
+
+    def handle_python(self, cmd, context):
+        return self._handle_interpreter(cmd, context, "python")
+        
+    def handle_python3(self, cmd, context):
+        return self._handle_interpreter(cmd, context, "python3")       
+
+    def handle_md5sum(self, cmd, context):
+        """
+        Local md5sum handler.
+        Hashes real files (uploaded) or generates deterministic hashes for fake files.
+        """
+        parts = cmd.split()
+        if len(parts) < 2:
+            return "md5sum: missing operand\n", {}, {'source': 'local', 'cached': False}
+            
+        target_path = parts[-1] # Simplistic arg parsing
+        cwd = context.get('cwd', '/')
+        abs_path = self._resolve_path(cwd, target_path)
+        
+        # 1. Check Real Persisted File (Uploads)
+        # We need access to UPLOAD_DIR or ask DB where it is?
+        # The DB doesn't store absolute local paths easily for all.
+        # But we can try to see if it's in the User DB as a file.
+        # Ideally, we should unify this, but for now, rely on _generate_or_get_content 
+        # which pulls from DB 'content' field.
+        
+        # NOTE: _generate_or_get_content will either return the DB content 
+        # OR generate it via LLM. This is exactly what we want.
+        # We hash that content.
+        
+        content, source = self._generate_or_get_content("md5sum", target_path, context)
+        
+        # Calculate MD5
+        if isinstance(content, str):
+            content_bytes = content.encode('utf-8', 'ignore')
+        else:
+            content_bytes = content
+            
+        md5 = hashlib.md5(content_bytes).hexdigest()
+        
+        return f"{md5}  {target_path}\n", {}, {'source': source, 'cached': source == 'local'}
+
+    def handle_date(self, cmd, context):
+        return datetime.datetime.now().strftime("%a %b %d %H:%M:%S %Z %Y\n"), {}
+
+    def handle_id(self, cmd, context):
+        user = context.get('user', 'alabaster')
+        # Simulate typical uid/gid
+        if user == 'root':
+            return "uid=0(root) gid=0(root) groups=0(root)\n", {}
+        else:
+            return f"uid=1000({user}) gid=1000({user}) groups=1000({user}),24(cdrom),25(floppy),29(audio),30(dip),44(video),46(plugdev),108(netdev)\n", {}
+
+    def handle_sudo(self, cmd, context):
+        user = context.get('user', 'unknown')
+        return f"{user} is not in the sudoers file. This incident will be reported.\n", {}
+
+    
+    def handle_echo(self, cmd, context):
+        # Basic echo - handles "-e" partially or just returns string
+        # Ignores redirection (handled by shell parser if any, else we print to stdout)
+        # We need to strip "echo "
+        if cmd.strip() == 'echo': return "\n", {}
+        
+        parts = cmd.split(' ', 1)
+        if len(parts) < 2: return "\n", {}
+        
+        args = parts[1]
+        
+        # very naive quote handling
+        if args.startswith('"') and args.endswith('"'):
+            args = args[1:-1]
+        elif args.startswith("'") and args.endswith("'"):
+            args = args[1:-1]
+            
+        return f"{args}\n", {}
+
+    def handle_touch(self, cmd, context):
+        parts = cmd.split()
+        if len(parts) < 2: return "touch: missing file operand\n", {}
+        
+        target_path = parts[1]
+        abs_path = self._resolve_path(context.get('cwd'), target_path)
+        client_ip = context.get('client_ip')
+        user = context.get('user')
+        
+        # Check if exists
+        curr = self.db.get_user_node(client_ip, user, abs_path)
+        if curr:
+            # Update timestamp? Metadata stored as string logic... 
+            # We skip timestamp update for now or simple re-save
+            pass
+        else:
+            # Create empty file
+            self.db.update_user_file(client_ip, user, abs_path, os.path.dirname(abs_path), 'file', 
+                                    {'size': 0, 'permissions': '-rw-r--r--', 'owner': user, 'group': user, 'created': datetime.datetime.now().isoformat()}, "")
+            
+        return "", {'file_modifications': [abs_path]}
+
+    def handle_mkdir(self, cmd, context):
+        parts = cmd.split()
+        if len(parts) < 2: return "mkdir: missing operand\n", {}
+        
+        target_path = parts[1]
+        abs_path = self._resolve_path(context.get('cwd'), target_path)
+        client_ip = context.get('client_ip')
+        user = context.get('user')
+        
+        # Check if exists
+        curr = self.db.get_user_node(client_ip, user, abs_path)
+        if curr:
+            return f"mkdir: cannot create directory '{target_path}': File exists\n", {}
+            
+        self.db.update_user_file(client_ip, user, abs_path, os.path.dirname(abs_path), 'dir', 
+                                {'permissions': 'drwxr-xr-x', 'owner': user, 'group': user}, None)
+        return "", {'file_modifications': [abs_path]}
+    
+    def handle_rmdir(self, cmd, context):
+        parts = cmd.split()
+        if len(parts) < 2: return "rmdir: missing operand\n", {}
+        target_path = parts[1]
+        abs_path = self._resolve_path(context.get('cwd'), target_path)
+        client_ip = context.get('client_ip')
+        user = context.get('user')
+        
+        # Check if exists and is dir
+        curr = self.db.get_user_node(client_ip, user, abs_path)
+        if not curr:
+            return f"rmdir: failed to remove '{target_path}': No such file or directory\n", {}
+        if curr.get('type') != 'dir':
+             return f"rmdir: failed to remove '{target_path}': Not a directory\n", {}
+             
+        # Check if empty from user FS perspective
+        user_files = self.db.list_user_dir(client_ip, user, abs_path)
+        if len(user_files) > 0:
+             return f"rmdir: failed to remove '{target_path}': Directory not empty\n", {}
+             
+        self.db.delete_user_file(client_ip, user, abs_path)
+        return "", {'file_modifications': [abs_path]}
+
+    def handle_rm(self, cmd, context):
+        parts = cmd.split()
+        # handle -rf?
+        flags = [p for p in parts if p.startswith('-')]
+        targets = [p for p in parts if not p.startswith('-') and p != 'rm']
+        
+        if not targets: return "rm: missing operand\n", {}
+        
+        output = ""
+        client_ip = context.get('client_ip')
+        user = context.get('user')
+        
+        for t in targets:
+            abs_path = self._resolve_path(context.get('cwd'), t)
+            # Only checking User FS for deletion simulation
+            curr = self.db.get_user_node(client_ip, user, abs_path)
+            
+            if not curr:
+                # If -f, ignore
+                if not any('f' in f for f in flags):
+                     output += f"rm: cannot remove '{t}': No such file or directory\n"
+                continue
+            
+            if curr.get('type') == 'dir' and not any('r' in f for f in flags):
+                output += f"rm: cannot remove '{t}': Is a directory\n"
+                continue
+                
+            self.db.delete_user_file(client_ip, user, abs_path)
+            
+        return output, {'file_modifications': targets} # Simplified reporting
+
+    def handle_cp(self, cmd, context):
+        parts = cmd.split()
+        # cp src dest
+        # Ignore flags for now
+        args = [p for p in parts if not p.startswith('-') and p != 'cp']
+        if len(args) < 2: return "cp: missing file operand\n", {}
+        
+        src = args[0]
+        dest = args[1]
+        
+        abs_src = self._resolve_path(context.get('cwd'), src)
+        abs_dest = self._resolve_path(context.get('cwd'), dest)
+        
+        # Get Source Content
+        content, source = self._generate_or_get_content("cp", src, context)
+        # Note: _generate calls LLM if missing... we trust it returns content?
+        # If it returns "cat: ...", we might copy error message as content. Risk accepted for now.
+        
+        client_ip = context.get('client_ip')
+        user = context.get('user')
+        
+        # Handle dest directory logic
+        # is dest a dir?
+        dest_node = self.db.get_user_node(client_ip, user, abs_dest)
+        if dest_node and dest_node.get('type') == 'dir':
+            # cp /tmp/foo.txt /home/user/ -> /home/user/foo.txt
+            abs_dest = os.path.join(abs_dest, os.path.basename(abs_src))
+            
+        self.db.update_user_file(client_ip, user, abs_dest, os.path.dirname(abs_dest), 'file',
+                                {'size': len(content), 'permissions': '-rw-r--r--', 'owner': user, 'group': user}, content)
+                                
+        return "", {'file_modifications': [abs_dest]}
+        
+    def handle_mv(self, cmd, context):
+        # reuse cp + rm logic
+        parts = cmd.split()
+        args = [p for p in parts if not p.startswith('-') and p != 'mv']
+        if len(args) < 2: return "mv: missing operand\n", {}
+        
+        src = args[0]
+        dest = args[1]
+        
+        # 1. CP
+        self.handle_cp(f"cp {src} {dest}", context)
+        # 2. RM
+        self.handle_rm(f"rm -rf {src}", context)
+        
+        return "", {} # Silent success assumption
+
+    def handle_wget(self, cmd, context):
+        import random
+        # Simulate network failures
+        parts = cmd.split()
+        if len(parts) < 2: return "wget: missing URL\nUsage: wget [OPTION]... [URL]...", {}
+        
+        target = parts[-1] 
+        domain = target.split('/')[2] if '//' in target else target
+        
+        errors = [
+            f"wget: unable to resolve host address '{domain}'",
+            f"Connecting to {domain}|10.0.0.1|:80... failed: Connection timed out.\nRetrying.\n",
+            f"Connecting to {domain}|1.2.3.4|:443... failed: Network is unreachable."
+        ]
+        
+        return f"--{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}--  {target}\nResolving {domain}... failed: Name or service not known.\n{random.choice(errors)}\n", {}
+
+    def handle_curl(self, cmd, context):
+        import random
+        parts = cmd.split()
+        if len(parts) < 2: return "curl: try 'curl --help' for more information\n", {}
+        
+        target = parts[-1]
+        domain = target.split('/')[2] if '//' in target else target
+
+        errors = [
+            f"curl: (6) Could not resolve host: {domain}",
+            f"curl: (7) Failed to connect to {domain} port 80: Connection refused",
+            f"curl: (28) Connection timed out after 10001 milliseconds"
+        ]
+        
+        # Simulate small delay
+        time.sleep(1.0)
+        return f"{random.choice(errors)}\n", {}
+        
+    def handle_more(self, cmd, context):
+        # Alias to cat for simple non-interactive shell
+        return self.handle_cat(cmd, context)
+
+    def handle_less(self, cmd, context):
+        # Alias to cat for simple non-interactive shell
+        return self.handle_cat(cmd, context)
+
+
+    def handle_ssh(self, cmd, context):
+        import random
+        # ssh user@host or ssh host
+        parts = cmd.split()
+        if len(parts) < 2: return "usage: ssh [-46AaCfGgKkMNnqsTtVvXxYy] [-B bind_interface] ...\n", {}
+        
+        target = parts[-1] # Simplistic
+        if '@' in target:
+             user, host = target.split('@', 1)
+        else:
+             host = target
+             user = context.get('user', 'root')
+             
+        if host in ['localhost', '127.0.0.1', '::1']:
+             # Simulate success (fake login banner)
+             timestamp = datetime.datetime.now().strftime("%a %b %d %H:%M:%S %Y")
+             return f"Last login: {timestamp} from 127.0.0.1\n", {}
+        else:
+             # Random network error
+             time.sleep(1.0)
+             errors = [
+                 f"ssh: connect to host {host} port 22: Connection timed out",
+                 f"ssh: connect to host {host} port 22: Connection refused",
+                 f"ssh: Could not resolve hostname {host}: Name or service not known"
+             ]
+             return f"{random.choice(errors)}\n", {}
+
+    def handle_scp(self, cmd, context):
+        import random
+        # scp source dest
+        # Only handle if dest is localhost or failure
+        # If -t is present, it shouldn't reach here (intercepted by server), but if it does:
+        if '-t' in cmd or '-f' in cmd:
+             return "scp: protocol error: unexpected internal execution\n", {}
+             
+        parts = cmd.split()
+        args = [p for p in parts if not p.startswith('-') and p != 'scp']
+        if len(args) < 2: return "usage: scp [-346BCpqrTv] [-c cipher] [-F ssh_config] ...\n", {}
+        
+        src = args[0]
+        dest = args[1]
+        
+        # Check if dest is remote
+        dest_host = None
+        if ':' in dest:
+             host_part, _ = dest.split(':', 1)
+             if '@' in host_part:
+                 _, dest_host = host_part.split('@', 1)
+             else:
+                 dest_host = host_part
+        
+        # Check if src is remote
+        src_host = None
+        if ':' in src:
+             host_part, _ = src.split(':', 1)
+             if '@' in host_part:
+                 _, src_host = host_part.split('@', 1)
+             else:
+                 src_host = host_part
+
+        remote_host = dest_host or src_host
+        
+        if remote_host and remote_host not in ['localhost', '127.0.0.1', '::1']:
+             time.sleep(1.0)
+             return f"ssh: connect to host {remote_host} port 22: Connection timed out\nlost connection\n", {}
+             
+        # If localhost or local->local, delegate to generic CP?
+        # scp local user@localhost:/tmp/ -> cp local /tmp/
+        # Simplistic mapping
+        
+        real_src = src.split(':')[-1]
+        real_dest = dest.split(':')[-1]
+        
+        return self.handle_cp(f"cp {real_src} {real_dest}", context)
+
+
+    def handle_ps(self, cmd, context):
+        # 1. Parse Flags
+        parts = cmd.split()
+        flags = set()
+        for p in parts[1:]:
+            if p.startswith('-'):
+                for char in p[1:]:
+                    flags.add(char)
+            else:
+                 # handle 'aux' style (no dash)
+                 if 'a' in p: flags.add('a')
+                 if 'u' in p: flags.add('u')
+                 if 'x' in p: flags.add('x')
+
+        # 2. Check Cache for CANONICAL process list
+        # We cache the raw JSON list under a special key so all 'ps' variants share it.
+        # This ensures 'ps -ef' and 'ps aux' show the same PIDs.
+        session_id = context.get('session_id', 'unknown')
+        CACHE_KEY = "_global_process_list"
+        print(f"[Session: {session_id}] [Cache] Checking cache for '{CACHE_KEY}'")
+        cached_resp = self.db.get_cached_response(CACHE_KEY, "/")
+        
+        j = None
+        if cached_resp:
+            print(f"[Session: {session_id}] [Cache] HIT for ps")
+            j, _ = self._extract_json_or_text(cached_resp)
+        else:
+            print(f"[Session: {session_id}] [Cache] MISS for ps")
+
+        if not j or 'processes' not in j:
+            # 3. Request LLM Process List (Cache Miss)
+            print(f"[Session: {session_id}] [LLM] Calling LLM API for 'ps'...")
+            # We ask for 'alabaster' as the placeholder user.
+            prompt = """ps -ef (INSTRUCTION: Return a valid JSON object with key 'processes'.
+Example format:
+{
+  "processes": [
+    {"user": "root", "pid": 1, "ppid": 0, "cpu": 0.0, "mem": 0.1, "start": "10:00", "time": "00:00:05", "command": "/sbin/init"},
+    {"user": "alabaster", "pid": 1001, "ppid": 1, "cpu": 0.0, "mem": 0.2, "start": "10:05", "time": "00:00:01", "command": "-bash"}
+  ]
+}
+Generate realistic processes for a web server (blogofy.com). Include system services, sshd, and user shell.)"""
+            
+            resp = self.llm.generate_response(
+                "ps", 
+                context.get('cwd'), 
+                context.get('history'), 
+                [], 
+                context.get('known_paths', []), 
+                client_ip=context.get('client_ip'), 
+                honeypot_ip=context.get('honeypot_ip'),
+                override_prompt=prompt
+            )
+            
+            j, t = self._extract_json_or_text(resp)
+            
+            # Cache valid result
+            if j and 'processes' in j:
+                # We cache the raw response
+                self.db.cache_response(CACHE_KEY, "/", resp)
+            else:
+                # Fallback to STATIC DATA to prevent loop
+                print(f"[Session: {session_id}] [PS Error] JSON Parse failed. Using STATIC fallback.")
+                j = {
+                  "processes": [
+                    {"user": "root", "pid": 1, "ppid": 0, "cpu": 0.0, "mem": 0.1, "start": "10:00", "time": "00:00:05", "command": "/sbin/init"},
+                    {"user": "root", "pid": 2, "ppid": 0, "cpu": 0.0, "mem": 0.0, "start": "10:00", "time": "00:00:00", "command": "[kthreadd]"},
+                    {"user": "root", "pid": 100, "ppid": 1, "cpu": 0.0, "mem": 0.2, "start": "10:01", "time": "00:00:10", "command": "/usr/sbin/rsyslogd -n"},
+                    {"user": "root", "pid": 420, "ppid": 1, "cpu": 0.0, "mem": 0.5, "start": "10:01", "time": "00:01:23", "command": "/usr/sbin/sshd -D"},
+                    {"user": "www-data", "pid": 800, "ppid": 1, "cpu": 0.1, "mem": 1.2, "start": "10:02", "time": "00:03:00", "command": "nginx: master process /usr/sbin/nginx"},
+                    {"user": "www-data", "pid": 801, "ppid": 800, "cpu": 0.0, "mem": 0.8, "start": "10:02", "time": "00:00:05", "command": "nginx: worker process"},
+                    {"user": "alabaster", "pid": 1337, "ppid": 420, "cpu": 0.1, "mem": 0.8, "start": "10:05", "time": "00:00:02", "command": "-bash"}
+                  ]
+                }
+
+        processes = j['processes']
+        current_user = context.get('user', 'root')
+        
+        # 4. Filter/Format/Substitute
+        
+        show_all = 'e' in flags or 'A' in flags or 'a' in flags or 'x' in flags
+        # Default behavior of 'ps' (no flags) is usually just current tty processes.
+        # But 'ps aux' sets 'a' and 'x'.
+        
+        filtered = []
+        for p_orig in processes:
+             # Deep copy to modify
+             p = p_orig.copy()
+             
+             # Runtime User Substitution
+             if p.get('user') == 'alabaster':
+                 p['user'] = current_user
+                 
+             # Random Noise injection (Simplistic: skip some random high PIDs? No, consistence is better)
+             # User requested "randomly add and remove". 
+             # Let's simple filter logic for now.
+             
+             # Filter based on flags
+             if show_all:
+                 filtered.append(p)
+             else:
+                 # Only current user processes
+                 if p.get('user') == current_user:
+                     filtered.append(p)
+        
+        if not filtered: filtered = processes # Fallback
+        
+        # Sort by PID
+        try:
+             filtered.sort(key=lambda x: int(x.get('pid', 0)))
+        except: pass
+
+        lines = []
+        if 'u' in flags:
+            # USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+            lines.append("USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND")
+            for p in filtered:
+                user = p.get('user', 'root')[:8].ljust(8)
+                pid = str(p.get('pid')).rjust(5)
+                cpu = str(p.get('cpu', '0.0')).rjust(4)
+                mem = str(p.get('mem', '0.0')).rjust(4)
+                vsz = "10000" 
+                rss = "5000"
+                tty = p.get('tty', '?').ljust(8)
+                stat = "Ss"
+                start = p.get('start', '00:00')
+                time_ = p.get('time', '00:00:00')
+                command = p.get('command', '')
+                lines.append(f"{user} {pid} {cpu} {mem} {vsz} {rss} {tty} {stat} {start} {time_} {command}")
+        
+        elif 'f' in flags:
+            # UID        PID  PPID  C STIME TTY          TIME CMD
+            lines.append("UID        PID  PPID  C STIME TTY          TIME CMD")
+            for p in filtered:
+                uid = p.get('user', 'root') 
+                pid = str(p.get('pid')).rjust(5)
+                ppid = str(p.get('ppid', 0)).rjust(5)
+                c = "0"
+                stime = p.get('start', '00:00')
+                tty = p.get('tty', '?').ljust(8)
+                time_ = p.get('time', '00:00:00')
+                command = p.get('command', '')
+                lines.append(f"{uid.ljust(8)} {pid} {ppid} {c} {stime} {tty} {time_} {command}")
+        else:
+            # PID TTY          TIME CMD
+            lines.append("  PID TTY          TIME CMD")
+            for p in filtered:
+                pid = str(p.get('pid')).rjust(5)
+                tty = p.get('tty', '?').ljust(8)
+                time_ = p.get('time', '00:00:00')
+                command = p.get('command', '')
+                lines.append(f"{pid} {tty} {time_} {command}")
+
+        return "\n".join(lines) + "\n", {}
+    
+    def handle_scp_interactive(self, cmd, chan, context):
+        """
+        Handles 'scp -t' (sink/upload) interactively.
+        Enforces Size Limits & Quotas via User Filesystem isolation.
+        """
+        import struct
+        import os
+        
+        try:
+            from .config_manager import config
+        except ImportError:
+            from config_manager import config
+
+        MAX_FILE_SIZE = config.get('upload', 'max_file_size') or 1048576
+        MAX_QUOTA = config.get('upload', 'max_quota_per_ip') or 1048576
+
+        def log_debug(msg):
+            try:
+                with open('/tmp/scp_debug.log', 'a') as f:
+                    f.write(f"{datetime.datetime.now()} [SCP-HANDLER] {msg}\n")
+            except: pass
+
+        log_debug(f"Entered handler. CMD: {cmd}")
+
+        if '-t' not in cmd:
+            log_debug("Not -t mode, exiting.")
+            chan.send("SCP Source mode not fully implemented.\n")
+            chan.send_exit_status(1)
+            return
+
+        try:
+            log_debug("Sending initial ACK (x00)")
+            chan.send(b'\x00')
+        except Exception as e:
+            log_debug(f"Failed to send initial ACK: {e}")
+            return
+
+        while True:
+            command_line = b""
+            while True:
+                try:
+                    b = chan.recv(1)
+                    if not b: 
+                        log_debug("Channel closed (EOF received) during command read.")
+                        return 
+                    if b == b'\n': break
+                    command_line += b
+                except Exception as e:
+                    log_debug(f"Error reading command byte: {e}")
+                    return
+            
+            cmd_str = command_line.decode('utf-8')
+            log_debug(f"Received command string: {cmd_str}")
+            if not cmd_str: break 
+            
+            cmd_char = cmd_str[0]
+            
+            if cmd_char == 'E': 
+                log_debug("Received E (End Dir). Sending ACK.")
+                chan.send(b'\x00')
+                break 
+                
+            if cmd_char == 'T': 
+                log_debug("Received T (Time). Sending ACK.")
+                chan.send(b'\x00') 
+                continue
+                
+            if cmd_char == 'C': 
+                log_debug(f"Received C (File): {cmd_str}")
+                try:
+                    parts = cmd_str[1:].strip().split(' ', 2)
+                    perm = parts[0]
+                    size_str = parts[1]
+                    filename = parts[2]
+                    size = int(size_str)
+                    
+                    # 1. Check Max File Size (Header)
+                    if size > MAX_FILE_SIZE:
+                        log_debug(f"File too large: {size} > {MAX_FILE_SIZE}")
+                        print(f"[SCP] Blocked: File size {size} > Limit {MAX_FILE_SIZE}")
+                        chan.send(b'\x01File too large\n')
+                        return
+
+                    # 2. Check Quota
+                    client_ip = context.get('client_ip')
+                    current_usage = self.db.get_ip_upload_usage(client_ip)
+                    if current_usage + size > MAX_QUOTA:
+                        log_debug(f"Quota exceeded for {client_ip}")
+                        print(f"[SCP] Blocked: Quota exceeded for {client_ip}")
+                        chan.send(b'\x01Quota exceeded\n')
+                        return
+
+                    log_debug("Sending ACK for C command header.")
+                    chan.send(b'\x00') # ACK Header
+                    
+                    # Read Content (Enforce Max Size during read)
+                    content = b""
+                    read_so_far = 0
+                    log_debug(f"Reading content ({size} bytes)...")
+                    while read_so_far < size:
+                        # Safety break if stream exceeds expected size
+                        if read_so_far > MAX_FILE_SIZE:
+                             log_debug("Stream exceeded MAX_FILE_SIZE during read.")
+                             chan.send(b'\x01File too large\n')
+                             return
+                             
+                        chunk_size = min(4096, size - read_so_far)
+                        chunk = chan.recv(chunk_size)
+                        if not chunk: 
+                            log_debug("Unexpected EOF during data read.")
+                            break
+                        content += chunk
+                        read_so_far += len(chunk)
+                    
+                    log_debug("Finished reading content. Waiting for check byte.")
+                    check = chan.recv(1) 
+                    log_debug(f"Received check byte: {check!r}. Sending final ACK.")
+                    chan.send(b'\x00') 
+                    
+                    # SAVE IT (Isolated)
+                    cwd = context.get('cwd', '/')
+                    target_arg = cmd.split('-t')[-1].strip()
+                    if not target_arg or target_arg == '.': target_arg = cwd
+                    
+                    abs_target = self._resolve_path(cwd, target_arg)
+                    
+                    # Join directory logic
+                    # Check global fs OR user fs for directory?
+                    # For simplicity, if target ends in /, treat as dir.
+                    final_path = abs_target
+                    if abs_target.endswith('/'):
+                         final_path = os.path.join(abs_target, filename)
+                    else:
+                         # Check if abs_target is an existing dir
+                         node = self.db.get_fs_node(abs_target)
+                         if node and node.get('type') == 'directory':
+                             final_path = os.path.join(abs_target, filename)
+                             
+                    try:
+                        text_content = content.decode('utf-8')
+                        
+                        # Use USER_FILESYSTEM (Private)
+                        self.db.update_user_file(
+                            client_ip,
+                            context.get('user', 'unknown'),
+                            final_path, 
+                            os.path.dirname(final_path), 
+                            'file', 
+                            {'permissions': '-rwxr-xr-x', 'size': size, 'modified': datetime.datetime.now().strftime("%b %d %H:%M")}, 
+                            text_content
+                        )
+                        print(f"[SCP] Uploaded {filename} to {final_path} ({size} bytes) [User Isolated]")
+                    except UnicodeDecodeError:
+                        print(f"[SCP] Uploaded BINARY {filename} to {final_path} (skipped text save)")
+                        pass
+
+                except Exception as e:
+                    print(f"[SCP] Error parsing C command: {e}")
+                    chan.send(b'\x01SCP Error\n')
+                    return
+
+            if cmd_char == '\x00':
+                break
+
+    def _extract_json_or_text(self, raw):
+        if not raw: return None, ""
+        
+        # 1. Try standard parse (fastest)
+        try:
+            return json.loads(raw), ""
+        except: pass
+        
+        # 2. Cleanup Markdown wrappers
+        clean = raw.strip()
+        if "```" in clean:
+            # Extract content between first ```(json)? and last ```
+            match = re.search(r'```(?:json)?\s*(.*?)```', clean, re.DOTALL)
+            if match:
+                clean = match.group(1).strip()
+            else:
+                 # Fallback cleanup
+                 if clean.startswith("```"):
+                    clean = clean.split('\n', 1)[-1]
+                    if clean.endswith("```"):
+                        clean = clean.rsplit('\n', 1)[0]
+        
+        # 3. Try parse cleaned
+        try:
+            return json.loads(clean), ""
+        except: pass
+
+        # 4. Aggressive Fix: Remove trailing commas in arrays/objects
+        # This regex looks for , followed by closing ] or }
+        clean_fixed = re.sub(r',\s*([\]}])', r'\1', clean)
+        try:
+            return json.loads(clean_fixed), ""
+        except: pass
+
+        # 5. Last Resort: Regex Extraction of the 'output' field
+        # We try to grab the content of "output": "..."
+        # This handles cases where other fields (like generated_files) are malformed
+        try:
+            # Look for "output": "..." ignoring escaped quotes
+            # We use a non-greedy match that respects escaped quotes
+            out_match = re.search(r'"output"\s*:\s*"(.*?)(?<!\\)"', clean, re.DOTALL)
+            if out_match:
+                # We found the output string! But it is raw string content (e.g. includes \n)
+                # We need to unescape it to get real text unless we are lazy.
+                # json.loads of just this string is safest.
+                pseudo_json = '{"output": "' + out_match.group(1) + '"}'
+                return json.loads(pseudo_json), ""
+        except: pass
+        
+        return None, raw
+
+    def handle_base64(self, cmd, context):
+        import base64
+        parts = cmd.split()
+        
+        # Simple parsing
+        # base64 [file] OR base64 -d [file]
+        decode = '-d' in parts or '--decode' in parts
+        
+        target = None
+        for p in parts[1:]:
+            if not p.startswith('-'):
+                target = p
+                break
+                
+        content = ""
+        source = 'local'
+        if target:
+            # Read file
+            content, source = self._generate_or_get_content("base64", target, context)
+        else:
+            return "base64: missing file operand\n", {}, {'source': 'local', 'cached': False}
+            
+        try:
+            if decode:
+                encoded = base64.b64decode(content.strip()).decode('utf-8', errors='replace')
+                return f"{encoded}", {}, {'source': source, 'cached': source == 'local'}
+            else:
+                encoded = base64.b64encode(content.encode('utf-8')).decode('utf-8')
+                # Wrap at 76 chars
+                wrapped = "\n".join(encoded[i:i+76] for i in range(0, len(encoded), 76))
+                return f"{wrapped}\n", {}, {'source': source, 'cached': source == 'local'}
+        except Exception as e:
+            return f"base64: invalid input\n", {}, {'source': source, 'cached': source == 'local'}
+
+
+    def handle_history(self, cmd, context):
+        history = context.get('history', [])
+        out = []
+        for i, (c, _) in enumerate(history):
+            out.append(f" {i+1}  {c}")
+        return "\n".join(out) + "\n", {}
+
+    def handle_su(self, cmd, context):
+        # Always fail authentication
+        # Simulate delay
+        time.sleep(1.5) 
+        return "su: Authentication failure\n", {}
+        
+    def handle_perl(self, cmd, context):
+        return self._handle_interpreter(cmd, context, "perl")
+
+    def handle_awk(self, cmd, context):
+        import shlex
+        import hashlib
+        
+        # AWK is complex. We want to simulate execution on a file.
+        # Try to identify input file.
+        try:
+            parts = shlex.split(cmd)
+        except:
+            return "awk: syntax error\n", {}
+            
+        if len(parts) < 2: return "awk: usage error\n", {}
+        
+        # Heuristic: Find last argument that doesn't start with '-' and isn't the program string (if quoted)
+        # Simplified: If -f is used, next arg is script.
+        # If no -f, first non-flag arg is program. Next args are files.
+        
+        files = []
+        args = parts[1:]
+        skip_next = False
+        program_found = False
+        
+        for i, arg in enumerate(args):
+            if skip_next:
+                skip_next = False
+                continue
+            
+            if arg.startswith('-f'):
+                if arg == '-f': skip_next = True 
+                continue
+                
+            if arg.startswith('-F'): 
+                if len(arg) == 2: skip_next = True
+                continue
+            
+            if arg.startswith('-v'): 
+                if len(arg) == 2: skip_next = True
+                continue
+                
+            if arg.startswith('-'): 
+                continue
+            
+            # Non-flag
+            if not program_found and '-f' not in cmd: 
+                 program_found = True
+                 continue
+            
+            files.append(arg)
+            
+        if not files:
+             return self.handle_generic(cmd, context)
+
+        target_path = files[0]
+        content, source = self._generate_or_get_content("awk_data", target_path, context)
+        
+        content_hash = hashlib.md5(content.encode('utf-8', 'ignore')).hexdigest()
+        cache_key = f"{cmd}::data_hash={content_hash}"
+        
+        print(f"[AWK] Executing with data file: {target_path}")
+        
+        cached = self.db.get_cached_response(cache_key, context.get('cwd'))
+        if cached:
+             # reuse
+             j, t = self._extract_json_or_text(cached)
+             r, u = self._process_llm_json(j, t)
+             return r, u, {'source': 'cache', 'cached': True}
+             
+        # LLM
+        prompt = f"Command: {cmd}\n\nInput File ({target_path}) Content:\n```\n{content[:5000]}\n```\n\n(INSTRUCTION: Execute the awk command on the provided file content. Return ONLY stdout.)"
+        
+        resp = self.llm.generate_response(prompt, context.get('cwd'), context.get('history', []), [], [])
+        
+        self.db.cache_response(cache_key, context.get('cwd'), resp)
+        j, t = self._extract_json_or_text(resp)
+        r, u = self._process_llm_json(j, t)
+        return r, u, {'source': 'llm', 'cached': False}
+
+
+    def handle_chmod(self, cmd, context):
+        parts = cmd.split()
+        if len(parts) < 3: return "chmod: missing operand\n", {}
+        
+        mode = parts[1]
+        target = parts[2]
+        
+        # recursive? -R
+        # ignore flags for now, assume Mode Target
+        if mode.startswith('-'):
+             # handle flags like chmod -R 777 file
+             if len(parts) > 3:
+                 mode = parts[2]
+                 target = parts[3]
+        
+        abs_path = self._resolve_path(context.get('cwd'), target)
+        client_ip = context.get('client_ip')
+        user = context.get('user')
+        
+        curr = self.db.get_user_node(client_ip, user, abs_path)
+        if not curr:
+            return f"chmod: cannot access '{target}': No such file or directory\n", {}
+             
+        # Update permissions in metadata
+        try:
+            meta = json.loads(curr.get('metadata', '{}'))
+        except:
+            meta = {}
+            
+        # Parse mode (octal only for simplicity)
+        # If +x, etc, we just fake it
+        if '+' in mode or '-' in mode and not mode.startswith('-'):
+             # numeric conversion? simple: just set it to strings
+             current_perms = meta.get('permissions', 'rw-r--r--')
+             # Logic to update drwx... is complex.
+             # We just assume success and maybe update string if it looks like octal
+             pass
+        else:
+             # Assume octal, just store it? Or convert to rwx?
+             # For 'ls' to show it, we need rwx string.
+             # quick hack: 777 -> rwxrwxrwx
+             pass
+             
+        # For now, just logging change for simulation, effectively "success"
+        # We don't strictly enforce permissions in honeypot logic anyway
+        return "", {'file_modifications': [abs_path]}

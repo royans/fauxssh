@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fauxssh"
+version = "0.1.0"
+description = "A GenAI-powered SSH Honeypot"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+  {name = "Antigravity", email = "maintainer@example.com"}
+]
+dependencies = [
+    "paramiko",
+    "requests",
+    "python-dotenv"
+]
+
+[project.scripts]
+fauxssh = "ssh_honeypot.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ssh_honeypot*"]
