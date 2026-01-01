@@ -9,6 +9,8 @@ try:
 except ImportError:
     from utils import random_response_delay
 
+import random
+
 class CommandHandler:
     def __init__(self, llm_interface, db):
         self.llm = llm_interface
@@ -151,14 +153,19 @@ class CommandHandler:
             left_cmd = parts[0].strip()
             right_cmd = parts[1].strip()
             
-            # Only intercept if it looks like a grep commands
-            if right_cmd.startswith('grep'):
-                # Execute Left Side
-                # Recurse
-                out_text, updates, meta = self.process_command(left_cmd, context)
-                
-                # Filter Output
-                return self._simple_grep(out_text, right_cmd), updates, meta
+            # Generalized Pipe Support
+            # Recursive execution: Execute left, pass output as stdin to right
+            
+            # Execute Left Side
+            out_text, updates, meta = self.process_command(left_cmd, context)
+            
+            # Prepare context for Right Side
+            # We must copy context to avoid polluting parent scope (though in this design it might be fine)
+            right_context = context.copy()
+            right_context['stdin'] = out_text
+            
+            # Execute Right Side
+            return self.process_command(right_cmd, right_context)
 
         # 0.7 Execution Simulation (Malware/Script Execution)
         # Check if the command refers to a local file (uploaded or generated)
@@ -395,7 +402,13 @@ class CommandHandler:
                          'path': os.path.join(abs_path, fname),
                          'parent_path': abs_path,
                          'type': 'file', 
-                         'metadata': {'permissions': '-rw-r--r--', 'size': 0, 'owner': user or 'root', 'group': user or 'root', 'modified': datetime.datetime.now().strftime("%b %d %H:%M")}
+                         'metadata': {
+                             'permissions': '-rw-r--r--', 
+                             'size': random.randint(100, 15000) if not fname.endswith('.gz') else random.randint(100000, 500000), 
+                             'owner': user or 'root', 
+                             'group': user or 'root', 
+                             'modified': datetime.datetime.now().strftime("%b %d %H:%M")
+                         }
                      }
                      
         all_files = list(file_map.values())
@@ -637,23 +650,44 @@ class CommandHandler:
         return t, 'llm'
 
     def handle_cat(self, cmd, context):
+        if context.get('stdin'):
+             return context['stdin'], {}, {'source': 'pipe', 'cached': False}
+             
         parts = cmd.split()
         target_path = parts[-1] if len(parts) > 1 else ""
+        if not target_path: return "", {}, {} # interactive cat not supported
+        
         content, source = self._generate_or_get_content("cat", target_path, context)
         return content + "\n", {}, {'source': source, 'cached': source == 'local'}
 
     def handle_grep(self, cmd, context):
-        # Very basic grep implementation for file targets
+        # Delegate to _simple_grep for consistent logic (flags -i, -v)
         parts = cmd.split()
-        if len(parts) < 3: return "", {}, {'source': 'local', 'cached': False}
+        if len(parts) < 2: return "", {}, {}
         
-        pattern = parts[1].strip("'").strip('"')
-        target_path = parts[-1]
-        
-        content, source = self._generate_or_get_content("grep", target_path, context)
-        
-        matches = [line for line in content.split('\n') if pattern in line]
-        return '\n'.join(matches) + "\n", {}, {'source': source, 'cached': source == 'local'}
+        content = ""
+        source = 'local'
+        grep_cmd_for_parsing = cmd
+
+        if context.get('stdin'):
+            content = context['stdin']
+            source = 'pipe'
+            # cmd is like "grep pattern"
+        else:
+            if len(parts) < 3: return "", {}, {'source': 'local', 'cached': False}
+            target_path = parts[-1]
+            content, source = self._generate_or_get_content("grep", target_path, context)
+            
+            # Remove filename from cmd so _simple_grep parses pattern correctly from last arg
+            # E.g. "grep -i pattern file" -> "grep -i pattern"
+            grep_cmd_for_parsing = ' '.join(parts[:-1])
+
+        result_text = self._simple_grep(content, grep_cmd_for_parsing)
+        # _simple_grep returns text, we need to ensure newline if needed or just return raw
+        if result_text and not result_text.endswith('\n'):
+             result_text += '\n'
+             
+        return result_text, {}, {'source': source, 'cached': source == 'local'}
 
     def handle_head(self, cmd, context):
         parts = cmd.split()
@@ -672,10 +706,55 @@ class CommandHandler:
 
     def handle_wc(self, cmd, context):
         parts = cmd.split()
-        target_path = parts[-1]
-        content, source = self._generate_or_get_content("wc", target_path, context)
+        
+        # Parse flags
+        show_lines = False
+        show_words = False
+        show_chars = False
+        target_path = None
+        
+        # Check flags (very naive)
+        for p in parts[1:]:
+            if p.startswith('-'):
+                if 'l' in p: show_lines = True
+                if 'w' in p: show_words = True
+                if 'c' in p or 'm' in p: show_chars = True
+            else:
+                target_path = p
+        
+        # Default if no flags
+        if not (show_lines or show_words or show_chars):
+            show_lines = True
+            show_words = True
+            show_chars = True
+
+        content = ""
+        source = 'local'
+        if context.get('stdin'):
+            content = context['stdin']
+            source = 'pipe'
+            target_path = "" # No filename for stdin
+        else:
+            if not target_path: return "0 0 0\n", {}, {}
+            content, source = self._generate_or_get_content("wc", target_path, context)
+
         lines = content.split('\n')
-        return f" {len(lines)}  {len(content.split())} {len(content)} {target_path}\n", {}, {'source': source, 'cached': source == 'local'}
+        if lines and lines[-1] == '': lines.pop() # Trailing newline handling
+        
+        # Counts
+        c_lines = len(lines)
+        c_words = len(content.split())
+        c_chars = len(content)
+        
+        out_parts = []
+        if show_lines: out_parts.append(str(c_lines))
+        if show_words: out_parts.append(str(c_words))
+        if show_chars: out_parts.append(str(c_chars))
+        
+        if target_path:
+            out_parts.append(target_path)
+            
+        return " ".join(out_parts) + "\n", {}, {'source': source, 'cached': source == 'local'}
 
     def _handle_interpreter(self, cmd, context, interpreter_name="bash"):
         import hashlib # Ensure hashlib is imported for this function

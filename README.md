@@ -26,7 +26,16 @@ See [SECURITY.md](SECURITY.md) for detailed risk warnings and reporting instruct
 
 **Do not run this on your personal workstation or mission-critical servers.**
 
-## Installation
+## Quick Start
+
+### 🌐 Live Demo
+You can try FauxSSH right now! It is running on **blogofy.com** on standard port 22.
+```bash
+ssh blogofy.com
+# Password: any (except root)
+```
+
+### 1. Installation
 
 1.  **Clone the repository:**
     ```bash
