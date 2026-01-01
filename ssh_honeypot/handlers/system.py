@@ -17,15 +17,21 @@ class SystemHandler(BaseHandler):
             {"fs": "/dev/sda15", "mount": "/boot/efi", "size": "124M", "used": "6.1M", "avail": "118M", "use": "5%", "type": "vfat"}
         ]
         
-        # Static File Registry for Persona Consistency (Debian 9)
+        # Static File Registry for Persona Consistency (Dynamic from Config)
+        k_rel = config.get('persona', 'kernel_release') or "5.10.0-21-cloud-amd64"
+        k_ver = config.get('persona', 'kernel_version') or "#1 SMP Debian 5.10.162-1 (2023-01-21)"
+        d_ver = config.get('persona', 'distro_version_id') or "11"
+        d_pretty = config.get('persona', 'distro_pretty_name') or "Debian GNU/Linux 11 (bullseye)"
+        d_version_text = config.get('persona', 'distro_version') or "11 (bullseye)"
+
         self.STATIC_FILES = {
-            '/etc/issue': "Debian GNU/Linux 9 \\n \\l\n\n",
-            '/etc/debian_version': "9.13\n",
-            '/proc/version': "Linux version 4.9.0-19-amd64 (debian-kernel@lists.debian.org) (gcc version 6.3.0 20170516 (Debian 6.3.0-18+deb9u1) ) #1 SMP Debian 4.9.320-2 (2022-06-30)\n",
-            '/etc/os-release': """PRETTY_NAME="Debian GNU/Linux 9 (stretch)"
+            '/etc/issue': f"Debian GNU/Linux {d_ver} \\n \\l\n\n",
+            '/etc/debian_version': f"{d_ver}.7\n",
+            '/proc/version': f"Linux version {k_rel} (debian-kernel@lists.debian.org) (gcc-10 (Debian 10.2.1-6) 10.2.1 20210110) {k_ver}\n",
+            '/etc/os-release': f"""PRETTY_NAME="{d_pretty}"
 NAME="Debian GNU/Linux"
-VERSION_ID="9"
-VERSION="9 (stretch)"
+VERSION_ID="{d_ver}"
+VERSION="{d_version_text}"
 ID=debian
 HOME_URL="https://www.debian.org/"
 SUPPORT_URL="https://www.debian.org/support"
@@ -88,8 +94,8 @@ BUG_REPORT_URL="https://bugs.debian.org/"
             nodename = config.get('server', 'hostname') or nodename
         except: pass
         
-        kernel_release = "4.9.0-19-amd64"
-        kernel_version = "#1 SMP Debian 4.9.320-2 (2022-06-30)"
+        kernel_release = "5.10.0-21-cloud-amd64"
+        kernel_version = "#1 SMP Debian 5.10.162-1 (2023-01-21)"
         machine = "x86_64"
         processor = "unknown"
         hardware_platform = "unknown"

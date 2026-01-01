@@ -145,4 +145,4 @@ FauxSSH can serve as an interesting case study for **Deception Technology** and 
 ## Contact
 
 For questions, feedback, or educational collaboration:
-*   **Email**: royans@tharakan.org
+*   **Email**: royans@gmail.com

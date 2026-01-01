@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-  {name = "Royans Tharakan", email = "royans@tharakan.org"}
+  {name = "Royans Tharakan", email = "royans@gmail.com"}
 ]
 dependencies = [
     "paramiko",

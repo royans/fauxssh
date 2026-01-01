@@ -32,11 +32,21 @@ class TestAuthRestrictions(unittest.TestCase):
         # Disable LLM
         ssh_honeypot.server.llm.api_key = ""
         
+        # Mock Anti-Harvesting to avoid blocking during tests
+        from unittest.mock import MagicMock
+        cls.original_get_creds = ssh_honeypot.server.db.get_unique_creds_last_24h
+        ssh_honeypot.server.db.get_unique_creds_last_24h = MagicMock(return_value=set())
+        
         if not is_server_running(TEST_PORT):
             cls.server_thread = threading.Thread(target=server_main)
             cls.server_thread.daemon = True
             cls.server_thread.start()
             time.sleep(2)
+            
+    @classmethod
+    def tearDownClass(cls):
+        # Restore original method
+        ssh_honeypot.server.db.get_unique_creds_last_24h = cls.original_get_creds
 
     def test_root_login_fail(self):
         client = paramiko.SSHClient()

@@ -119,6 +119,12 @@ class HoneyDB(DatabaseBackend):
             c.execute("ALTER TABLE auth_events ADD COLUMN fingerprint TEXT")
         except sqlite3.OperationalError:
             pass
+            
+        # Custom Migration for interactions source
+        try:
+            c.execute("ALTER TABLE interactions ADD COLUMN source TEXT")
+        except sqlite3.OperationalError:
+            pass
 
         conn.commit()
         conn.close()
@@ -165,10 +171,10 @@ class HoneyDB(DatabaseBackend):
         conn.commit()
         conn.close()
 
-    def log_interaction(self, session_id, cwd, command, response, source="unknown", was_cached=False):
+    def log_interaction(self, session_id, cwd, command, response, source="unknown", was_cached=False, duration_ms=0, request_md5=None):
         conn = self._get_conn()
-        conn.execute("INSERT INTO interactions (session_id, cwd, command, response) VALUES (?, ?, ?, ?)",
-                     (session_id, cwd, command, response))
+        conn.execute("INSERT INTO interactions (session_id, cwd, command, response, source) VALUES (?, ?, ?, ?, ?)",
+                     (session_id, cwd, command, response, source))
         conn.commit()
         conn.close()
 
@@ -198,7 +204,9 @@ class HoneyDB(DatabaseBackend):
                 "command": command,
                 "response_len": len(response),
                 "source": source,
-                "cached": was_cached
+                "cached": was_cached,
+                "response_time_ms": duration_ms,
+                "request_md5": request_md5
             }
             
             # Append to log file (assume data/honeypot.json.log based on DB Path)
@@ -343,3 +351,34 @@ class HoneyDB(DatabaseBackend):
          conn.execute("DELETE FROM user_filesystem WHERE ip=? AND username=? AND path=?", (ip, username, path))
          conn.commit()
          conn.close()
+
+    def get_unique_creds_last_24h(self, ip):
+        """
+        Returns a set of unique (username, password) tuples that successfully logged in from this IP in the last 24 hours.
+        Considers both 'sessions' (active/completed) and 'auth_events' (successful logins).
+        """
+        cutoff = datetime.datetime.now() - datetime.timedelta(hours=24)
+        
+        conn = self._get_conn()
+        c = conn.cursor()
+        
+        creds = set()
+        
+        # 1. Check sessions table (successfully established sessions)
+        try:
+             c.execute("SELECT username, password FROM sessions WHERE remote_ip = ? AND start_time > ?", (ip, cutoff))
+             for row in c.fetchall():
+                 creds.add((row[0], row[1]))
+        except Exception as e:
+             print(f"Error querying sessions for creds: {e}")
+
+        # 2. Check auth_events (successful auths might not always result in a full session record depending on flow)
+        try:
+             c.execute("SELECT username, auth_data FROM auth_events WHERE client_ip = ? AND success = 1 AND auth_method='password' AND timestamp > ?", (ip, cutoff))
+             for row in c.fetchall():
+                 creds.add((row[0], row[1]))
+        except Exception as e:
+             print(f"Error querying auth_events for creds: {e}")
+             
+        conn.close()
+        return creds

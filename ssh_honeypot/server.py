@@ -4,6 +4,7 @@ import paramiko
 import os
 import time
 import json
+import random
 try:
     from .honey_db import HoneyDB
     from .llm_interface import LLMInterface
@@ -165,6 +166,35 @@ class HoneypotServer(paramiko.ServerInterface):
         self.username = username
         self.password = password
         
+        # Exponential Login Rejection (Anti-Harvesting)
+        # Exponential Login Rejection (Anti-Harvesting)
+        # Check if this IP has already compromised too many unique usernames in the last 24h
+        try:
+            # Get set of (username, password) tuples that worked
+            existing_creds = db.get_unique_creds_last_24h(self.client_ip)
+            
+            # Check if this EXACT credential pair has worked before
+            if (username, password) not in existing_creds:
+                # This is a NEW credential candidate (either new user, or existing user with new password)
+                
+                # Count unique usernames already compromised
+                unique_users = set(u for u, p in existing_creds)
+                count = len(unique_users)
+                
+                if count >= 5:
+                    # Hard Block: Too many unique successful logins
+                    print(f"[!] Anti-Harvesting: Blocking {self.client_ip} for user '{username}' (Limit Reached: {count})")
+                    return paramiko.AUTH_FAILED
+                
+                # Probability Rejection: 1->20%, 2->40%, 3->60%, 4->80%
+                prob = count / 5.0
+                if random.random() < prob:
+                     print(f"[!] Anti-Harvesting: Randomly blocking {self.client_ip} for user '{username}' (Prob: {prob:.2f})")
+                     return paramiko.AUTH_FAILED
+
+        except Exception as e:
+            print(f"[!] Error in Anti-Harvesting check: {e}")
+
         success = (username != 'root')
         
         client_version = "unknown"
@@ -425,7 +455,18 @@ def _handle_connection_logic(client, addr):
                      f.write(f"{time.time()} [SERVER] Exception: {e}\n")
                  return
 
+        start_time = time.time()
         resp_text, modifications, metadata = handler.process_command(cmd, context)
+        duration = time.time() - start_time
+        duration_ms = round(duration * 1000, 2)
+        
+        # Compute Request MD5
+        import hashlib
+        try:
+            cmd_hash = hashlib.md5(cmd.encode('utf-8')).hexdigest()
+        except:
+            cmd_hash = "unknown"
+            
         print(f"[DEBUG] Exec '{cmd}' -> Response Len: {len(resp_text)}")
         
         # Log Interaction
@@ -435,7 +476,9 @@ def _handle_connection_logic(client, addr):
             cmd, 
             resp_text, 
             source=metadata.get('source', 'unknown'), 
-            was_cached=metadata.get('cached', False)
+            was_cached=metadata.get('cached', False),
+            duration_ms=duration_ms,
+            request_md5=cmd_hash
         )
 
         try:
@@ -507,7 +550,17 @@ def _handle_connection_logic(client, addr):
                         'known_paths': list(vfs.keys())
                     }
                     
+                    start_time = time.time()
                     resp_text, updates, metadata = handler.process_command(cmd, context)
+                    duration = time.time() - start_time
+                    duration_ms = round(duration * 1000, 2)
+                    
+                    # Compute Request MD5
+                    import hashlib
+                    try:
+                        cmd_hash = hashlib.md5(cmd.encode('utf-8')).hexdigest()
+                    except:
+                        cmd_hash = "unknown"
                     
                     llm_call_count += 1 
 
@@ -557,7 +610,9 @@ def _handle_connection_logic(client, addr):
                         cmd, 
                         resp_text, 
                         source=metadata.get('source', 'unknown'), 
-                        was_cached=metadata.get('cached', False)
+                        was_cached=metadata.get('cached', False),
+                        duration_ms=duration_ms,
+                        request_md5=cmd_hash
                     )
                     
                     # Manual JSON logging removed (handled by db.log_interaction)

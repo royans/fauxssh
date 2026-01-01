@@ -76,8 +76,18 @@ class CommandHandler:
              user = context.get('user', 'root')
              client_ip = context.get('client_ip', '192.168.1.150')
              
-             uname = "Linux npc-main-server-01 5.10.0-21-cloud-amd64 #1 SMP Debian 5.10.162-1 (2023-01-21) x86_64"
-             arch = "x86_64"
+             uname = config.get('persona', 'kernel_version') or "Linux" # Actually custom fmt
+             # Recon wants "Unix" style? No, it echoes $uname.
+             # In _handle_known_recon line 78, it was "Linux ... ...".
+             # That matches `uname -a`.
+             # So I should construct it.
+             k_name = config.get('persona', 'kernel_name') or "Linux"
+             k_rel = config.get('persona', 'kernel_release') or "5.10.0-21-cloud-amd64"
+             k_ver = config.get('persona', 'kernel_version') or "#1 SMP Debian 5.10.162-1 (2023-01-21)"
+             k_mach = config.get('persona', 'machine') or "x86_64"
+             
+             uname = f"{k_name} npc-main-server-01 {k_rel} {k_ver} {k_mach}"
+             arch = k_mach
              uptime = "202654.32" 
              cpus = "128"
              cpu_model = "Intel(R) Xeon(R) Platinum 8480+" 
@@ -1325,15 +1335,16 @@ class CommandHandler:
         # or just kernel name if no flags. 
         # Actually, let's be slightly smarter since the bot requests "-s -v -n -r -m".
         
-        # Hardcoded Persona Values (Debian 8)
-        kernel_name = "Linux"
+        # Hardcoded Persona Values (Debian 11)
+        kernel_name = config.get('persona', 'kernel_name') or "Linux"
         nodename = config.get('server', 'hostname') or "npc-main-server-01"
-        kernel_release = "3.16.0-4-amd64"
-        kernel_version = "#1 SMP Debian 3.16.7-ckt11-1 (2015-05-24)"
-        machine = "x86_64"
-        processor = "x86_64"
-        hardware_platform = "x86_64"
-        os_name = "GNU/Linux"
+        
+        kernel_release = config.get('persona', 'kernel_release') or "5.10.0-21-cloud-amd64"
+        kernel_version = config.get('persona', 'kernel_version') or "#1 SMP Debian 5.10.162-1 (2023-01-21)"
+        machine = config.get('persona', 'machine') or "x86_64"
+        processor = config.get('persona', 'processor') or "x86_64"
+        hardware_platform = config.get('persona', 'hardware_platform') or "x86_64"
+        os_name = config.get('persona', 'os_name') or "GNU/Linux"
         
         output_parts = []
         
@@ -1408,7 +1419,8 @@ d8:00.0 3D controller: NVIDIA Corporation H100 PCIe [Hopper] (rev a1)
     def handle_dmidecode(self, cmd, context):
         # Handle specific processor-version check
         if '-s processor-version' in cmd or '--string processor-version' in cmd:
-            return "Intel(R) Xeon(R) Platinum 8480+\n", {}, {'source': 'local', 'cached': False}
+            proc_ver = config.get('persona', 'processor_version') or "Intel(R) Xeon(R) Platinum 8480+"
+            return f"{proc_ver}\n", {}, {'source': 'local', 'cached': False}
         return self.handle_generic(cmd, context)
 
     def handle_ps(self, cmd, context):
