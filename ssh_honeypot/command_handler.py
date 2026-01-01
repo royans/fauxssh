@@ -11,6 +11,11 @@ except ImportError:
 
 import random
 
+try:
+    from .config_manager import config
+except ImportError:
+    from config_manager import config
+
 class CommandHandler:
     def __init__(self, llm_interface, db):
         self.llm = llm_interface
@@ -236,6 +241,19 @@ class CommandHandler:
             else:
                 return res[0], res[1], {'source': 'local', 'cached': False}
         else:
+            # Fallback: Try basename (e.g. /bin/ls -> ls, /bin/./uname -> uname)
+            normalized_base = os.path.basename(base_cmd)
+            handler_name_norm = f"handle_{normalized_base}"
+            if hasattr(self, handler_name_norm):
+                random_response_delay(0.5, 1.5)
+                # We pass the ORIGINAL cmd to the handler, it must handle parsing if needed.
+                res = getattr(self, handler_name_norm)(cmd, context)
+                 # Allow handlers to return custom metadata (esp. for hybrid handlers like cat)
+                if len(res) == 3:
+                    return res[0], res[1], res[2]
+                else:
+                    return res[0], res[1], {'source': 'local', 'cached': False}
+            
             return self.handle_generic(cmd, context)
 
     def _is_allowed(self, cmd):
@@ -568,9 +586,6 @@ class CommandHandler:
     
     def handle_hostname(self, cmd, context):
         return self.system_handler.handle_hostname(cmd, context)
-
-    def handle_uname(self, cmd, context):
-        return self.system_handler.handle_uname(cmd, context)
 
     def handle_uptime(self, cmd, context):
         return self.system_handler.handle_uptime(cmd, context)
@@ -1159,6 +1174,52 @@ class CommandHandler:
         
         return self.handle_cp(f"cp {real_src} {real_dest}", context)
 
+
+    def handle_uname(self, cmd, context):
+        # Support basic flags: -a, -s, -n, -r, -v, -m, -p, -i, -o
+        # Default (no args) is -s
+        # We ignore flags for now and just return a standard "all" string if -a or multiple flags,
+        # or just kernel name if no flags. 
+        # Actually, let's be slightly smarter since the bot requests "-s -v -n -r -m".
+        
+        # Hardcoded Persona Values (Debian 8)
+        kernel_name = "Linux"
+        nodename = config.get('server', 'hostname') or "npc-main-server-01"
+        kernel_release = "3.16.0-4-amd64"
+        kernel_version = "#1 SMP Debian 3.16.7-ckt11-1 (2015-05-24)"
+        machine = "x86_64"
+        processor = "x86_64"
+        hardware_platform = "x86_64"
+        os_name = "GNU/Linux"
+        
+        output_parts = []
+        
+        args = cmd.split()[1:]
+        flags = set()
+        for arg in args:
+            if arg.startswith('-'):
+                for char in arg[1:]:
+                    flags.add(char)
+        
+        if not flags:
+            flags.add('s')
+            
+        if 'a' in flags:
+            # -a = -snrvmo (usually)
+            return f"{kernel_name} {nodename} {kernel_release} {kernel_version} {machine} {os_name}\n", {}, {'source': 'local', 'cached': False}
+
+        # Order matters: s n r v m p i o
+        out = []
+        if 's' in flags: out.append(kernel_name)
+        if 'n' in flags: out.append(nodename)
+        if 'r' in flags: out.append(kernel_release)
+        if 'v' in flags: out.append(kernel_version)
+        if 'm' in flags: out.append(machine)
+        if 'p' in flags: out.append(processor)
+        if 'i' in flags: out.append(hardware_platform)
+        if 'o' in flags: out.append(os_name)
+        
+        return " ".join(out) + "\n", {}, {'source': 'local', 'cached': False}
 
     def handle_nvidia_smi(self, cmd, context):
         output = """Wed Dec 31 19:12:44 2025       

@@ -219,17 +219,17 @@ class TestCommandHandler:
         context = {'hostname': 'testbox'}
         
         # Default
-        resp, _ = handler.handle_uname("uname", context)
+        resp, _, _ = handler.handle_uname("uname", context)
         assert "Linux" in resp
         
         # Flag -a
-        resp_a, _ = handler.handle_uname("uname -a", context)
+        resp_a, _, _ = handler.handle_uname("uname -a", context)
         assert "Linux" in resp_a
         assert "x86_64" in resp_a
         
         # Flag -r
-        resp_r, _ = handler.handle_uname("uname -r", context)
-        assert "4.9.0" in resp_r
+        resp_r, _, _ = handler.handle_uname("uname -r", context)
+        assert "3.16" in resp_r
 
     def test_handle_ps(self, handler):
         context = {'user': 'root'}
