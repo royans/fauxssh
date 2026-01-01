@@ -28,7 +28,7 @@ class SecurityFilter:
         ]
         
         # Length limit to prevent token exhaustion DoS before it hits LLM
-        self.MAX_INPUT_LENGTH = 2000 
+        self.MAX_INPUT_LENGTH = 50000 
 
     def validate_input(self, user_input):
         """

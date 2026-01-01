@@ -38,7 +38,7 @@ class TestSecurityFilter(unittest.TestCase):
             self.assertIn("Injection detected", reason)
 
     def test_length_limit(self):
-        long_str = "a" * 2001
+        long_str = "a" * 50001
         safe, reason = self.sf.validate_input(long_str)
         self.assertFalse(safe, "Failed length check")
         self.assertIn("length exceeded", reason)

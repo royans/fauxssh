@@ -58,7 +58,8 @@ class CommandHandler:
             'tar', 'zip', 'unzip', 'gzip', 'gunzip', 'md5sum',
             'ssh', 'ping',
             'ifconfig', 'ip', 'netstat', 'ss', 'route', 'mount',
-            'python', 'python3', 'perl', 'bash', 'sh', 'base64'
+            'python', 'python3', 'perl', 'bash', 'sh', 'base64',
+            'dmidecode', 'lscpu', 'lspci'
         }
         self.HONEYTOKENS = {"aws_keys.txt", "id_rsa_backup", "wallet.dat"}
         self.FILESYSTEMS = [
@@ -68,6 +69,30 @@ class CommandHandler:
             {"fs": "/dev/sda15", "mount": "/boot/efi", "size": "124M", "used": "6.1M", "avail": "118M", "use": "5%", "type": "vfat"}
         ]
 
+
+    def _handle_known_recon(self, cmd, context):
+        # Deterministic handler for frequent botnet recon script
+        if 'echo "UNAME:$uname"' in cmd and 'echo "GPU:$gpu_info"' in cmd:
+             user = context.get('user', 'root')
+             client_ip = context.get('client_ip', '192.168.1.150')
+             
+             uname = "Linux npc-main-server-01 5.10.0-21-cloud-amd64 #1 SMP Debian 5.10.162-1 (2023-01-21) x86_64"
+             arch = "x86_64"
+             uptime = "202654.32" 
+             cpus = "128"
+             cpu_model = "Intel(R) Xeon(R) Platinum 8480+" 
+             gpu_info = "00:00.0 3D controller: NVIDIA Corporation H100 PCIe [Hopper] (rev a1)"
+             
+             # Realistic help texts (truncated for brevity but sufficient for recon)
+             ls_help = "Usage: ls [OPTION]... [FILE]... List information about the FILEs (the current directory by default). Sort entries alphabetically if none of -cftuvSUX nor --sort is specified.  Mandatory arguments to long options are mandatory for short options too.   -a, --all                  do not ignore entries starting with .   -A, --almost-all           do not list implied . and ..       --author               with -l, print the author of each file   -b, --escape               print C-style escapes for nongraphic characters       --block-size=SIZE      with -l, scale sizes by SIZE when printing them;                              e.g., '--block-size=M'; see SIZE format below    -B, --ignore-backups       do not list implied entries ending with ~   -c                         with -lt: sort by, and show, ctime (time of last                              modification of file status information);                              with -l: show ctime and sort by name;                              otherwise: sort by ctime, newest first    -C                         list entries by columns       --color[=WHEN]         color the output WHEN; more info below   -d, --directory            list directories themselves, not their contents   -D, --dired                generate output designed for Emacs' dired mode"
+             
+             cat_help = "Usage: cat [OPTION]... [FILE]... Concatenate FILE(s) to standard output.  With no FILE, or when FILE is -, read standard input.    -A, --show-all           equivalent to -vET   -b, --number-nonblank    number nonempty output lines, overrides -n   -e                       equivalent to -vE   -E, --show-ends          display $ at end of each line   -n, --number             number all output lines   -s, --squeeze-blank      suppress repeated empty output lines   -t                       equivalent to -vT   -T, --show-tabs          display TAB characters as ^I   -u                       (ignored)   -v, --show-nonprinting   use ^ and M- notation, except for LFD and TAB       --help     display this help and exit       --version  output version information and exit  Examples:   cat f - g  Output f's contents, then standard input, then g's contents.   cat        Copy standard input to standard output.  GNU coreutils online help: <https://www.gnu.org/software/coreutils/> Full documentation <https://www.gnu.org/software/coreutils/cat> or available locally via: info '(coreutils) cat invocation'"
+             
+             last = f"root     pts/0        192.168.1.55     Tue Oct 27 10:00   still logged in\n{user}     pts/1        {client_ip}     Wed Oct 28 10:00   still logged in"
+             
+             response = f"UNAME:{uname}\nARCH:{arch}\nUPTIME:{uptime}\nCPUS:{cpus}\nCPU_MODEL:{cpu_model}\nGPU:{gpu_info}\nCAT_HELP:{cat_help}\nLS_HELP:{ls_help}\nLAST:{last}\n"
+             return response, {}, {'source': 'simulated', 'cached': False}
+        return None
 
     def process_command(self, cmd, context):
         """
@@ -89,6 +114,12 @@ class CommandHandler:
             print(f"[SECURITY] Blocked Input: {cmd} Reason: {reason}")
             # Log this? self.db.log_interaction(...) - Optional
             return f"bash: command blocked by security policy: {reason}\n", {}, {'source': 'security', 'cached': False}
+
+        # 0. Special Recon Script Interception (Botnet optimization)
+        recon_resp = self._handle_known_recon(cmd, context)
+        if recon_resp:
+            print(f"[Handler] Intercepted known recon script from {client_ip}")
+            return recon_resp
 
         # 0. Complex Chain / Long Command Handling
         # If the command is very long or involves complex chaining/logic that our simple emulation
@@ -287,7 +318,7 @@ class CommandHandler:
         if base_cmd in self.READ_ONLY_COMMANDS: return True
         return False
 
-    def _process_llm_json(self, r_json, r_text, vfs=None, cwd=None):
+    def _process_llm_json(self, r_json, r_text, vfs=None, cwd=None, user=None):
         """
         Standardizes return format.
         Output: (text_output, updates)
@@ -301,6 +332,11 @@ class CommandHandler:
             updates['file_modifications'] = r_json.get('file_modifications')
         else:
             output_text = r_text
+        
+        # Post-Processing: Replace 'alabaster' artifact with actual user
+        if user and output_text:
+            output_text = output_text.replace("alabaster", user)
+            output_text = output_text.replace("Alabaster", user.capitalize())
         
         return output_text, updates
 
@@ -415,6 +451,7 @@ class CommandHandler:
         vfs = context.get('vfs')
         history = context.get('history')
         session_id = context.get('session_id', 'unknown')
+        user = context.get('user')
         
         # 1. Check Cache (Moved here)
         print(f"[Session: {session_id}] [Cache] Checking cache for '{cmd}' in '{cwd}'")
@@ -423,7 +460,7 @@ class CommandHandler:
         if response_json or response_text:
             if "Resource temporarily unavailable" not in str(response_json) and "Resource temporarily unavailable" not in response_text:
                  print(f"[Session: {session_id}] [Cache] HIT")
-                 out, up = self._process_llm_json(response_json, response_text, vfs=vfs, cwd=cwd)
+                 out, up = self._process_llm_json(response_json, response_text, vfs=vfs, cwd=cwd, user=user)
                  return out, up, {'source': 'cache', 'cached': True}
         
         print(f"[Session: {session_id}] [Cache] MISS")
@@ -449,7 +486,7 @@ class CommandHandler:
         if "Error: AI Core Offline" not in resp and "Resource temporarily unavailable" not in resp:
             self.db.cache_response(cmd, cwd, resp)
 
-        out, up = self._process_llm_json(j, t)
+        out, up = self._process_llm_json(j, t, user=user)
         return out, up, {'source': 'llm', 'cached': False}
 
     def handle_ls(self, cmd, context):
@@ -1356,18 +1393,23 @@ class CommandHandler:
         return output, {}, {'source': 'local', 'cached': False}
 
     def handle_lspci(self, cmd, context):
-        # Realistic lspci for a high-end server
+        # Realistic lspci for a high-end server (Dual H100)
         output = """00:00.0 Host bridge: Intel Corporation 440FX - 82441FX PMC [Natoma] (rev 02)
 00:01.0 ISA bridge: Intel Corporation 82371SB PIIX3 ISA [Natoma/Triton II]
 00:01.3 Bridge: Intel Corporation 82371AB/EB/MB PIIX4 ACPI (rev 03)
 00:02.0 VGA compatible controller: Cirrus Logic GD 5446
 00:03.0 Ethernet controller: Red Hat, Inc. Virtio network device
 00:04.0 SCSI storage controller: Red Hat, Inc. Virtio block device
-00:05.0 SCSI storage controller: Red Hat, Inc. Virtio block device
-3b:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
-d8:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+3b:00.0 3D controller: NVIDIA Corporation H100 PCIe [Hopper] (rev a1)
+d8:00.0 3D controller: NVIDIA Corporation H100 PCIe [Hopper] (rev a1)
 """
         return output, {}, {'source': 'local', 'cached': False}
+
+    def handle_dmidecode(self, cmd, context):
+        # Handle specific processor-version check
+        if '-s processor-version' in cmd or '--string processor-version' in cmd:
+            return "Intel(R) Xeon(R) Platinum 8480+\n", {}, {'source': 'local', 'cached': False}
+        return self.handle_generic(cmd, context)
 
     def handle_ps(self, cmd, context):
         # 1. Parse Flags

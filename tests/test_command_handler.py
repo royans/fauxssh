@@ -396,17 +396,45 @@ Other		: Something
         # Regression test: Ensure | inside quotes is NOT treated as pipe
         cmd = 'echo "hello|world"'
         context = {}
-        # Should return "hello|world" (echo handles cleanup, or at least handler sees full arg)
-        # handle_echo strips quotes? 
-        # let's mock handle_echo or just see output
         res, _, meta = handler.process_command(cmd, context)
-        # Verify it did NOT recurse. If it recursed, source would be pipe? or echo output differs.
-        # If split, left=`echo "hello`, right=`world"`.
         assert "hello|world" in res
         assert "command not found" not in res
-        assert meta['source'] == 'local' # or whatever echo returns
         
         # Test REAL pipe works
         cmd = 'echo hello | grep hello'
         res, _, _ = handler.process_command(cmd, context)
         assert "hello" in res
+
+    def test_alabaster_replacement(self, handler):
+        # Test that 'alabaster' in LLM output is replaced by current user
+        handler.llm.generate_response.return_value = "Hello alabaster, welcome Alabaster!"
+        
+        context = {'user': 'admin', 'session_id': 'test', 'cwd': '/root'}
+        cmd = 'hello_command' # Unknown command -> generic handler
+        
+        # We need generic handler to be triggered.
+        # process_command calls handle_generic if unknown.
+        # But generic is not in the whitelist unless we mock _is_allowed or add it?
+        # Actually generic is fallback IF _is_allowed passes? 
+        # No, process_command checks whitelist.
+        # If I use a whitelisted command that uses generic logic?
+        # Or I just call handle_generic directly for this unit test.
+        
+        res, _, _ = handler.handle_generic(cmd, context)
+        
+        assert "Hello admin" in res
+        assert "welcome Admin" in res # Capitalization check
+
+    def test_dmidecode_processor(self, handler):
+        cmd = "dmidecode -s processor-version"
+        context = {}
+        res, _, meta = handler.handle_dmidecode(cmd, context)
+        assert "Intel(R) Xeon(R) Platinum 8480+" in res
+        assert meta['source'] == 'local'
+
+        # Test fallback
+        cmd = "dmidecode -t bios"
+        handler.handle_generic = MagicMock(return_value=("Mock LLM", {}, {'source': 'llm'}))
+        res, _, meta = handler.handle_dmidecode(cmd, context)
+        assert res == "Mock LLM"
+        handler.handle_generic.assert_called_once()

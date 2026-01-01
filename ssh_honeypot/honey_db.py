@@ -10,7 +10,10 @@ try:
 except ImportError:
     from db_interface import DatabaseBackend
 
-DB_PATH = "data/honeypot.sqlite"
+# Resolve absolute path relative to this file (ssh_honeypot/honey_db.py -> ssh_honeypot/../data/honeypot.sqlite)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
+DB_PATH = os.path.join(PROJECT_ROOT, "data", "honeypot.sqlite")
 
 class HoneyDB(DatabaseBackend):
     def __init__(self, db_path=DB_PATH):
