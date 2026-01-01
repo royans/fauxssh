@@ -1160,6 +1160,48 @@ class CommandHandler:
         return self.handle_cp(f"cp {real_src} {real_dest}", context)
 
 
+    def handle_nvidia_smi(self, cmd, context):
+        output = """Wed Dec 31 19:12:44 2025       
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 535.154.05   Driver Version: 535.154.05   CUDA Version: 12.2     |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|                               |                      |               MIG M. |
+|===============================+======================+======================|
+|   0  NVIDIA H100 80G...  On   | 00000000:3B:00.0 Off |                    0 |
+| N/A   32C    P0    68W / 700W |      0MiB / 81559MiB |      0%      Default |
+|                               |                      |             Disabled |
++-------------------------------+----------------------+----------------------+
+|   1  NVIDIA H100 80G...  On   | 00000000:D8:00.0 Off |                    0 |
+| N/A   30C    P0    65W / 700W |      0MiB / 81559MiB |      0%      Default |
+|                               |                      |             Disabled |
++-------------------------------+----------------------+----------------------+
+                                                                               
++-----------------------------------------------------------------------------+
+| Processes:                                                                  |
+|  GPU   GI   CI        PID   Type   Process name                  GPU Memory |
+|        ID   ID                                                   Usage      |
+|=============================================================================|
+|  No running processes found                                                 |
++-----------------------------------------------------------------------------+
+"""
+        return output, {}, {'source': 'local', 'cached': False}
+
+    def handle_lspci(self, cmd, context):
+        # Realistic lspci for a high-end server
+        output = """00:00.0 Host bridge: Intel Corporation 440FX - 82441FX PMC [Natoma] (rev 02)
+00:01.0 ISA bridge: Intel Corporation 82371SB PIIX3 ISA [Natoma/Triton II]
+00:01.3 Bridge: Intel Corporation 82371AB/EB/MB PIIX4 ACPI (rev 03)
+00:02.0 VGA compatible controller: Cirrus Logic GD 5446
+00:03.0 Ethernet controller: Red Hat, Inc. Virtio network device
+00:04.0 SCSI storage controller: Red Hat, Inc. Virtio block device
+00:05.0 SCSI storage controller: Red Hat, Inc. Virtio block device
+3b:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+d8:00.0 3D controller: NVIDIA Corporation Device 2330 (rev a1)
+"""
+        return output, {}, {'source': 'local', 'cached': False}
+
     def handle_ps(self, cmd, context):
         # 1. Parse Flags
         parts = cmd.split()
