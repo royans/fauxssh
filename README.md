@@ -137,6 +137,32 @@ sudo iptables -t nat -A PREROUTING -p tcp --dport 22 -j REDIRECT --to-port 2222
 
 *Note: Make sure your real SSH server is moved to a different port or restricted by other rules to avoid locking yourself out if you are configuring this remotely.*
 
+## Real-time Alerting
+
+FauxSSH can send real-time webhooks (e.g., Slack, Discord) when high-risk activity is detected.
+
+### Configuration
+Add to your `.env` file:
+```bash
+# Webhook URL (Discord/Slack/Etc)
+WEBHOOK_URL="https://discord.com/api/webhooks/..."
+
+# Tier 1: Notify Only (Risk >= 6). Default: 6
+ALERT_THRESHOLD_NOTIFY=6
+
+# Tier 2: Stream Session (Risk >= 7). Default: 7
+ALERT_THRESHOLD_SESSION=7
+
+# Tier 3: Stream IP (Risk >= 9). Default: 9
+ALERT_THRESHOLD_IP=9
+```
+
+### ⚠️ Security Warning (Alerting)
+> [!WARNING]
+> Enabling this feature causes the honeypot to generate outbound HTTP traffic to the configured URL.
+> 1. Ensure `WEBHOOK_URL` is **HTTPS** to protect payload data.
+> 2. Sophisticated attackers monitoring network traffic from the collection point might correlate command execution with outbound bursts (timing attack). Use with caution in covert deployments.
+
 ## Logging
 
 All logs and captured data are stored in the `data/` directory:

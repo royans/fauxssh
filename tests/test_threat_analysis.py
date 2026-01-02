@@ -62,8 +62,8 @@ def test_get_unanalyzed_commands(test_db):
     
     # Should only return hash1
     assert len(unanalyzed) == 1
-    assert unanalyzed[0][0] == 'hash1'
-    assert unanalyzed[0][1] == 'ls -la'
+    assert unanalyzed[0]['request_md5'] == 'hash1'
+    assert unanalyzed[0]['command'] == 'ls -la'
 
 # --- LLM Interface Tests ---
 

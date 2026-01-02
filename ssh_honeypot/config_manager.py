@@ -22,6 +22,13 @@ DEFAULT_CONFIG = {
         "max_quota_per_ip": 1048576, # 1MB
         "cleanup_days": 30
     },
+    "alerting": {
+        "webhook_url": None,
+        "notify_threshold": 6,
+        "session_threshold": 7, 
+        "ip_threshold": 9,
+        "keywords": []
+    },
     "persona": {
         "kernel_name": "Linux",
         "kernel_release": "5.10.0-21-cloud-amd64",
@@ -57,6 +64,25 @@ class ConfigManager:
                 print(f"[!] Error loading config: {e}")
         else:
             print("[*] No config.yaml found, using defaults.")
+
+        # Environment Override (Priority over config.yaml)
+        if os.getenv("WEBHOOK_URL"):
+            self._config['alerting']['webhook_url'] = os.getenv("WEBHOOK_URL")
+        
+        if os.getenv("ALERT_THRESHOLD_NOTIFY"):
+             try: self._config['alerting']['notify_threshold'] = int(os.getenv("ALERT_THRESHOLD_NOTIFY"))
+             except ValueError: pass
+
+        if os.getenv("ALERT_THRESHOLD_SESSION"):
+             try: self._config['alerting']['session_threshold'] = int(os.getenv("ALERT_THRESHOLD_SESSION"))
+             except ValueError: pass
+
+        if os.getenv("ALERT_THRESHOLD_IP"):
+             try: self._config['alerting']['ip_threshold'] = int(os.getenv("ALERT_THRESHOLD_IP"))
+             except ValueError: pass
+
+        if os.getenv("ALERT_KEYWORDS"):
+             self._config['alerting']['keywords'] = [k.strip() for k in os.getenv("ALERT_KEYWORDS").split('|') if k.strip()]
 
     def _merge(self, defaults, overrides):
         for k, v in overrides.items():

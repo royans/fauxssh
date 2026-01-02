@@ -14,8 +14,10 @@ try:
     from .llm_interface import LLMInterface
     from .command_handler import CommandHandler
     from .micro_editor import MicroEditor
+    from .micro_editor import MicroEditor
     from .config_manager import config
     from .sftp_handler import HoneySFTPServer
+    from .alert_manager import AlertManager
     from . import fs_seeder
     # Initialize Logging
     from .logger import log
@@ -27,6 +29,7 @@ except ImportError:
     # from micro_editor import MicroEditor
     from config_manager import config
     from sftp_handler import HoneySFTPServer
+    from alert_manager import AlertManager
     import fs_seeder
     # Logger Fallback
     from logger import log
@@ -44,6 +47,7 @@ BIND_IP = os.getenv('SSHPOT_BIND_IP') or config.get('server', 'bind_ip') or '0.0
 
 # Initialize DB
 db = HoneyDB()
+alert_manager = AlertManager()
 
 # Initialize LLM
 # Attempt to load API KEY from .env if present
@@ -752,6 +756,12 @@ def _handle_connection_logic(client, addr):
                         duration_ms=duration_ms,
                         request_md5=str(cmd_hash)
                     )
+
+                    # Alerting Integration: Check for Stream Trigger
+                    try:
+                        alert_manager.handle_interaction(session_id, ip, cmd, resp_text)
+                    except Exception as e:
+                        log.error(f"[Alert] Stream Error: {e}")
                     
                     # Manual JSON logging removed (handled by db.log_interaction)
                     
@@ -882,14 +892,29 @@ def analysis_loop(db_instance, llm_instance, run_once=False):
                 
             # Batch Analysis
             log.info(f"[Analysis] Batch processing {len(commands)} commands...")
-            results = llm_instance.analyze_batch(commands)
             
-            for cmd_hash, cmd_text in commands:
+            # commands is now a list of dicts: {'request_md5':..., 'command':..., 'session_id':..., 'remote_ip':...}
+            results = llm_instance.analyze_batch([(c['request_md5'], c['command']) for c in commands])
+            
+            for cmd_row in commands:
+                cmd_hash = cmd_row['request_md5']
+                cmd_text = cmd_row['command']
+                session_id = cmd_row['session_id']
+                ip = cmd_row['remote_ip']
+                
                 analysis = results.get(cmd_hash)
                 
                 if analysis:
                      log.info(f"[Analysis] Processed: {cmd_text[:30]}... -> {analysis.get('explanation')}")
                      db_instance.save_analysis(cmd_hash, cmd_text, analysis)
+                     
+                     # Check Risk for Alerting
+                     try:
+                         score = analysis.get('risk', 0)
+                         explanation = analysis.get('explanation', '')
+                         alert_manager.check_risk_score(session_id, ip, score, explanation)
+                     except Exception as e:
+                         log.error(f"[Analysis] Alert Error: {e}")
                 else:
                     # If batch failed to return strict hash, maybe mark as failed or retry later?
                     # For now we skip saving, it will be picked up again?

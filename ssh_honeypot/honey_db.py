@@ -427,15 +427,17 @@ class HoneyDB(DatabaseBackend):
 
     def get_unanalyzed_commands(self, limit=10):
         """
-        Returns distinct commands (hash, text) from interactions that are NOT in command_analysis.
+        Returns distinct commands (hash, text, session_id, ip) from interactions that are NOT in command_analysis.
         Prioritizes most recent commands (by ID).
         """
         conn = self._get_conn()
+        conn.row_factory = sqlite3.Row
         c = conn.cursor()
         
         query = """
-            SELECT i.request_md5, i.command
+            SELECT i.request_md5, i.command, i.session_id, s.remote_ip
             FROM interactions i
+            JOIN sessions s ON i.session_id = s.session_id
             WHERE i.request_md5 IS NOT NULL 
               AND i.request_md5 != 'unknown'
               AND i.request_md5 NOT IN (SELECT command_hash FROM command_analysis)
@@ -444,7 +446,7 @@ class HoneyDB(DatabaseBackend):
             LIMIT ?
         """
         c.execute(query, (limit,))
-        results = c.fetchall()
+        results = [dict(row) for row in c.fetchall()]
         conn.close()
         return results
 

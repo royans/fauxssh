@@ -5,6 +5,17 @@ This directory contains utility scripts to help manage, analyze, and extend the 
 ## 1. Analytics Tools (`tools/analytics/`)
 These tools are designed for security researchers to extract insights from the honeypot data.
 
+### Unified Analytics Tool (`anayze.py`)
+A comprehensive CLI for querying sessions, commands, and threat analysis data.
+
+```bash
+# List all sessions
+python3 tools/analytics/analyze.py --sessions
+
+# Show command history with risk scores
+python3 tools/analytics/analyze.py --commands --limit 20
+```
+
 ### Log Viewer (`log_viewer.py`)
 Replay attacker sessions to see exactly what commands were run and how the AI responded.
 
