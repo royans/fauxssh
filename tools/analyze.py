@@ -143,12 +143,12 @@ def list_commands(limit=50):
     
     for r in rows:
         ts = to_local_time(r['timestamp'])
-        ip = r['remote_ip']
-        user = r['username']
-        src = (r['source'] or "UNK")[:8] # Limit to 8 chars (e.g. "LLM", "Local", "Chain")
+        ip = r['remote_ip'] or "-"
+        user = r['username'] or "-"
+        src = (r['source'] or "UNK")[:8]
         risk = str(r['risk_score']) if r['risk_score'] is not None else "-"
         atype = r['activity_type'] if r['activity_type'] else "-"
-        cmd = r['command'].replace('\r', '')
+        cmd = (r['command'] or "").replace('\r', '')
         expl = (r['explanation'] or "").replace('\n', ' ')
         
         # Wrapping logic
