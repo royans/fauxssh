@@ -26,6 +26,7 @@ class CommandHandler:
     def __init__(self, llm_interface, db):
         self.llm = llm_interface
         self.db = db
+        self.honey_db = db # Alias for newer handlers
 
 
         
@@ -1418,38 +1419,163 @@ class CommandHandler:
 
     def handle_wget(self, cmd, context):
         import random
-        # Simulate network failures
-        parts = cmd.split()
+        import time
+        import shlex
+        
+        parts = shlex.split(cmd)
         if len(parts) < 2: return "wget: missing URL\nUsage: wget [OPTION]... [URL]...", {}
+
+        # Basic Argument Parsing
+        url = None
+        output_file = None
+        user_agent = "Wget/1.21"
+        is_quiet = False
         
-        target = parts[-1] 
-        domain = target.split('/')[2] if '//' in target else target
+        # Naive flag parsing
+        skip_next = False
+        for i, arg in enumerate(parts):
+            if skip_next:
+                skip_next = False
+                continue
+            
+            if i == 0: continue # 'wget'
+            
+            if arg == '-O':
+                if i + 1 < len(parts):
+                    output_file = parts[i+1]
+                    skip_next = True
+            elif arg.startswith('-O'):
+                output_file = arg[2:]
+            elif arg == '-U' or arg == '--user-agent':
+                if i + 1 < len(parts):
+                    user_agent = parts[i+1]
+                    skip_next = True
+            elif arg == '-q' or arg == '--quiet':
+                is_quiet = True
+            elif not arg.startswith('-'):
+                url = arg
         
-        errors = [
-            f"wget: unable to resolve host address '{domain}'",
-            f"Connecting to {domain}|10.0.0.1|:80... failed: Connection timed out.\nRetrying.\n",
-            f"Connecting to {domain}|1.2.3.4|:443... failed: Network is unreachable."
-        ]
+        if not url: return "wget: missing URL", {}
         
-        return f"--{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}--  {target}\nResolving {domain}... failed: Name or service not known.\n{random.choice(errors)}\n", {}
+        # Intelligence Logging
+        if context.get('session_id'):
+            self.honey_db.log_url_request(context['session_id'], url, "GET", user_agent, cmd)
+
+        # Domain Extraction
+        domain = url.split('/')[2] if '//' in url else url.split('/')[0]
+        
+        # Localhost Check
+        if domain in ['localhost', '127.0.0.1', '::1']:
+            content = "<html><body><h1>It Works!</h1><p>Apache/2.4.56 (Debian)</p></body></html>"
+            if output_file:
+                # Save to VFS
+                abs_path = self._resolve_path(context.get('cwd'), output_file)
+                self.honey_db.update_user_file(context.get('ip'), context.get('user'), abs_path, os.path.dirname(abs_path), 'file', {'size': len(content)}, content)
+                return "" if is_quiet else f"--{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}--  {url}\nResolving {domain}... 127.0.0.1\nConnecting to {domain}|127.0.0.1|:80... connected.\nHTTP request sent, awaiting response... 200 OK\nLength: {len(content)} [text/html]\nSaving to: '{output_file}'\n\n     0K .......... .......... .......... .......... ..........  100% 93.1M 0s\n\n{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ({len(content)} B/s) - '{output_file}' saved [{len(content)}/{len(content)}]\n", {}
+            return content + "\n", {}
+
+        # Hybrid LLM Generation
+        if not is_quiet:
+            # Simulate DNS and Connect
+            response_pre = f"--{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}--  {url}\nResolving {domain}... {shlex.quote('1.1.1.1')}\nConnecting to {domain}|1.1.1.1|:80... connected.\nHTTP request sent, awaiting response... 200 OK\nLength: unspecified [text/html]\n"
+            if output_file: 
+                response_pre += f"Saving to: '{output_file}'\n\n"
+        
+        # Ask LLM for content
+        prompt = f"Generate the likely source code (HTML/Shell Script) for the URL: {url}. user-agent: {user_agent}. Return ONLY the file content, no markdown."
+        content = self.llm.generate_response(cmd, context.get('cwd'), override_prompt=prompt)
+        
+        # Post-Processing
+        if output_file:
+             # Save to VFS
+             abs_path = self._resolve_path(context.get('cwd'), output_file)
+             self.honey_db.update_user_file(context.get('ip'), context.get('user'), abs_path, os.path.dirname(abs_path), 'file', {'size': len(content)}, content)
+             
+             if not is_quiet:
+                 # Fake Progress Bar
+                 progress = f"    [ <=>                                                  ] {len(content)}        --.-K/s   in 0.1s    \n\n{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (10.0 MB/s) - '{output_file}' saved [{len(content)}]\n"
+                 return response_pre + progress, {}
+             return "", {}
+             
+        return content + "\n", {}
 
     def handle_curl(self, cmd, context):
+        import shlex
+        import time
         import random
-        parts = cmd.split()
+        
+        parts = shlex.split(cmd)
         if len(parts) < 2: return "curl: try 'curl --help' for more information\n", {}
         
-        target = parts[-1]
-        domain = target.split('/')[2] if '//' in target else target
-
-        errors = [
-            f"curl: (6) Could not resolve host: {domain}",
-            f"curl: (7) Failed to connect to {domain} port 80: Connection refused",
-            f"curl: (28) Connection timed out after 10001 milliseconds"
-        ]
+        url = None
+        output_file = None
+        user_agent = "curl/7.74.0"
+        is_quiet = False
+        is_head = False
         
-        # Simulate small delay
-        time.sleep(1.0)
-        return f"{random.choice(errors)}\n", {}
+        # Naive parsing
+        skip_next = False
+        for i, arg in enumerate(parts):
+            if skip_next:
+                skip_next = False
+                continue
+            if i == 0: continue
+            
+            if arg == '-O': # Remote Name
+                skip_next = False # Url is next usually, but -O takes no arg
+                # If -O is used, we need to infer filename from URL later
+                output_file = "REMOTE_NAME" 
+            elif arg == '-o':
+                if i + 1 < len(parts):
+                    output_file = parts[i+1]
+                    skip_next = True
+            elif arg == '-A' or arg == '--user-agent':
+                if i + 1 < len(parts):
+                    user_agent = parts[i+1]
+                    skip_next = True
+            elif arg == '-I' or arg == '--head':
+                is_head = True
+            elif arg == '-s' or arg == '--silent':
+                is_quiet = True
+            elif not arg.startswith('-'):
+                url = arg
+
+        if not url: return "curl: no URL specified!\n", {}
+        
+        if output_file == "REMOTE_NAME":
+            output_file = url.split('/')[-1] or "index.html"
+
+        # Intelligence
+        if context.get('session_id'):
+            self.honey_db.log_url_request(context['session_id'], url, "HEAD" if is_head else "GET", user_agent, cmd)
+            
+        domain = url.split('/')[2] if '//' in url else url.split('/')[0]
+
+        # Localhost
+        if domain in ['localhost', '127.0.0.1', '::1']:
+             content = "<html><body><h1>It Works!</h1></body></html>"
+             if is_head:
+                 return "HTTP/1.1 200 OK\nServer: nginx/1.18.0\nDate: Mon, 01 Jan 2026 12:00:00 GMT\nContent-Type: text/html\nContent-Length: 45\nConnection: keep-alive\n\n", {}
+             return content + "\n", {}
+
+        # Hybrid LLM
+        prompt = f"Generate the likely source code for URL: {url}. Return ONLY the file content."
+        if is_head:
+             prompt = f"Generate HTTP Headers for URL: {url}. Return ONLY the headers."
+             
+        content = self.llm.generate_response(cmd, context.get('cwd'), override_prompt=prompt)
+        
+        if output_file and not is_head:
+             abs_path = self._resolve_path(context.get('cwd'), output_file)
+             self.honey_db.update_user_file(context.get('ip'), context.get('user'), abs_path, os.path.dirname(abs_path), 'file', {'size': len(content)}, content)
+             if not is_quiet:
+                 # Curl progress meter
+                 #  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                 #                                  Dload  Upload   Total   Spent    Left  Speed
+                 return f"  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n                                 Dload  Upload   Total   Spent    Left  Speed\n100   {len(content)}  100   {len(content)}    0     0   {len(content)*10}      0 --:--:-- --:--:-- --:--:-- {len(content)*10}\n", {}
+             return "", {}
+             
+        return content + "\n", {}
         
     def handle_more(self, cmd, context):
         # Alias to cat for simple non-interactive shell

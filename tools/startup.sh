@@ -19,11 +19,21 @@ LOCK_FILE="/tmp/sshpot_startup.lock"
 exec 200>"$LOCK_FILE"
 flock -n 200 || { echo "Startup script is already running."; exit 1; }
 
+CRON_MODE=false
+if [[ "${1:-}" == "--cron" ]]; then
+    CRON_MODE=true
+    echo "Running in CRON mode (Loop disabled)"
+fi
+
 cd "$PROJECT_ROOT"
 
 # Security Check: Ensure .env exists
-if [ ! -f ".env" ]; then
-    echo "[ERROR] .env file not found in $PROJECT_ROOT."
+if [ -f ".env" ]; then
+    echo "[INFO] Found .env in $PROJECT_ROOT"
+elif [ -f "../.env" ]; then
+    echo "[INFO] Found .env in parent directory ($(dirname "$PROJECT_ROOT"))"
+else
+    echo "[ERROR] .env file not found in $PROJECT_ROOT or parent directory."
     echo "Please create one from .env.example before starting."
     exit 1
 fi
@@ -89,5 +99,10 @@ while true; do
   else
       # We broke out of loop due to restart trigger
       sleep 1
+  fi
+
+  if [ "$CRON_MODE" = true ]; then
+      echo "Cron mode enabled. Exiting to allow cron to restart process."
+      break
   fi
 done

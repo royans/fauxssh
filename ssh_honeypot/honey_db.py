@@ -138,11 +138,36 @@ class HoneyDB(DatabaseBackend):
             c.execute("ALTER TABLE interactions ADD COLUMN request_md5 TEXT")
         except sqlite3.OperationalError: pass
 
+        # Requested URLs Log (Network Intelligence)
+        c.execute('''CREATE TABLE IF NOT EXISTS requested_urls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            session_id TEXT,
+            url TEXT,
+            method TEXT,
+            user_agent TEXT,
+            command_text TEXT,
+            FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+        )''')
+
         conn.commit()
         conn.close()
 
     def _get_conn(self):
         return sqlite3.connect(self.db_path, timeout=30.0)
+    
+    def log_url_request(self, session_id, url, method="GET", user_agent=None, command_text=None):
+        conn = self._get_conn()
+        try:
+            conn.execute('''
+                INSERT INTO requested_urls (session_id, url, method, user_agent, command_text)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (session_id, url, method, user_agent, command_text))
+            conn.commit()
+        except Exception as e:
+            log.error(f"[DB] Error logging URL request: {e}")
+        finally:
+            conn.close()
     
     def log_auth_event(self, client_ip, username, auth_method, auth_data, success, client_version, fingerprint=None):
         try:
