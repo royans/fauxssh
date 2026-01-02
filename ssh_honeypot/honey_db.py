@@ -27,6 +27,8 @@ class HoneyDB(DatabaseBackend):
             os.makedirs(db_dir)
             
         conn = sqlite3.connect(self.db_path)
+        # Enable WAL mode for better concurrency
+        conn.execute("PRAGMA journal_mode=WAL;")
         c = conn.cursor()
         
         # Sessions Table
@@ -84,8 +86,6 @@ class HoneyDB(DatabaseBackend):
         c.execute('CREATE INDEX IF NOT EXISTS idx_user_parent ON user_filesystem(ip, username, parent_path)')
 
         # Cache Table (Simulated State)
-        # We assume command output depends on: The Command itself + Current Working Directory
-        # This is a simplification. A real shell depends on much more, but this is a honeypot.
         c.execute('''CREATE TABLE IF NOT EXISTS command_cache (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             cmd_hash TEXT UNIQUE,
@@ -119,43 +119,30 @@ class HoneyDB(DatabaseBackend):
             analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
         
-        # Custom Migration for Fingerprint
+        # Custom Migrations
         try:
-            print("Attempting migration: Adding fingerprint column")
             c.execute("ALTER TABLE sessions ADD COLUMN fingerprint TEXT")
-        except sqlite3.OperationalError as e:
-            # print(f"Migration note: {e}")
-            pass
+        except sqlite3.OperationalError: pass
 
-        # Custom Migration for auth_events fingerprint
         try:
             c.execute("ALTER TABLE auth_events ADD COLUMN fingerprint TEXT")
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError: pass
             
-        # Custom Migration for interactions source
         try:
             c.execute("ALTER TABLE interactions ADD COLUMN source TEXT")
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError: pass
 
-        # Custom Migration for interactions request_md5
         try:
             c.execute("ALTER TABLE interactions ADD COLUMN request_md5 TEXT")
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError: pass
 
         conn.commit()
         conn.close()
 
     def _get_conn(self):
-        return sqlite3.connect(self.db_path)
+        return sqlite3.connect(self.db_path, timeout=30.0)
     
     def log_auth_event(self, client_ip, username, auth_method, auth_data, success, client_version, fingerprint=None):
-        """
-        Logs an authentication attempt.
-        auth_data: password (if method='password') or key fingerprint/type
-        """
         try:
             fp_json = "{}"
             if fingerprint:
@@ -192,15 +179,18 @@ class HoneyDB(DatabaseBackend):
 
     def log_interaction(self, session_id, cwd, command, response, source="unknown", was_cached=False, duration_ms=0, request_md5=None):
         conn = self._get_conn()
-        conn.execute("INSERT INTO interactions (session_id, cwd, command, response, source) VALUES (?, ?, ?, ?, ?)",
-                     (session_id, cwd, command, response, source))
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute("INSERT INTO interactions (session_id, cwd, command, response, source, request_md5) VALUES (?, ?, ?, ?, ?, ?)",
+                        (session_id, cwd, command, response, source, request_md5))
+            conn.commit()
+        except Exception as e:
+            print(f"[DB] Error logging interaction: {e}")
+        finally:
+            conn.close()
 
         # Update JSON Log
         try:
             timestamp = time.time()
-            # Try to get extra session info for log
             user = "unknown"
             ip = "unknown"
             try:
@@ -228,16 +218,13 @@ class HoneyDB(DatabaseBackend):
                 "request_md5": request_md5
             }
             
-            # Append to log file (assume data/honeypot.json.log based on DB Path)
             log_file = self.db_path.replace(".sqlite", ".json.log")
-            
             with open(log_file, "a") as f:
                 f.write(json.dumps(log_entry) + "\n")
         except Exception as e:
             print(f"Error writing to JSON log: {e}")
 
     def get_cached_response(self, command, cwd):
-        # We hash cmd + cwd to create a unique key
         h = hashlib.sha256(f"{cwd}:{command}".encode()).hexdigest()
         conn = self._get_conn()
         c = conn.cursor()
@@ -320,14 +307,12 @@ class HoneyDB(DatabaseBackend):
     def cache_response(self, command, cwd, response):
         h = hashlib.sha256(f"{cwd}:{command}".encode()).hexdigest()
         conn = self._get_conn()
-        # UPSERT logic (replace if exists)
         conn.execute("INSERT OR REPLACE INTO command_cache (cmd_hash, command, cwd, response) VALUES (?, ?, ?, ?)",
                      (h, command, cwd, response))
         conn.commit()
         conn.close()
 
     def get_ip_upload_usage(self, ip):
-        """Calculates total bytes uploaded by an IP address."""
         conn = self._get_conn()
         c = conn.cursor()
         c.execute("SELECT metadata FROM user_filesystem WHERE ip = ?", (ip,))
@@ -344,21 +329,15 @@ class HoneyDB(DatabaseBackend):
         return total_size
 
     def prune_uploads(self, days=30):
-        """
-        Removes user uploads older than X days.
-        Returns: List of details (ip, username, path) to help clean up vfs/disk if needed.
-        """
         import time
         cutoff_time = datetime.datetime.now() - datetime.timedelta(days=days)
         
         conn = self._get_conn()
         c = conn.cursor()
         
-        # Select files to be deleted
         c.execute("SELECT ip, username, path FROM user_filesystem WHERE created_at < ?", (cutoff_time,))
         to_delete = c.fetchall()
         
-        # Delete them
         c.execute("DELETE FROM user_filesystem WHERE created_at < ?", (cutoff_time,))
         conn.commit()
         conn.close()
@@ -372,18 +351,11 @@ class HoneyDB(DatabaseBackend):
          conn.close()
 
     def get_unique_creds_last_24h(self, ip):
-        """
-        Returns a set of unique (username, password) tuples that successfully logged in from this IP in the last 24 hours.
-        Considers both 'sessions' (active/completed) and 'auth_events' (successful logins).
-        """
         cutoff = datetime.datetime.now() - datetime.timedelta(hours=24)
-        
         conn = self._get_conn()
         c = conn.cursor()
-        
         creds = set()
         
-        # 1. Check sessions table (successfully established sessions)
         try:
              c.execute("SELECT username, password FROM sessions WHERE remote_ip = ? AND start_time > ?", (ip, cutoff))
              for row in c.fetchall():
@@ -391,7 +363,6 @@ class HoneyDB(DatabaseBackend):
         except Exception as e:
              print(f"Error querying sessions for creds: {e}")
 
-        # 2. Check auth_events (successful auths might not always result in a full session record depending on flow)
         try:
              c.execute("SELECT username, auth_data FROM auth_events WHERE client_ip = ? AND success = 1 AND auth_method='password' AND timestamp > ?", (ip, cutoff))
              for row in c.fetchall():
@@ -402,25 +373,22 @@ class HoneyDB(DatabaseBackend):
         conn.close()
         return creds
 
-    # [NEW] Analysis Methods
     def get_unanalyzed_commands(self, limit=10):
         """
         Returns distinct commands (hash, text) from interactions that are NOT in command_analysis.
-        This drives the async background thread.
+        Prioritizes most recent commands (by ID).
         """
         conn = self._get_conn()
         c = conn.cursor()
         
-        # We join on request_md5 to avoid re-hashing in Python if possible, 
-        # but interactions has request_md5 column.
-        # We want commands where request_md5 IS NOT NULL AND request_md5 NOT IN command_analysis
-        
         query = """
-            SELECT DISTINCT i.request_md5, i.command
+            SELECT i.request_md5, i.command
             FROM interactions i
             WHERE i.request_md5 IS NOT NULL 
               AND i.request_md5 != 'unknown'
               AND i.request_md5 NOT IN (SELECT command_hash FROM command_analysis)
+            GROUP BY i.request_md5
+            ORDER BY MAX(i.id) DESC
             LIMIT ?
         """
         c.execute(query, (limit,))
@@ -429,10 +397,6 @@ class HoneyDB(DatabaseBackend):
         return results
 
     def save_analysis(self, cmd_hash, cmd_text, analysis):
-        """
-        Saves LLM analysis.
-        analysis = {'type':..., 'stage':..., 'risk':..., 'explanation':...}
-        """
         conn = self._get_conn()
         try:
             conn.execute("""

@@ -1,0 +1,26 @@
+
+You are a cybersecurity expert analyzing attacker commands in a honeypot.
+Analyze the following list of commands. Each command has an ID (hash) and text.
+
+Input Commands:
+{commands_json}
+
+INSTRUCTIONS:
+1. Analyze each command for:
+   - type: (Reconnaissance, Execution, Persistence, Defense Evasion, Credential Access, Discovery, Lateral Movement, Collection, Command and Control, Exfiltration, Impact)
+   - stage: (Recon, Weaponization, Delivery, Exploitation, Installation, C2, Actions)
+   - risk: (Integer 0-10, where 10 is critical impact)
+   - explanation: (Brief 1 sentence summary of intent)
+
+2. Return ONLY a single JSON list of objects.
+3. IMPORTANT: You MUST return exactly one result for EVERY item in the input list.
+4. Do NOT deduplicate. If the input has 10 items, the output list must have 10 items.
+5. Each object MUST contain:
+   - hash: (The exact ID provided in input)
+   - analysis: { type, stage, risk, explanation }
+
+Example Output:
+[
+  {"hash": "abc...", "analysis": {"type": "Reconnaissance", "stage": "Recon", "risk": 2, "explanation": "Checks system info."}},
+  {"hash": "123...", "analysis": {"type": "Execution", "stage": "Exploitation", "risk": 8, "explanation": "Downloads malware."}}
+]

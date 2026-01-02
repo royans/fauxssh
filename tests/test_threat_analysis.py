@@ -104,3 +104,24 @@ def test_analyze_command_failure(mock_post, llm):
     
     assert result['type'] == "Unknown"
     assert "Analysis Failed" in result['explanation']
+
+def test_analyze_batch_success(llm):
+    llm._call_api = MagicMock(return_value='''
+    [
+        {"hash": "h1", "analysis": {"type": "Recon", "stage": "Recon", "risk": 1, "explanation": "test1"}},
+        {"hash": "h2", "analysis": {"type": "Exec", "stage": "Exp", "risk": 9, "explanation": "test2"}}
+    ]
+    ''')
+    
+    commands = [("h1", "ls"), ("h2", "rm -rf /")]
+    results = llm.analyze_batch(commands)
+    
+    assert len(results) == 2
+    assert results["h1"]["type"] == "Recon"
+    assert results["h2"]["risk"] == 9
+
+def test_analyze_batch_malformed(llm):
+    llm._call_api = MagicMock(return_value='NOT JSON')
+    commands = [("h1", "ls")]
+    results = llm.analyze_batch(commands)
+    assert len(results) == 0 # Returns empty dict on failure

@@ -107,7 +107,8 @@ class LLMInterface:
             }
         }
         
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={self.api_key}"
+        model_name = config.get('llm', 'model_name') or "gemini-pro"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.api_key}"
         
         try:
             resp = requests.post(url, headers=headers, json=data, timeout=10)
@@ -168,5 +169,58 @@ class LLMInterface:
                 'risk': data.get('risk', 0),
                 'explanation': data.get('explanation', 'Analysis Failed: Invalid Response')
             }
+        except Exception as e:
+             return {
+                'type': 'Unknown',
+                'stage': 'Unknown',
+                'risk': 0,
+                'explanation': f'Analysis Failed: {e}'
+            }
+
+    def analyze_batch(self, commands):
+        """
+        Analyzes a batch of commands.
+        commands: list of (hash, text) tuples
+        Returns: dict mapping hash -> {type, stage, risk, explanation}
+        """
+        if not commands:
+            return {}
+
+        # Prepare Input JSON
+        input_list = [{"hash": h, "text": t} for h, t in commands]
+        input_json = json.dumps(input_list, indent=2)
+
+        try:
+            prompt_path = os.path.join(os.path.dirname(__file__), 'prompts', 'batch_analysis_prompt.txt')
+            with open(prompt_path, 'r') as f:
+                template = f.read()
         except:
-            return {'type': 'Unknown', 'stage': 'Unknown', 'risk': 0, 'explanation': 'Analysis Failed: ' + raw_json[:50]}
+             # Fallback
+             template = """
+             Analyze these commands for cybersecurity risk. Return JSON list with hash and analysis object (type, stage, risk, explanation).
+             Input: {commands_json}
+             """
+             
+        prompt = template.replace('{commands_json}', input_json)
+        
+        raw_json = self._call_api(prompt)
+        results = {}
+        
+        try:
+            # Parse List
+            data = json.loads(raw_json)
+            if isinstance(data, list):
+                for item in data:
+                    h = item.get('hash')
+                    an = item.get('analysis', {})
+                    if h:
+                        results[h] = {
+                            'type': an.get('type', 'Unknown'),
+                            'stage': an.get('stage', 'Unknown'),
+                            'risk': an.get('risk', 0),
+                            'explanation': an.get('explanation', 'Batch Analysis')
+                        }
+        except Exception as e:
+            print(f"[!] Batch Analysis Parsing Error: {e}")
+            
+        return results

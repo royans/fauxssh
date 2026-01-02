@@ -4,7 +4,10 @@ import argparse
 import os
 import sys
 import json
+import shutil
+import textwrap
 from datetime import datetime
+from dateutil import tz
 
 # Add project root to sys.path to ensure we can find DB
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -18,6 +21,17 @@ def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+def to_local_time(ts_str):
+    try:
+        if not ts_str: return "-"
+        # Assuming TS is UTC or naive stored as UTC
+        dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+        dt = dt.replace(tzinfo=tz.tzutc())
+        local_dt = dt.astimezone(tz.tzlocal())
+        return local_dt.strftime("%Y-%m-%d %H:%M:%S")
+    except:
+        return ts_str
 
 def list_sessions(limit=50, no_failed=False):
     conn = get_db_connection()
@@ -44,25 +58,7 @@ def list_sessions(limit=50, no_failed=False):
         FROM sessions s
     """
     
-    where_clauses = []
     params = []
-    
-    if no_failed:
-        # A failed login generally implies no session created OR specific flag. 
-        # In current FauxSSH, 'sessions' table usually records successful sessions or attempted ones?
-        # Actually sessions are created on successful auth. 
-        # But let's check auth_events for login failures if we want "Login Failed" filtering?
-        # The user request says "filter out sessions where login failed".
-        # If session exists in 'sessions' table, it usually means auth passed (or was attempted enough to create session context).
-        # Let's assume if username is present it's a "session". 
-        # Maybe "login failed" refers to auth_events that didn't result in a session? 
-        # For this tool, we are listing SESSIONS. So we likely only have successful logins here.
-        # However, let's look at `auth_events` to be sure.
-        # Wait, if `sessions` table is only for established sessions, then `no_failed` might be redundant or 
-        # valid checks against `auth_events` are needed. 
-        # Let's assume "sessions" table contains successful logins.
-        pass
-
     query += " ORDER BY s.start_time DESC LIMIT ?"
     params.append(limit)
     
@@ -75,7 +71,7 @@ def list_sessions(limit=50, no_failed=False):
     print("-" * 120)
 
     for r in rows:
-        start = r['start_time']
+        start = to_local_time(r['start_time'])
         ip = r['remote_ip']
         user = r['username']
         pwd = r['password'] or ""
@@ -95,12 +91,10 @@ def list_commands(limit=50):
     query = """
         SELECT 
             i.timestamp,
-            i.session_id,
             s.remote_ip,
             s.username,
             i.command,
             i.request_md5,
-            length(i.response) as resp_size,
             ca.activity_type,
             ca.risk_score,
             ca.explanation
@@ -115,25 +109,104 @@ def list_commands(limit=50):
     rows = c.fetchall()
     conn.close()
     
-    print(f"{'Timestamp':<20} | {'IP':<15} | {'User':<10} | {'Risk':<4} | {'Type':<12} | {'Command':<30} | {'Analysis'}")
-    print("-" * 140)
+    # Dynamic Width Calculation
+    try:
+        term_width = shutil.get_terminal_size((120, 20)).columns
+    except:
+        term_width = 120
+    
+    # Fixed widths
+    w_ts = 20
+    w_ip = 15
+    w_user = 10
+    w_risk = 5
+    w_type = 15
+    
+    # Separators: " | " * 6 = 3 * 6 = 18 chars
+    used_width = w_ts + w_ip + w_user + w_risk + w_type + 18 
+    remaining = term_width - used_width
+    
+    if remaining < 40: remaining = 40 # Minimum expectation
+    
+    # Split remaining roughly 45/55 for Command vs Analysis
+    w_cmd = int(remaining * 0.45)
+    w_expl = int(remaining * 0.55)
+    
+    # Ensure minimums
+    if w_cmd < 20: w_cmd = 20
+    if w_expl < 20: w_expl = 20
+    
+    print(f"{'Timestamp':<{w_ts}} | {'IP':<{w_ip}} | {'User':<{w_user}} | {'Risk':<{w_risk}} | {'Type':<{w_type}} | {'Command':<{w_cmd}} | {'Analysis'}")
+    print("-" * term_width)
     
     for r in rows:
-        ts = r['timestamp']
+        ts = to_local_time(r['timestamp'])
         ip = r['remote_ip']
         user = r['username']
-        risk = r['risk_score'] if r['risk_score'] is not None else "-"
+        risk = str(r['risk_score']) if r['risk_score'] is not None else "-"
         atype = r['activity_type'] if r['activity_type'] else "-"
-        cmd = r['command']
-        expl = r['explanation'] or ""
+        cmd = r['command'].replace('\r', '')
+        expl = (r['explanation'] or "").replace('\n', ' ')
         
-        # Truncate command for display
-        cmd_display = (cmd[:27] + '...') if len(cmd) > 27 else cmd
+        # Wrapping logic
+        # We wrap command and indent subsequent lines
+        cmd_wrapper = textwrap.TextWrapper(width=w_cmd, subsequent_indent='  ')
+        cmd_lines = cmd_wrapper.wrap(cmd) if cmd else [""]
         
-        print(f"{ts:<20} | {ip:<15} | {user:<10} | {risk:<4} | {atype:<12} | {cmd_display:<30} | {expl}")
-        # print full command on next line if it was truncated?
-        if len(cmd) > 27:
-            print(f"{'':<65} > Full: {cmd}")
+        expl_wrapper = textwrap.TextWrapper(width=w_expl)
+        expl_lines = expl_wrapper.wrap(expl) if expl else [""]
+        
+        # Max of lines to determine height of row
+        height = max(len(cmd_lines), len(expl_lines))
+        
+        # Calculate offset for Command column
+        # widths: ts(20) | ip(15) | user(10) | risk(5) | type(15) |
+        # separators are " | " (3 chars)
+        # 20+3 + 15+3 + 10+3 + 5+3 + 15+3 = 23+18+13+8+18 = 80 chars
+        cmd_offset_len = w_ts + w_ip + w_user + w_risk + w_type + 15 # 5 separators * 3 = 15
+        
+        # Adjusting slightly because the first col doesn't have a leading separator, but internal ones do.
+        # "TS   | IP   | ..."
+        # TS(20) + " | "(3) + IP(15) + " | "(3) + User(10) + " | "(3) + Risk(5) + " | "(3) + Type(15) + " | "(3)
+        # Total chars before Command = 20+3+15+3+10+3+5+3+15+3 = 80.
+        cmd_padding = " " * 80
+        
+        for i in range(height):
+            c_line = cmd_lines[i] if i < len(cmd_lines) else ""
+            e_line = expl_lines[i] if i < len(expl_lines) else ""
+            
+            if i == 0:
+                print(f"{ts:<{w_ts}} | {ip:<{w_ip}} | {user:<{w_user}} | {risk:<{w_risk}} | {atype:<{w_type}} | {c_line:<{w_cmd}} | {e_line}")
+            else:
+                # Clean Indent: Don't print separators for empty left columns
+                print(f"{cmd_padding}{c_line:<{w_cmd}} | {e_line}")
+        
+    print(f"\n[!] Showing last {limit} commands.")
+
+def reset_failed_analysis():
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    print("[*] Checking for failed analysis records ('Batch Miss')...")
+    c.execute("SELECT COUNT(*) FROM command_analysis WHERE explanation LIKE '%Batch Miss%'")
+    count = c.fetchone()[0]
+    
+    if count == 0:
+        print("[+] No failed analysis records found. Nothing to reset.")
+        conn.close()
+        return
+
+    print(f"[!] Found {count} failed records.")
+    confirm = input(f"Are you sure you want to DELETE them so they can be re-analyzed? (y/N) ")
+    
+    if confirm.lower() == 'y':
+        c.execute("DELETE FROM command_analysis WHERE explanation LIKE '%Batch Miss%'")
+        conn.commit()
+        print(f"[+] Deleted {c.rowcount} records. The server will pick them up automatically.")
+    else:
+        print("[-] Operation cancelled.")
+    
+    conn.close()
 
 def main():
     parser = argparse.ArgumentParser(description="FauxSSH Unified Analytics Tool")
@@ -141,6 +214,7 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--sessions", action="store_true", help="List recent sessions (default)")
     group.add_argument("--commands", action="store_true", help="List recent commands with analysis")
+    group.add_argument("--retry-failed", action="store_true", help="Delete 'Batch Miss' records to trigger re-analysis")
     
     parser.add_argument("--limit", type=int, default=50, help="Number of rows to show (default: 50)")
     parser.add_argument("--no-failed", action="store_true", help="Filter out failed logins (for sessions)")
@@ -151,8 +225,9 @@ def main():
         list_sessions(limit=args.limit, no_failed=args.no_failed)
     elif args.commands:
         list_commands(limit=args.limit)
+    elif args.retry_failed:
+        reset_failed_analysis()
     else:
-        # Should not reach here due to required group, but fallback
         list_sessions(limit=args.limit)
 
 if __name__ == "__main__":

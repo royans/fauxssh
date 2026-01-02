@@ -5,6 +5,10 @@ import os
 import time
 import json
 import random
+from dotenv import load_dotenv, find_dotenv
+
+# Load .env from anywhere in the tree (e.g. parent dir)
+load_dotenv(find_dotenv())
 try:
     from .honey_db import HoneyDB
     from .llm_interface import LLMInterface
@@ -732,39 +736,68 @@ def cleanup_loop(db_instance):
             
         time.sleep(3600) # Run every hour
 
-def analysis_loop(db_instance, llm_instance):
+import argparse
+
+def analysis_loop(db_instance, llm_instance, run_once=False):
     """Background thread to analyze commands with LLM"""
     print("[Analysis] Starting Threat Analysis Loop...")
     while True:
         try:
             # Poll for unanalyzed commands
-            commands = db_instance.get_unanalyzed_commands(limit=5)
+            commands = db_instance.get_unanalyzed_commands(limit=10)
             
             if not commands:
+                if run_once:
+                    print("[Analysis] No commands to analyze. Exiting test mode.")
+                    break
                 time.sleep(10) # Wait if nothing to do
                 continue
                 
+            # Batch Analysis
+            print(f"[Analysis] Batch processing {len(commands)} commands...")
+            results = llm_instance.analyze_batch(commands)
+            
             for cmd_hash, cmd_text in commands:
-                # print(f"[Analysis] Processing: {cmd_text[:30]}...")
-                analysis = llm_instance.analyze_command(cmd_text)
+                analysis = results.get(cmd_hash)
                 
-                # Check for failure (empty/unknown) - retry logic optional, here we save what we got
-                if analysis.get('type') != 'Unknown' or analysis.get('explanation').startswith('Analysis Failed'):
-                     # Only save if we got *something* or a hard failure message
+                if analysis:
+                     print(f"[Analysis] Processed: {cmd_text[:30]}... -> {analysis.get('explanation')}")
                      db_instance.save_analysis(cmd_hash, cmd_text, analysis)
+                else:
+                    # If batch failed to return strict hash, maybe mark as failed or retry later?
+                    # For now we skip saving, it will be picked up again?
+                    # WARNING: If we don't save *something*, it will be picked up forever.
+                    # We should save a failure record if missing.
+                    print(f"[Analysis] Batch Miss for: {cmd_text[:30]}...")
+                    failure_analysis = {
+                        'type': 'Unknown', 
+                        'stage': 'Unknown', 
+                        'risk': 0, 
+                        'explanation': 'Analysis Failed: Batch Miss'
+                    }
+                    db_instance.save_analysis(cmd_hash, cmd_text, failure_analysis)
                      
-                # Rate limit protection (1s between calls)
-                time.sleep(1)
+            if run_once:
+                print("[Analysis] Test run complete.")
+                break
+
+            # Rate limit protection (5 requests per minute = 12s delay)
+            time.sleep(12)
                 
+        except KeyboardInterrupt:
+            break
         except Exception as e:
              print(f"[Analysis] Error: {e}")
+             if run_once: break
              time.sleep(30)
              
         time.sleep(5) # Poll interval
 
 def main():
-    print(f"[*] Starting SSH Honeypot on {BIND_IP}:{PORT}...")
-    
+    parser = argparse.ArgumentParser(description="SSH Honeypot Server")
+    parser.add_argument("--test-analysis", action="store_true", help="Run a single pass of the analysis loop and exit")
+    args = parser.parse_args()
+
     # Ensure directories exist
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
     logs_dir = os.path.join(data_dir, 'logs')
@@ -775,6 +808,16 @@ def main():
     
     # Seed Filesystem
     fs_seeder.seed_filesystem(db)
+
+    # TEST MODE
+    if args.test_analysis:
+        print("[*] Running in Analysis Test Mode (Foreground)")
+        analysis_loop(db, llm, run_once=True)
+        return
+
+    print(f"[*] Starting SSH Honeypot on {BIND_IP}:{PORT}...")
+    
+    # Start Cleanup Thread
 
     # Start Cleanup Thread
     cleanup_thread = threading.Thread(target=cleanup_loop, args=(db,), daemon=True)
