@@ -41,10 +41,24 @@ def test_anti_harvesting_block_new_pwd_limit_reached(mock_db):
     
     server = HoneypotServer("1.2.3.4")
     
-    # Existing user ('u1') with NEW password should be blocked because limit reached (count=5)
-    # This verifies the fix: even if username known, new password treated as new attempt
+    # Existing user ('u1') with NEW password should be blocked IMMEDIATELY due to user mismatch check
     result = server.check_auth_password("u1", "newpass")
     assert result == paramiko.AUTH_FAILED
+
+def test_anti_harvesting_block_new_password_known_user(mock_db):
+    """
+    Verify that if a user has already authenticated successfully, 
+    any attempt to use a DIFFERENT password for that user fails 100%.
+    """
+    mock_db.get_unique_creds_last_24h.return_value = {("u1", "p1")}
+    server = HoneypotServer("1.2.3.4")
+    
+    # Correct password -> Success (Already tested above)
+    assert server.check_auth_password("u1", "p1") == paramiko.AUTH_SUCCESSFUL
+    
+    # New password -> FAIL
+    assert server.check_auth_password("u1", "wrong_pass") == paramiko.AUTH_FAILED
+    
 
 def test_anti_harvesting_probability_escalation(mock_db):
     # Setup: 2 distinct users -> 40% rejection probability
@@ -52,12 +66,12 @@ def test_anti_harvesting_probability_escalation(mock_db):
     
     server = HoneypotServer("1.2.3.4")
     
-    # Run 1000 trials
+    # Run 1000 trials with a NEW username
     rejections = 0
     total = 1000
     for _ in range(total):
-        # Even using a known username "u1" with new password should trigger check
-        res = server.check_auth_password("u1", "pass_attempt")
+        # Must use NEW username to trigger probability check (and not hit known-user block)
+        res = server.check_auth_password("u_new", "pass_attempt")
         if res == paramiko.AUTH_FAILED:
             rejections += 1
             

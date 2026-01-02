@@ -179,6 +179,13 @@ class HoneypotServer(paramiko.ServerInterface):
                 
                 # Count unique usernames already compromised
                 unique_users = set(u for u, p in existing_creds)
+                
+                # FIX: If we already know a valid password for this user, do NOT allow a different one.
+                # This prevents harvesting/guessing after success.
+                if username in unique_users:
+                     print(f"[!] Anti-Harvesting: Blocking {self.client_ip} for user '{username}' (Known user, new password denied)")
+                     return paramiko.AUTH_FAILED
+
                 count = len(unique_users)
                 
                 if count >= 5:
@@ -725,6 +732,36 @@ def cleanup_loop(db_instance):
             
         time.sleep(3600) # Run every hour
 
+def analysis_loop(db_instance, llm_instance):
+    """Background thread to analyze commands with LLM"""
+    print("[Analysis] Starting Threat Analysis Loop...")
+    while True:
+        try:
+            # Poll for unanalyzed commands
+            commands = db_instance.get_unanalyzed_commands(limit=5)
+            
+            if not commands:
+                time.sleep(10) # Wait if nothing to do
+                continue
+                
+            for cmd_hash, cmd_text in commands:
+                # print(f"[Analysis] Processing: {cmd_text[:30]}...")
+                analysis = llm_instance.analyze_command(cmd_text)
+                
+                # Check for failure (empty/unknown) - retry logic optional, here we save what we got
+                if analysis.get('type') != 'Unknown' or analysis.get('explanation').startswith('Analysis Failed'):
+                     # Only save if we got *something* or a hard failure message
+                     db_instance.save_analysis(cmd_hash, cmd_text, analysis)
+                     
+                # Rate limit protection (1s between calls)
+                time.sleep(1)
+                
+        except Exception as e:
+             print(f"[Analysis] Error: {e}")
+             time.sleep(30)
+             
+        time.sleep(5) # Poll interval
+
 def main():
     print(f"[*] Starting SSH Honeypot on {BIND_IP}:{PORT}...")
     
@@ -742,6 +779,10 @@ def main():
     # Start Cleanup Thread
     cleanup_thread = threading.Thread(target=cleanup_loop, args=(db,), daemon=True)
     cleanup_thread.start()
+    
+    # Start Analysis Thread
+    analysis_thread = threading.Thread(target=analysis_loop, args=(db, llm), daemon=True)
+    analysis_thread.start()
 
     # Create Socket (IPv4/IPv6 Dual Stack Support)
     addr_family = socket.AF_INET

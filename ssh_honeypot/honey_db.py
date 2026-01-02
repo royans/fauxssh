@@ -49,6 +49,7 @@ class HoneyDB(DatabaseBackend):
             cwd TEXT,
             command TEXT,
             response TEXT,
+            request_md5 TEXT,
             FOREIGN KEY(session_id) REFERENCES sessions(session_id)
         )''')
 
@@ -103,7 +104,19 @@ class HoneyDB(DatabaseBackend):
             auth_method TEXT,
             auth_data TEXT,
             success BOOLEAN,
-            client_version TEXT
+            client_version TEXT,
+            fingerprint TEXT
+        )''')
+        
+        # Threat Analysis Table
+        c.execute('''CREATE TABLE IF NOT EXISTS command_analysis (
+            command_hash TEXT PRIMARY KEY,
+            command_text TEXT,
+            activity_type TEXT,
+            stage TEXT,
+            risk_score INTEGER,
+            explanation TEXT,
+            analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )''')
         
         # Custom Migration for Fingerprint
@@ -123,6 +136,12 @@ class HoneyDB(DatabaseBackend):
         # Custom Migration for interactions source
         try:
             c.execute("ALTER TABLE interactions ADD COLUMN source TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        # Custom Migration for interactions request_md5
+        try:
+            c.execute("ALTER TABLE interactions ADD COLUMN request_md5 TEXT")
         except sqlite3.OperationalError:
             pass
 
@@ -382,3 +401,75 @@ class HoneyDB(DatabaseBackend):
              
         conn.close()
         return creds
+
+    # [NEW] Analysis Methods
+    def get_unanalyzed_commands(self, limit=10):
+        """
+        Returns distinct commands (hash, text) from interactions that are NOT in command_analysis.
+        This drives the async background thread.
+        """
+        conn = self._get_conn()
+        c = conn.cursor()
+        
+        # We join on request_md5 to avoid re-hashing in Python if possible, 
+        # but interactions has request_md5 column.
+        # We want commands where request_md5 IS NOT NULL AND request_md5 NOT IN command_analysis
+        
+        query = """
+            SELECT DISTINCT i.request_md5, i.command
+            FROM interactions i
+            WHERE i.request_md5 IS NOT NULL 
+              AND i.request_md5 != 'unknown'
+              AND i.request_md5 NOT IN (SELECT command_hash FROM command_analysis)
+            LIMIT ?
+        """
+        c.execute(query, (limit,))
+        results = c.fetchall()
+        conn.close()
+        return results
+
+    def save_analysis(self, cmd_hash, cmd_text, analysis):
+        """
+        Saves LLM analysis.
+        analysis = {'type':..., 'stage':..., 'risk':..., 'explanation':...}
+        """
+        conn = self._get_conn()
+        try:
+            conn.execute("""
+                INSERT OR IGNORE INTO command_analysis 
+                (command_hash, command_text, activity_type, stage, risk_score, explanation)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                cmd_hash, 
+                cmd_text, 
+                analysis.get('type', 'Unknown'),
+                analysis.get('stage', 'Unknown'),
+                analysis.get('risk', 0),
+                analysis.get('explanation', '')
+            ))
+            conn.commit()
+        except Exception as e:
+            print(f"[DB] Error saving analysis: {e}")
+        finally:
+            conn.close()
+            
+    def get_analysis(self, cmd_hash):
+        conn = self._get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM command_analysis WHERE command_hash = ?", (cmd_hash,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            columns = [col[0] for col in c.description]
+            result = dict(zip(columns, row))
+            # Map legacy positional to dict keys if needed, but explicit dict is better
+            return {
+                'hash': row[0],
+                'text': row[1],
+                'type': row[2],
+                'stage': row[3],
+                'risk': row[4],
+                'explanation': row[5],
+                'analyzed_at': row[6]
+            }
+        return None

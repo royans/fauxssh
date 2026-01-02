@@ -39,8 +39,14 @@ class CommandHandler:
         except ImportError:
             from handlers.system import SystemHandler
 
+        try:
+            from .handlers import network_handlers
+        except ImportError:
+            from handlers import network_handlers
+
         self.security = SecurityFilter()
         self.system_handler = SystemHandler(db, llm_interface)
+        self.network_handlers = network_handlers
         
         # Expanded whitelist maps commands to handler functions or generic
         self.STATE_COMMANDS = {
@@ -497,6 +503,16 @@ class CommandHandler:
             self.db.cache_response(cmd, cwd, resp)
 
         out, up = self._process_llm_json(j, t, user=user)
+        
+        # Sync Analysis Save
+        if up.get('analysis'):
+             try:
+                 cmd_hash = hashlib.md5(cmd.encode('utf-8')).hexdigest()
+                 self.db.save_analysis(cmd_hash, cmd, up['analysis'])
+                 print(f"[Handler] Saved Sync Analysis for '{cmd}'")
+             except Exception as e:
+                 print(f"[Handler] Error saving sync analysis: {e}")
+                 
         return out, up, {'source': 'llm', 'cached': False}
 
     def handle_ls(self, cmd, context):
@@ -727,7 +743,32 @@ class CommandHandler:
         return self.system_handler.handle_uptime(cmd, context)
 
     def handle_ifconfig(self, cmd, context):
-        return self.system_handler.handle_ifconfig(cmd, context)
+        # return self.system_handler.handle_ifconfig(cmd, context)
+        # Use new consistent network persona
+        out = self.network_handlers.handle_ifconfig([])
+        return f"{out}\n", {}
+
+    def handle_ip(self, cmd, context):
+        args = cmd.split()[1:]
+        out = self.network_handlers.handle_ip(args)
+        return f"{out}\n", {}
+
+    def handle_ping(self, cmd, context):
+        args = cmd.split()[1:]
+        out = self.network_handlers.handle_ping(args)
+        return f"{out}\n", {}
+
+    def handle_netstat(self, cmd, context):
+        args = cmd.split()[1:]
+        client_ip = context.get('client_ip', 'unknown')
+        out = self.network_handlers.handle_netstat(args, client_ip)
+        return f"{out}\n", {}
+
+    def handle_ss(self, cmd, context):
+        args = cmd.split()[1:]
+        client_ip = context.get('client_ip', 'unknown')
+        out = self.network_handlers.handle_ss(args, client_ip)
+        return f"{out}\n", {}
 
     def handle_free(self, cmd, context):
         return self.system_handler.handle_free(cmd, context)

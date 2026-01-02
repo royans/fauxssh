@@ -438,3 +438,41 @@ Other		: Something
         res, _, meta = handler.handle_dmidecode(cmd, context)
         assert res == "Mock LLM"
         handler.handle_generic.assert_called_once()
+
+    def test_handle_ip_integration(self, handler):
+        # We need to mock the network_handlers inside the handler instance
+        handler.network_handlers = MagicMock()
+        handler.network_handlers.handle_ip.return_value = "Mock IP Addr Output"
+        
+        cmd = "ip addr"
+        context = {}
+        res, _ = handler.handle_ip(cmd, context)
+        
+        assert "Mock IP Addr Output" in res
+        # Verify args passed (addr)
+        handler.network_handlers.handle_ip.assert_called_with(['addr'])
+
+    def test_handle_ifconfig_integration(self, handler):
+        handler.network_handlers = MagicMock()
+        handler.network_handlers.handle_ifconfig.return_value = "Mock Ifconfig Output"
+        
+        cmd = "ifconfig"
+        context = {}
+        res, _ = handler.handle_ifconfig(cmd, context)
+        
+        assert "Mock Ifconfig Output" in res
+        handler.network_handlers.handle_ifconfig.assert_called_with([])
+
+    def test_handle_ping_integration(self, handler):
+        handler.network_handlers = MagicMock()
+        handler.network_handlers.handle_ping.return_value = "Mock Ping Output"
+        
+        cmd = "ping -c 2 localhost"
+        context = {}
+        res, _ = handler.handle_ping(cmd, context)
+        
+        assert "Mock Ping Output" in res
+        # Verify args passed (['-c', '2', 'localhost'])
+        # Split logic in handler is cmd.split()[1:]
+        expected_args = ['-c', '2', 'localhost']
+        handler.network_handlers.handle_ping.assert_called_with(expected_args)

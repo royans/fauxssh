@@ -106,30 +106,67 @@ class LLMInterface:
                 "responseMimeType": "text/plain"
             }
         }
-
+        
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={self.api_key}"
+        
         try:
-            model_name = config.get('llm', 'model_name') or "gemma-3-27b-it"
-            resp = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.api_key}",
-                headers=headers,
-                data=json.dumps(data),
-                timeout=60
-            )
-            resp.raise_for_status()
-            
-            result = resp.json()
-            # Parse Gemini Response
-            if 'candidates' in result and result['candidates']:
-                text = result['candidates'][0]['content']['parts'][0]['text']
-                # Cleanup markdown blocks if LLM ignores instruction
-                # Remove ```json or ```bash or just ``` lines
-                text = re.sub(r'^```\w*\n?', '', text)
-                text = re.sub(r'\n?```$', '', text)
-                text = text.strip()
-                return text
-            else:
-                return "" # Empty response or blocked
+            resp = requests.post(url, headers=headers, json=data, timeout=10)
+            if resp.status_code != 200:
+                print(f"[!] LLM API Error {resp.status_code}: {resp.text}")
+                return '{"output": "Error: AI Core Malfunction.", "new_cwd": null}'
                 
+            resp_json = resp.json()
+            try:
+                # Gemini Pro structure
+                text = resp_json['candidates'][0]['content']['parts'][0]['text']
+                # Strip Markdown code blocks if present (Gemini loves ```json ... ```)
+                text = text.replace('```json', '').replace('```', '').strip()
+                return text
+            except (KeyError, IndexError) as e:
+                print(f"[!] LLM Response Parsing Error: {e} | Resp: {resp.text[:100]}")
+                return '{"output": "Error: Parsing Failure.", "new_cwd": null}'
+
         except Exception as e:
-            print(f"[LLM Error] {e}")
-            return "bash: fork: retry: Resource temporarily unavailable"
+             print(f"[!] LLM Request Exception: {e}")
+             return '{"output": "Error: Network Failure.", "new_cwd": null}'
+
+    def verify_api(self):
+        """Simple check to see if API Key works."""
+        val = self._call_api("Reply with exactly the word 'OK'.")
+        return "OK" in val
+
+    def analyze_command(self, command):
+        """
+        Analyzes a command for security context.
+        Returns dict: {type, stage, risk, explanation}
+        """
+        try:
+            prompt_path = os.path.join(os.path.dirname(__file__), 'prompts', 'analysis_prompt.txt')
+            with open(prompt_path, 'r') as f:
+                template = f.read()
+        except:
+             # Fallback prompt if file missing
+             template = """
+             You are a cybersecurity expert analyzing attacker commands in a honeypot.
+             Analyze the following command: '{command}'
+             
+             Return ONLY a JSON object with these keys:
+             - type: (Reconnaissance, Execution, Persistence, etc.)
+             - stage: (Recon, Weaponization, Delivery, Exploitation, Installation, C2, Actions)
+             - risk: (Integer 0-10)
+             - explanation: (Brief 1 sentence)
+             """
+             
+        prompt = template.replace('{command}', command)
+        
+        raw_json = self._call_api(prompt)
+        try:
+            data = json.loads(raw_json)
+            return {
+                'type': data.get('type', 'Unknown'),
+                'stage': data.get('stage', 'Unknown'),
+                'risk': data.get('risk', 0),
+                'explanation': data.get('explanation', 'Analysis Failed: Invalid Response')
+            }
+        except:
+            return {'type': 'Unknown', 'stage': 'Unknown', 'risk': 0, 'explanation': 'Analysis Failed: ' + raw_json[:50]}
