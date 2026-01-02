@@ -27,7 +27,8 @@ class TestLongCommands:
         
     def test_long_command_length(self, handler):
         # 2. Very long command > 150 chars
-        cmd = "echo " + "A" * 200
+        # We use 'printf' instead of 'echo' because 'echo' is now EXEMPT from complexity checks.
+        cmd = "printf " + "A" * 200
         handler.handle_generic.reset_mock()
         
         resp, _, meta = handler.process_command(cmd, {})
@@ -109,7 +110,8 @@ class TestLongCommands:
         
         context = {'cwd': '/root', 'session_id': 'test_sess'}
         # Must contain && or ;; or be long to trigger offload
-        chain_cmd = "echo A && echo B"
+        # We use 'sleep' because 'echo' is exempt.
+        chain_cmd = "sleep 1 && sleep 2"
         
         # 1. Cache HIT
         # db.get_cached_response returns raw text or JSON string

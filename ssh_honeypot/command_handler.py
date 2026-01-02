@@ -147,9 +147,16 @@ class CommandHandler:
         # can't handle (and would benefit from LLM reasoning), offload it immediately.
         # Thresholds: > 150 chars, > 2 semicolons, > 2 pipes, or presence of logical AND/OR (&&, ||)
         # 0. Complex Command Chains (Simple Heuristic for now)
+        try:
+            base_cmd = cmd.split()[0]
+        except IndexError:
+            return "", {}, {'source': 'local', 'cached': False}
+
+        # 0. Complex Command Chains (Simple Heuristic for now)
         is_complex = (len(cmd) > 150) or (cmd.count(';') > 2) or (cmd.count('|') > 2) or ('&&' in cmd) or ('||' in cmd)
         
-        if is_complex:
+        # Exempt 'echo' from complexity check (always handle locally to prevent JSON leaks on long strings)
+        if is_complex and base_cmd != 'echo':
              # Check if we should log/print this event
              # Calculate signature for debug/cache key (though handle_generic uses raw cmd)
              sig = hashlib.md5(cmd.encode()).hexdigest()
@@ -158,11 +165,6 @@ class CommandHandler:
              # handle_generic checks cache internally and calls LLM if needed
              # This effectively treats the long chain as a single script execution
              return self.handle_generic(cmd, context)
-
-        try:
-            base_cmd = cmd.split()[0]
-        except IndexError:
-            return "", {}, {'source': 'local', 'cached': False}
         
         # 0. Command Chaining Support (;)
         # We need to handle this BEFORE pipe support, as ; has lower precedence.
@@ -606,12 +608,17 @@ class CommandHandler:
         # Check User FS first (override)
         user_node = self.db.get_user_node(client_ip, user, abs_path)
         if user_node:
-             return self._format_ls_output([user_node], flags), {}
+             if 'd' in flags or user_node.get('type') == 'file':
+                 f = flags.copy()
+                 f.add('a')
+                 return self._format_ls_output([user_node], f), {}
         
         # Check Global FS
         global_node = self.db.get_fs_node(abs_path)
         if global_node and global_node.get('type') == 'file': # Only return if it's a file
-             return self._format_ls_output([global_node], flags), {}
+             f = flags.copy()
+             f.add('a')
+             return self._format_ls_output([global_node], f), {}
 
         # 3. Check Global FS Cache (Treat as Directory)
         cached_files = self.db.list_fs_dir(abs_path)
@@ -1976,19 +1983,29 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
         try:
             return json.loads(clean_fixed), ""
         except: pass
-
+        
         # 5. Last Resort: Regex Extraction of the 'output' field
         # We try to grab the content of "output": "..."
         # This handles cases where other fields (like generated_files) are malformed
         try:
             # Look for "output": "..." ignoring escaped quotes
             # We use a non-greedy match that respects escaped quotes
-            out_match = re.search(r'"output"\s*:\s*"(.*?)(?<!\\)"', clean, re.DOTALL)
+            # Handle both "output" and 'output' keys, and "val" and 'val' values
+            # Capture Group 1: Quote char (' or ")
+            # Capture Group 2: Content
+            out_match = re.search(r'[\'"]output[\'"]\s*:\s*([\'"])(.*?)(?<!\\)\1', clean, re.DOTALL)
             if out_match:
-                # We found the output string! But it is raw string content (e.g. includes \n)
-                # We need to unescape it to get real text unless we are lazy.
-                # json.loads of just this string is safest.
-                pseudo_json = '{"output": "' + out_match.group(1) + '"}'
+                quote_char = out_match.group(1)
+                content = out_match.group(2)
+                
+                if quote_char == "'":
+                    # Manual unescape for single quotes to avoid ast/eval
+                    # Replace escaped single quote with single quote
+                    content = content.replace(r"\'", "'")
+                
+                # Reconstruct valid JSON safely using json.dumps
+                # This handles escaping newlines, quotes, etc. required for the value
+                pseudo_json = '{ "output": ' + json.dumps(content) + ' }'
                 return json.loads(pseudo_json), ""
         except: pass
         

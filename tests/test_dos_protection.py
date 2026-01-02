@@ -44,7 +44,7 @@ class TestDoSProtection(unittest.TestCase):
         # 3. Start Server if not running
         if not is_server_running():
             print(f"[*] Starting Test Server on {TEST_PORT}")
-            cls.server_thread = threading.Thread(target=server_main)
+            cls.server_thread = threading.Thread(target=server_main, args=([],))
             cls.server_thread.daemon = True 
             cls.server_thread.start()
             # Wait for start

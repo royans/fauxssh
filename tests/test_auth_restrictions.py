@@ -38,7 +38,7 @@ class TestAuthRestrictions(unittest.TestCase):
         ssh_honeypot.server.db.get_unique_creds_last_24h = MagicMock(return_value=set())
         
         if not is_server_running(TEST_PORT):
-            cls.server_thread = threading.Thread(target=server_main)
+            cls.server_thread = threading.Thread(target=server_main, args=([],))
             cls.server_thread.daemon = True
             cls.server_thread.start()
             time.sleep(2)

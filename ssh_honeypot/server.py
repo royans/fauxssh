@@ -319,6 +319,7 @@ class HoneypotServer(paramiko.ServerInterface):
         return paramiko.AUTH_SUCCESSFUL
         
     def check_auth_publickey(self, username, key):
+        self.username = username
         client_version = "unknown"
         if self.transport_ref:
             client_version = self.transport_ref.remote_version
@@ -919,10 +920,10 @@ def analysis_loop(db_instance, llm_instance, run_once=False):
              
         time.sleep(5) # Poll interval
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description="SSH Honeypot Server")
     parser.add_argument("--test-analysis", action="store_true", help="Run a single pass of the analysis loop and exit")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # Ensure directories exist
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
