@@ -17,6 +17,8 @@ try:
     from .config_manager import config
     from .sftp_handler import HoneySFTPServer
     from . import fs_seeder
+    # Initialize Logging
+    from .logger import log
 except ImportError:
     # Fallback for direct execution
     from honey_db import HoneyDB
@@ -26,6 +28,8 @@ except ImportError:
     from config_manager import config
     from sftp_handler import HoneySFTPServer
     import fs_seeder
+    # Logger Fallback
+    from logger import log
 
 
 # Settings
@@ -37,16 +41,6 @@ except ValueError:
     PORT = 2222
 
 BIND_IP = os.getenv('SSHPOT_BIND_IP') or config.get('server', 'bind_ip') or '0.0.0.0'
-
-
-
-# Initialize Logging
-import logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
 
 # Initialize DB
 db = HoneyDB()
@@ -76,27 +70,131 @@ if not api_key:
                 api_key = os.getenv("GOOGLE_API_KEY")
                 if api_key:
                     if not api_key.strip():
-                        logging.warning(f"Found .env at {env_path} but GOOGLE_API_KEY is empty or whitespace.")
+                        log.warning(f"Found .env at {env_path} but GOOGLE_API_KEY is empty or whitespace.")
                         continue
-                    logging.info(f"Loaded .env from {env_path}. Key length: {len(api_key.strip())}")
+                    log.info(f"Loaded .env from {env_path}. Key length: {len(api_key.strip())}")
                     env_loaded = True
                     break
         
         if not env_loaded:
-             logging.warning(f"No .env file found/valid in search paths: {candidate_paths}. Using env vars only.")
+             log.warning(f"No .env file found/valid in search paths: {candidate_paths}. Using env vars only.")
 
     except ImportError:
-        print("[!] python-dotenv not installed. Skipping .env load.")
+        log.warning("[!] python-dotenv not installed. Skipping .env load.")
     except Exception as e:
-        print(f"[!] Error loading .env: {e}")
-        print("[!] python-dotenv not installed. Skipping .env load.")
-    except Exception as e:
-        print(f"[!] Error loading .env: {e}")
+        log.error(f"[!] Error loading .env: {e}")
 
 llm = LLMInterface(api_key)
 
 class HoneypotServer(paramiko.ServerInterface):
     def __init__(self, client_ip):
+        self.event = threading.Event()
+        self.client_ip = client_ip
+        self.username = None
+        self.password = None
+        self.subsystem = None
+        self.transport_ref = None
+
+    def check_channel_request(self, kind, chanid):
+        if kind == 'session':
+            return paramiko.OPEN_SUCCEEDED
+        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+
+    def _parse_ssh_string(self, data, offset=0):
+        try:
+            if len(data) < offset + 4: return None, offset
+            length = struct.unpack('>I', data[offset:offset+4])[0]
+            offset += 4
+            if len(data) < offset + length: return None, offset
+            s = data[offset:offset+length]
+            return s.decode('utf-8', errors='ignore'), offset + length
+        except: return None, offset
+
+    def _compute_hassh(self, payload):
+        try:
+            # Skip MSG(1) + Cookie(16) = 17
+            offset = 17
+            
+            # 1. KEX
+            kex, offset = self._parse_ssh_string(payload, offset)
+            # 2. HostKey (Skip)
+            _, offset = self._parse_ssh_string(payload, offset)
+            # 3. Enc C2S
+            enc, offset = self._parse_ssh_string(payload, offset)
+            # 4. Enc S2C (Skip)
+            _, offset = self._parse_ssh_string(payload, offset)
+            # 5. Mac C2S
+            mac, offset = self._parse_ssh_string(payload, offset)
+            # 6. Mac S2C (Skip)
+            _, offset = self._parse_ssh_string(payload, offset)
+            # 7. Comp C2S
+            comp, offset = self._parse_ssh_string(payload, offset)
+            
+            if kex and enc and mac and comp:
+                raw_str = f"{kex};{enc};{mac};{comp}"
+                md5 = hashlib.md5(raw_str.encode()).hexdigest()
+                return md5, raw_str
+        except: pass
+        return None, None
+
+    def _extract_fingerprint(self):
+        if not self.transport_ref: return None
+        
+        fp = {}
+        try:
+            fp['cipher'] = getattr(self.transport_ref, 'remote_cipher', 'unknown')
+            fp['mac'] = getattr(self.transport_ref, 'remote_mac', 'unknown')
+            fp['compression'] = getattr(self.transport_ref, 'remote_compression', 'unknown')
+            fp['kex'] = getattr(self.transport_ref, 'kex_alg', 'unknown')
+            
+            # Advanced Fingerprinting (HASSH) via internal attribute
+            if hasattr(self.transport_ref, '_latest_kex_init'):
+                 hassh, raw = self._compute_hassh(self.transport_ref._latest_kex_init)
+                 if hassh:
+                     fp['hassh'] = hassh
+                     fp['hassh_algorithms'] = raw
+            
+            return fp
+        except: return None
+
+    def check_auth_password(self, username, password):
+        self.username = username
+        self.password = password
+        
+        # Exponential Login Rejection (Anti-Harvesting)
+        # Check if this IP has already compromised too many unique usernames in the last 24h
+        try:
+            # Get set of (username, password) tuples that worked
+            existing_creds = db.get_unique_creds_last_24h(self.client_ip)
+            
+            # Check if this EXACT credential pair has worked before
+            if (username, password) not in existing_creds:
+                # This is a NEW credential candidate (either new user, or existing user with new password)
+                
+                # Count unique usernames already compromised
+                unique_users = set(u for u, p in existing_creds)
+                
+                # FIX: If we already know a valid password for this user, do NOT allow a different one.
+                # This prevents harvesting/guessing after success.
+                if username in unique_users:
+                     log.warning(f"[!] Anti-Harvesting: Blocking {self.client_ip} for user '{username}' (Known user, new password denied)")
+                     return paramiko.AUTH_FAILED
+
+                count = len(unique_users)
+                
+                if count >= 5:
+                    # Hard Block: Too many unique successful logins
+                    log.warning(f"[!] Anti-Harvesting: Blocking {self.client_ip} for user '{username}' (Limit Reached: {count})")
+                    return paramiko.AUTH_FAILED
+                
+                # Probability Rejection: 1->20%, 2->40%, 3->60%, 4->80%
+                prob = count / 5.0
+                if random.random() < prob:
+                     log.warning(f"[!] Anti-Harvesting: Randomly blocking {self.client_ip} for user '{username}' (Prob: {prob:.2f})")
+                     return paramiko.AUTH_FAILED
+
+        except Exception as e:
+            log.error(f"[!] Error in Anti-Harvesting check: {e}")
         self.event = threading.Event()
         self.client_ip = client_ip
         self.username = None
@@ -226,13 +324,40 @@ class HoneypotServer(paramiko.ServerInterface):
             client_version = self.transport_ref.remote_version
             
         key_type = key.get_name()
-        # fingerprint = key.get_fingerprint() # bytes
-        # Let's store type and base64 key for full analysis
-        auth_data = f"{key_type} {key.get_base64()}"
+        key_b64 = key.get_base64()
+        auth_data = f"{key_type} {key_b64}"
+        
+        # Check ~/.ssh/authorized_keys
+        # Resolve home dir
+        home_dir = "/root" if username == "root" else f"/home/{username}"
+        auth_keys_path = f"{home_dir}/.ssh/authorized_keys"
+        
+        # Check DB for this file
+        # We need to scan user files (highest priority)
+        # Note: We rely on db.get_user_node doing the lookup
+        node = db.get_user_node(self.client_ip, username, auth_keys_path)
+        
+        authorized = False
+        if node and node.get('type') == 'file' and node.get('content'):
+            content = node['content']
+            # Parse authed keys (one per line)
+            for line in content.splitlines():
+                if not line.strip() or line.strip().startswith('#'): continue
+                # format: type key comment
+                parts = line.split()
+                if len(parts) >= 2:
+                    if parts[0] == key_type and parts[1] == key_b64:
+                        authorized = True
+                        break
         
         fp = self._extract_fingerprint()
-        db.log_auth_event(self.client_ip, username, 'publickey', auth_data, False, client_version, fingerprint=fp)
-        return paramiko.AUTH_FAILED
+        db.log_auth_event(self.client_ip, username, 'publickey', auth_data, authorized, client_version, fingerprint=fp)
+        
+        if authorized:
+            log.info(f"[Auth] Public Key Login SUCCESS for '{username}' from {self.client_ip}")
+            return paramiko.AUTH_SUCCESSFUL
+        else:
+            return paramiko.AUTH_FAILED
 
     def get_allowed_auths(self, username):
         return 'password,publickey'
@@ -277,13 +402,13 @@ def handle_connection(client, addr):
     # 1. Check Global Connection Limit
     with active_sessions_lock:
         if active_sessions >= MAX_CONCURRENT_SESSIONS:
-            print(f"[!] Dropping connection from {ip}: Max sessions reached ({MAX_CONCURRENT_SESSIONS})")
+            log.warning(f"[!] Dropping connection from {ip}: Max sessions reached ({MAX_CONCURRENT_SESSIONS})")
             client.close()
             return
         
         # 2. Check Per-IP Limit
         if ip_connection_counts[ip] >= MAX_SESSIONS_PER_IP:
-            print(f"[!] Dropping connection from {ip}: Max sessions per IP reached ({MAX_SESSIONS_PER_IP})")
+            log.warning(f"[!] Dropping connection from {ip}: Max sessions per IP reached ({MAX_SESSIONS_PER_IP})")
             client.close()
             return
             
@@ -310,12 +435,12 @@ def _handle_connection_logic(client, addr):
         host_key = paramiko.RSAKey(filename=HOST_KEY_FILE)
     except FileNotFoundError:
         # Generate on fly if missing (first run)
-        print("Generating new host key...")
+        log.info("Generating new host key...")
         host_key = paramiko.RSAKey.generate(2048)
         host_key.write_private_key_file(HOST_KEY_FILE)
     
     except Exception as e:
-        print(f"[!] Error loading host key: {e}")
+        log.error(f"[!] Error loading host key: {e}")
         return
 
     try:
@@ -360,10 +485,10 @@ def _handle_connection_logic(client, addr):
         pass
     
     try:
-        db.start_session(session_id, ip, server.username, server.password, transport.remote_version, fingerprint=fingerprint)
-        print(f"[*] New Session {session_id} from {ip} as {server.username}")
+        db.start_session(session_id, ip, server.username, server.password, transport.remote_version, fingerprint=json.dumps(fingerprint))
+        log.info(f"[*] New Session {session_id} from {ip} as {server.username}")
     except Exception as e:
-        print(f"[!] Critical Error starting session: {e}")
+        log.error(f"[!] Critical Error starting session: {e}")
 
     # Shell Loop or Single Command
     user = server.username if server.username else "alabaster"
@@ -402,7 +527,7 @@ def _handle_connection_logic(client, addr):
 
     # Handle SFTP Subsystem
     if server.subsystem == 'sftp':
-        print(f"[*] Starting SFTP Handler for {session_id}")
+        log.info(f"[*] Starting SFTP Handler for {session_id}")
         try:
             # Paramiko SFTPServer(channel, name, server, sftp_si)
             sftp = paramiko.SFTPServer(chan, session_id, server, HoneySFTPServer)
@@ -411,7 +536,7 @@ def _handle_connection_logic(client, addr):
             while transport.is_active():
                 time.sleep(1)
         except Exception as e:
-            print(f"[!] SFTP Error: {e}")
+            log.error(f"[!] SFTP Error: {e}")
         return
 
     # State
@@ -442,7 +567,7 @@ def _handle_connection_logic(client, addr):
         
         # Intercept SCP Interactive
         if cmd.strip().startswith('scp '):
-             print(f"[*] Starting SCP Handler for {session_id} (cmd: {cmd})")
+             log.info(f"[*] Starting SCP Handler for {session_id} (cmd: {cmd})")
              try:
                  with open('/tmp/scp_server_debug.log', 'a') as f:
                      f.write(f"{time.time()} [SERVER] Calling handle_scp_interactive\n")
@@ -461,7 +586,7 @@ def _handle_connection_logic(client, addr):
                  chan.close()
                  return
              except Exception as e:
-                 print(f"[!] SCP Handler Error: {e}")
+                 log.error(f"[!] SCP Handler Error: {e}")
                  with open('/tmp/scp_server_debug.log', 'a') as f:
                      f.write(f"{time.time()} [SERVER] Exception: {e}\n")
                  return
@@ -478,7 +603,8 @@ def _handle_connection_logic(client, addr):
         except:
             cmd_hash = "unknown"
             
-        print(f"[DEBUG] Exec '{cmd}' -> Response Len: {len(resp_text)}")
+        log.debug(f"[DEBUG] Exec '{cmd}' -> Response Len: {len(resp_text)}")
+        log.debug(f"[DEBUG] Logging Interaction: Source Type: {type(metadata.get('source'))} Val: {metadata.get('source')}")
         
         # Log Interaction
         db.log_interaction(
@@ -486,10 +612,10 @@ def _handle_connection_logic(client, addr):
             cwd, 
             cmd, 
             resp_text, 
-            source=metadata.get('source', 'unknown'), 
+            source=str(metadata.get('source', 'unknown')), 
             was_cached=metadata.get('cached', False),
             duration_ms=duration_ms,
-            request_md5=cmd_hash
+            request_md5=str(cmd_hash)
         )
 
         try:
@@ -537,7 +663,7 @@ def _handle_connection_logic(client, addr):
                 history_cursor = len(history)
                 
                 if cmd:
-                    print(f"DEBUG: Processing cmd '{cmd}' in cwd '{cwd}'")
+                    log.debug(f"Processing cmd '{cmd}' in cwd '{cwd}'")
                     # Special Client-Side Commands
                     if cmd == 'exit':
                         break
@@ -620,10 +746,10 @@ def _handle_connection_logic(client, addr):
                         cwd, 
                         cmd, 
                         resp_text, 
-                        source=metadata.get('source', 'unknown'), 
+                        source=str(metadata.get('source', 'unknown')), 
                         was_cached=metadata.get('cached', False),
                         duration_ms=duration_ms,
-                        request_md5=cmd_hash
+                        request_md5=str(cmd_hash)
                     )
                     
                     # Manual JSON logging removed (handled by db.log_interaction)
@@ -699,7 +825,7 @@ def _handle_connection_logic(client, addr):
                     pass
 
     except Exception as e:
-        print(f"Session Error: {e}")
+        log.error(f"Session Error: {e}")
     finally:
         db.end_session(session_id)
         transport.close()
@@ -717,11 +843,11 @@ def cleanup_loop(db_instance):
                 from config_manager import config
                 
             days = config.get('upload', 'cleanup_days') or 30
-            print(f"[Cleanup] Running prune job (retention: {days} days)...")
+            log.info(f"[Cleanup] Running prune job (retention: {days} days)...")
             
             deleted_items = db_instance.prune_uploads(days)
             if deleted_items:
-                print(f"[Cleanup] Removed {len(deleted_items)} old upload records from DB.")
+                log.info(f"[Cleanup] Removed {len(deleted_items)} old upload records from DB.")
                 
                 # Optional: Delete physical files if we mapped them one-to-one
                 # Since sftp_handler saves to 'uploaded_files/SESSION_ID/filename',
@@ -732,7 +858,7 @@ def cleanup_loop(db_instance):
                 # (Simple hygiene)
                 
         except Exception as e:
-            print(f"[Cleanup] Error: {e}")
+            log.error(f"[Cleanup] Error: {e}")
             
         time.sleep(3600) # Run every hour
 
@@ -740,7 +866,7 @@ import argparse
 
 def analysis_loop(db_instance, llm_instance, run_once=False):
     """Background thread to analyze commands with LLM"""
-    print("[Analysis] Starting Threat Analysis Loop...")
+    log.info("[Analysis] Starting Threat Analysis Loop...")
     while True:
         try:
             # Poll for unanalyzed commands
@@ -748,27 +874,27 @@ def analysis_loop(db_instance, llm_instance, run_once=False):
             
             if not commands:
                 if run_once:
-                    print("[Analysis] No commands to analyze. Exiting test mode.")
+                    log.info("[Analysis] No commands to analyze. Exiting test mode.")
                     break
                 time.sleep(10) # Wait if nothing to do
                 continue
                 
             # Batch Analysis
-            print(f"[Analysis] Batch processing {len(commands)} commands...")
+            log.info(f"[Analysis] Batch processing {len(commands)} commands...")
             results = llm_instance.analyze_batch(commands)
             
             for cmd_hash, cmd_text in commands:
                 analysis = results.get(cmd_hash)
                 
                 if analysis:
-                     print(f"[Analysis] Processed: {cmd_text[:30]}... -> {analysis.get('explanation')}")
+                     log.info(f"[Analysis] Processed: {cmd_text[:30]}... -> {analysis.get('explanation')}")
                      db_instance.save_analysis(cmd_hash, cmd_text, analysis)
                 else:
                     # If batch failed to return strict hash, maybe mark as failed or retry later?
                     # For now we skip saving, it will be picked up again?
                     # WARNING: If we don't save *something*, it will be picked up forever.
                     # We should save a failure record if missing.
-                    print(f"[Analysis] Batch Miss for: {cmd_text[:30]}...")
+                    log.warning(f"[Analysis] Batch Miss for: {cmd_text[:30]}...")
                     failure_analysis = {
                         'type': 'Unknown', 
                         'stage': 'Unknown', 
@@ -778,7 +904,7 @@ def analysis_loop(db_instance, llm_instance, run_once=False):
                     db_instance.save_analysis(cmd_hash, cmd_text, failure_analysis)
                      
             if run_once:
-                print("[Analysis] Test run complete.")
+                log.info("[Analysis] Test run complete.")
                 break
 
             # Rate limit protection (5 requests per minute = 12s delay)
@@ -787,7 +913,7 @@ def analysis_loop(db_instance, llm_instance, run_once=False):
         except KeyboardInterrupt:
             break
         except Exception as e:
-             print(f"[Analysis] Error: {e}")
+             log.error(f"[Analysis] Error: {e}")
              if run_once: break
              time.sleep(30)
              
@@ -811,11 +937,11 @@ def main():
 
     # TEST MODE
     if args.test_analysis:
-        print("[*] Running in Analysis Test Mode (Foreground)")
+        log.info("[*] Running in Analysis Test Mode (Foreground)")
         analysis_loop(db, llm, run_once=True)
         return
 
-    print(f"[*] Starting SSH Honeypot on {BIND_IP}:{PORT}...")
+    log.info(f"[*] Starting SSH Honeypot on {BIND_IP}:{PORT}...")
     
     # Start Cleanup Thread
 

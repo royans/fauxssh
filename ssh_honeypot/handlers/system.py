@@ -3,9 +3,16 @@ import random
 from .base import BaseHandler
 
 try:
+    from ..logger import log
+except ImportError:
+    from logger import log
+
+try:
     from ..config_manager import config
 except ImportError:
     from config_manager import config
+
+import time
 
 class SystemHandler(BaseHandler):
     def __init__(self, db, llm):
@@ -183,7 +190,7 @@ Swap:       2097148           0     2097148
                 out.append(f"{disk['fs']:<12} {disk['size']:>5} {disk['used']:>5} {disk['avail']:>5} {disk['use']:>4} {disk['mount']}")
             return "\n".join(out) + "\n", {}
         except Exception as e:
-            print(f"[ERROR] handle_df failed: {e}")
+            log.error(f"[ERROR] handle_df failed: {e}")
             return f"Internal Error: {e}\n", {}
         
     def handle_mount(self, cmd, context):

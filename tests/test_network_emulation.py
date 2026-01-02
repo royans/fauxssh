@@ -64,7 +64,7 @@ class TestNetworkEmulation(unittest.TestCase):
     def test_handle_netstat(self):
         """Verify netstat shows client IP"""
         client_ip = "203.0.113.55"
-        output = network_handlers.handle_netstat([], client_ip)
+        output = network_handlers.handle_netstat(['-a'], client_ip)
         
         self.assertIn("Active Internet connections", output)
         self.assertIn("0.0.0.0:22", output) # Listen

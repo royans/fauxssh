@@ -11,7 +11,8 @@ DEFAULT_CONFIG = {
     "llm": {
         "model_name": "gemma-3-27b-it",
         "max_tokens": 2048,
-        "temperature": 1.0
+        "temperature": 1.0,
+        "timeout": 60
     },
     "logging": {
         "json_log_file": "data/honeypot.json.log"

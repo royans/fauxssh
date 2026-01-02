@@ -17,6 +17,11 @@ except ImportError:
     from config_manager import config
 import shlex
 
+try:
+    from .logger import log
+except ImportError:
+    from logger import log
+
 class CommandHandler:
     def __init__(self, llm_interface, db):
         self.llm = llm_interface
@@ -62,7 +67,7 @@ class CommandHandler:
             'uname', 'hostname', 'uptime', 'date', 'df', 'du', 'free', 'nproc',
             'grep', 'awk', 'sed', 'find', 'locate', 'head', 'tail', 'more', 'less', 'wc', 'diff',
             'tar', 'zip', 'unzip', 'gzip', 'gunzip', 'md5sum',
-            'ssh', 'ping',
+            'ssh', 'ping', 'sleep',
             'ifconfig', 'ip', 'netstat', 'ss', 'route', 'mount',
             'python', 'python3', 'perl', 'bash', 'sh', 'base64',
             'dmidecode', 'lscpu', 'lspci'
@@ -141,13 +146,14 @@ class CommandHandler:
         # If the command is very long or involves complex chaining/logic that our simple emulation
         # can't handle (and would benefit from LLM reasoning), offload it immediately.
         # Thresholds: > 150 chars, > 2 semicolons, > 2 pipes, or presence of logical AND/OR (&&, ||)
+        # 0. Complex Command Chains (Simple Heuristic for now)
         is_complex = (len(cmd) > 150) or (cmd.count(';') > 2) or (cmd.count('|') > 2) or ('&&' in cmd) or ('||' in cmd)
         
         if is_complex:
              # Check if we should log/print this event
              # Calculate signature for debug/cache key (though handle_generic uses raw cmd)
              sig = hashlib.md5(cmd.encode()).hexdigest()
-             print(f"[Command] Complex chain detected (Len: {len(cmd)}, Sig: {sig[:8]}). Offloading entire chain to LLM.")
+             log.info(f"[Command] Complex chain detected (Len: {len(cmd)}, Sig: {sig[:8]}). Offloading entire chain to LLM.")
              
              # handle_generic checks cache internally and calls LLM if needed
              # This effectively treats the long chain as a single script execution
@@ -195,7 +201,7 @@ class CommandHandler:
 
         for token in self.HONEYTOKENS:
             if token in cmd:
-                print(f"[!!!] HONEYTOKEN TRIGGERED: {token} by {client_ip}")
+                log.warning(f"[!!!] HONEYTOKEN TRIGGERED: {token} by {client_ip}")
                 try:
                      self.db.log_interaction(context.get('session_id', 'unknown'), f"ALERT: Token {token}", "User accessed bait file", "ALERT: Honeytoken Triggered", source="system", was_cached=False)
                 except: pass
@@ -242,6 +248,69 @@ class CommandHandler:
             # Execute Right Side
             return self.process_command(right_cmd, right_context)
 
+        # 0.6 Redirection Support (> and >>)
+        redirect_pos = -1
+        append_mode = False
+        in_sq = False
+        in_dq = False
+        escaped = False
+        
+        for i, char in enumerate(cmd):
+            if escaped: escaped = False; continue
+            if char == '\\': escaped = True; continue
+            
+            if char == "'" and not in_dq: in_sq = not in_sq
+            elif char == '"' and not in_sq: in_dq = not in_dq
+            elif char == '>' and not in_sq and not in_dq:
+                redirect_pos = i
+                if i + 1 < len(cmd) and cmd[i+1] == '>':
+                     append_mode = True
+                break
+        
+        if redirect_pos != -1:
+            left_cmd = cmd[:redirect_pos].strip()
+            right_file = cmd[redirect_pos+1:].strip()
+            if append_mode: right_file = cmd[redirect_pos+2:].strip()
+            
+            # Execute command to get output
+            out_text, updates, meta = self.process_command(left_cmd, context)
+            
+            # Strip target file quotes if present
+            if (right_file.startswith('"') and right_file.endswith('"')) or (right_file.startswith("'") and right_file.endswith("'")):
+                 right_file = right_file[1:-1]
+                 
+            # Resolve path
+            abs_path = self._resolve_path(cwd, right_file)
+            
+            if not self._is_modification_allowed(abs_path):
+                 return f"bash: {right_file}: Permission denied\n", {}, {'source': 'local', 'cached': False}
+            
+            # Handle Write
+            # We need client_ip and user from context
+            user = context.get('user')
+            
+            # Content to write
+            new_content = out_text
+            
+            # If append, read existing (from DB first, then check LLM fallback or assume empty?)
+            # For simplicity, we only append if file exists in DB.
+            if append_mode:
+                node = self.db.get_user_node(client_ip, user, abs_path)
+                if node and node.get('type') == 'file':
+                     existing = node.get('content', '')
+                     new_content = existing + new_content
+            
+            # Write to DB
+            self.db.update_user_file(client_ip, user, abs_path, os.path.dirname(abs_path), 'file',
+                                    {'size': len(new_content), 'permissions': '-rw-r--r--', 'owner': user, 'group': user, 'created': datetime.datetime.now().isoformat()}, new_content)
+            
+            # Return empty output (redirected)
+            # Merge updates? Yes.
+            if 'file_modifications' not in updates: updates['file_modifications'] = []
+            updates['file_modifications'].append({'action': 'create', 'path': abs_path})
+            
+            return "", updates, {'source': 'redirection', 'cached': False}
+
         # 0.7 Execution Simulation (Malware/Script Execution)
         # Check if the command refers to a local file (uploaded or generated)
         # We need to handle ./ prefix explicitly or rely on resolve
@@ -259,7 +328,7 @@ class CommandHandler:
         if '/' in potential_path: 
             node = self.db.get_fs_node(abs_path)
             if node and node.get('type') == 'file':
-                 print(f"[DEBUG] Execution attempt on {abs_path}")
+                 log.debug(f"[DEBUG] Execution attempt on {abs_path}")
                  content = node.get('content', '')
                  
                  # Basic Executable Check (permissions would be better but we rely on content validty)
@@ -270,7 +339,7 @@ class CommandHandler:
                  if len(content) > 10000:
                      return f"bash: {base_cmd}: text file busy (simulated)\n", {}, {'source': 'local', 'cached': False}
 
-                 print(f"[Execution] Simulating script via LLM: {abs_path}")
+                 log.info(f"[Execution] Simulating script via LLM: {abs_path}")
                  
                  prompt = f"The user is executing a script found at '{abs_path}' with content:\n---\n{content}\n---\n(INSTRUCTION: Act as the interpreter. EXECUTE this script virtually and return the Standard Output. Do not describe what it does, just show the output. If it modifies files, include file_modifications in JSON.)"
                  
@@ -470,17 +539,17 @@ class CommandHandler:
         user = context.get('user')
         
         # 1. Check Cache (Moved here)
-        print(f"[Session: {session_id}] [Cache] Checking cache for '{cmd}' in '{cwd}'")
+        log.debug(f"[Session: {session_id}] [Cache] Checking cache for '{cmd}' in '{cwd}'")
         cached_resp = self.db.get_cached_response(cmd, cwd)
         response_json, response_text = self._extract_json_or_text(cached_resp)
         if response_json or response_text:
             if "Resource temporarily unavailable" not in str(response_json) and "Resource temporarily unavailable" not in response_text:
-                 print(f"[Session: {session_id}] [Cache] HIT")
+                 log.debug(f"[Session: {session_id}] [Cache] HIT")
                  out, up = self._process_llm_json(response_json, response_text, vfs=vfs, cwd=cwd, user=user)
                  return out, up, {'source': 'cache', 'cached': True}
         
-        print(f"[Session: {session_id}] [Cache] MISS")
-        print(f"[Session: {session_id}] [LLM] Calling LLM API for generic command...")
+        log.debug(f"[Session: {session_id}] [Cache] MISS")
+        log.info(f"[Session: {session_id}] [LLM] Calling LLM API for generic command...")
 
         # Call LLM
         # Note: llm_interface.generate_response uses the 'generic' prompt internally. 
@@ -509,9 +578,9 @@ class CommandHandler:
              try:
                  cmd_hash = hashlib.md5(cmd.encode('utf-8')).hexdigest()
                  self.db.save_analysis(cmd_hash, cmd, up['analysis'])
-                 print(f"[Handler] Saved Sync Analysis for '{cmd}'")
+                 log.info(f"[Handler] Saved Sync Analysis for '{cmd}'")
              except Exception as e:
-                 print(f"[Handler] Error saving sync analysis: {e}")
+                 log.error(f"[Handler] Error saving sync analysis: {e}")
                  
         return out, up, {'source': 'llm', 'cached': False}
 
@@ -584,7 +653,7 @@ class CommandHandler:
         all_files = list(file_map.values())
         
         if all_files and len(all_files) > 0:
-            print(f"[DEBUG] LS Cache Hit for {abs_path}: {len(all_files)} files (DB: {len(cached_files)}, User/VFS: {len(all_files)-len(cached_files)})")
+            log.debug(f"[DEBUG] LS Cache Hit for {abs_path}: {len(all_files)} files (DB: {len(cached_files)}, User/VFS: {len(all_files)-len(cached_files)})")
             return self._format_ls_output(all_files, flags), {}
 
 
@@ -694,13 +763,12 @@ class CommandHandler:
         # Resolve target path relative to CWD
         cwd = context.get('cwd', '/')
         abs_path = self._resolve_path(cwd, target_path)
-        print(f"DEBUG handle_cd: cwd={cwd}, target={target_path}, abs={abs_path}")
         
         # Check integrity
         node = self.db.get_fs_node(abs_path)
         if node and node.get('type') == 'directory':
             # Local Success! Return updates without LLM cost
-            print(f"[Handler] CD Optimization Hit: {abs_path}")
+            log.debug(f"[Handler] CD Optimization Hit: {abs_path}")
             return "", {'new_cwd': abs_path}
 
         # 2. Fallback to LLM if path not found locally (maybe simulated in cache only?)
@@ -800,7 +868,7 @@ class CommandHandler:
         
         # Check User Uploads first
         user_node = self.db.get_user_node(client_ip, user, abs_path)
-        if user_node and user_node.get('content'):
+        if user_node and (user_node.get('content') is not None):
              # print(f"[Session: {session_id}] [{cmd_name}] User DB HIT for {abs_path}")
              return user_node['content'], 'local'
         
@@ -816,7 +884,7 @@ class CommandHandler:
 
         # Check Global FS
         node = self.db.get_fs_node(abs_path)
-        if node and node.get('content'):
+        if node and (node.get('content') is not None):
              # print(f"[Session: {session_id}] [{cmd_name}] DB HIT for {abs_path}")
              return node['content'], 'local'
              
@@ -829,7 +897,7 @@ class CommandHandler:
         lookup_files = context.get('file_list', [])
         if '/' in target_path: lookup_files = []
         
-        prompt = f"{cmd_name} {target_path} (INSTRUCTION: Return a JSON object with key 'output' containing realistic file content for '{target_path}'. Be creative.)"
+        prompt = f"{cmd_name} {abs_path} (INSTRUCTION: Return a JSON object with key 'output' containing realistic file content for '{abs_path}'. Be creative.)"
         
         resp = self.llm.generate_response(
             cmd_name, 
@@ -842,9 +910,14 @@ class CommandHandler:
         
         j, t = self._extract_json_or_text(resp)
         if j and 'output' in j:
-             self.db.update_fs_node(abs_path, os.path.dirname(abs_path), 'file', {}, j['output'])
+             # Ensure we store and return a string, even if LLM returns a dict
+             content_str = j['output']
+             if isinstance(content_str, (dict, list)):
+                 content_str = str(content_str)
+                 
+             self.db.update_fs_node(abs_path, os.path.dirname(abs_path), 'file', {}, content_str)
              print(f"[Session: {session_id}] [{cmd_name}] Persisted content.")
-             return j['output'], 'llm'
+             return content_str, 'llm'
         
         return t, 'llm'
 
@@ -1088,6 +1161,52 @@ class CommandHandler:
 
     
     def handle_echo(self, cmd, context):
+        # ... logic exists or default ...
+        # If user implemented handle_echo, keep it?
+        # Re-implementing simplified here if it was missing or relying on Generic?
+        # Actually handle_echo likely relies on generic or needs simple impl
+        # Let's just implement the requested ones.
+        return self._handle_echo_impl(cmd, context)
+
+    def _handle_echo_impl(self, cmd, context):
+         # Simplistic echo
+         parts = cmd.split(' ', 1)
+         if len(parts) > 1:
+             msg = parts[1]
+             # Strip quotes
+             if msg.startswith('"') and msg.endswith('"'): msg = msg[1:-1]
+             elif msg.startswith("'") and msg.endswith("'"): msg = msg[1:-1]
+             return msg + "\n", {}
+         return "\n", {}
+
+    def handle_sleep(self, cmd, context):
+        return self.system_handler.handle_sleep(cmd, context)
+
+    def handle_ifconfig(self, cmd, context):
+        # Delegate to network_handlers
+        args = cmd.split()[1:]
+        return self.network_handlers.handle_ifconfig(args), {}
+
+    def handle_ip(self, cmd, context):
+        args = cmd.split()[1:]
+        return self.network_handlers.handle_ip(args), {}
+
+    def handle_netstat(self, cmd, context):
+        args = cmd.split()[1:]
+        client_ip = context.get('client_ip', 'unknown')
+        return self.network_handlers.handle_netstat(args, client_ip), {}
+
+    def handle_ss(self, cmd, context):
+        args = cmd.split()[1:]
+        client_ip = context.get('client_ip', 'unknown')
+        return self.network_handlers.handle_ss(args, client_ip), {}
+        
+    def handle_ping(self, cmd, context):
+        args = cmd.split()[1:]
+        # handle_ping in network_handlers typically yields? 
+        # network_handlers.handle_ping returns STRING (implied from inspection)
+        # But real ping streams. For now, block return is fine per current architecture
+        return self.network_handlers.handle_ping(args), {}
         # Basic echo - handles "-e" partially or just returns string
         # Ignores redirection (handled by shell parser if any, else we print to stdout)
         # We need to strip "echo "
@@ -1106,12 +1225,22 @@ class CommandHandler:
             
         return f"{args}\n", {}
 
+    def _is_modification_allowed(self, path):
+        # Allow /tmp/, /home/, and /root/
+        if path.startswith('/tmp/') or path.startswith('/home/') or path.startswith('/root/'):
+            return True
+        return False
+
     def handle_touch(self, cmd, context):
         parts = cmd.split()
         if len(parts) < 2: return "touch: missing file operand\n", {}
         
         target_path = parts[1]
         abs_path = self._resolve_path(context.get('cwd'), target_path)
+        
+        if not self._is_modification_allowed(abs_path):
+             return f"touch: cannot touch '{target_path}': Permission denied\n", {}
+
         client_ip = context.get('client_ip')
         user = context.get('user')
         
@@ -1126,7 +1255,7 @@ class CommandHandler:
             self.db.update_user_file(client_ip, user, abs_path, os.path.dirname(abs_path), 'file', 
                                     {'size': 0, 'permissions': '-rw-r--r--', 'owner': user, 'group': user, 'created': datetime.datetime.now().isoformat()}, "")
             
-        return "", {'file_modifications': [abs_path]}
+        return "", {'file_modifications': [{'action': 'create', 'path': abs_path}]}
 
     def handle_mkdir(self, cmd, context):
         parts = cmd.split()
@@ -1134,6 +1263,10 @@ class CommandHandler:
         
         target_path = parts[1]
         abs_path = self._resolve_path(context.get('cwd'), target_path)
+        
+        if not self._is_modification_allowed(abs_path):
+             return f"mkdir: cannot create directory '{target_path}': Permission denied\n", {}
+
         client_ip = context.get('client_ip')
         user = context.get('user')
         
@@ -1144,13 +1277,17 @@ class CommandHandler:
             
         self.db.update_user_file(client_ip, user, abs_path, os.path.dirname(abs_path), 'dir', 
                                 {'permissions': 'drwxr-xr-x', 'owner': user, 'group': user}, None)
-        return "", {'file_modifications': [abs_path]}
+        return "", {'file_modifications': [{'action': 'create', 'path': abs_path}]}
     
     def handle_rmdir(self, cmd, context):
         parts = cmd.split()
         if len(parts) < 2: return "rmdir: missing operand\n", {}
         target_path = parts[1]
         abs_path = self._resolve_path(context.get('cwd'), target_path)
+        
+        if not self._is_modification_allowed(abs_path):
+             return f"rmdir: failed to remove '{target_path}': Permission denied\n", {}
+
         client_ip = context.get('client_ip')
         user = context.get('user')
         
@@ -1167,7 +1304,7 @@ class CommandHandler:
              return f"rmdir: failed to remove '{target_path}': Directory not empty\n", {}
              
         self.db.delete_user_file(client_ip, user, abs_path)
-        return "", {'file_modifications': [abs_path]}
+        return "", {'file_modifications': [{'action': 'delete', 'path': abs_path}]}
 
     def handle_rm(self, cmd, context):
         parts = cmd.split()
@@ -1183,6 +1320,11 @@ class CommandHandler:
         
         for t in targets:
             abs_path = self._resolve_path(context.get('cwd'), t)
+            
+            if not self._is_modification_allowed(abs_path):
+                 output += f"rm: cannot remove '{t}': Permission denied\n"
+                 continue
+
             # Only checking User FS for deletion simulation
             curr = self.db.get_user_node(client_ip, user, abs_path)
             
@@ -1198,7 +1340,8 @@ class CommandHandler:
                 
             self.db.delete_user_file(client_ip, user, abs_path)
             
-        return output, {'file_modifications': targets} # Simplified reporting
+        mods = [{'action': 'delete', 'path': self._resolve_path(context.get('cwd'), t)} for t in targets]
+        return output, {'file_modifications': mods}
 
     def handle_cp(self, cmd, context):
         parts = cmd.split()
@@ -1213,6 +1356,9 @@ class CommandHandler:
         abs_src = self._resolve_path(context.get('cwd'), src)
         abs_dest = self._resolve_path(context.get('cwd'), dest)
         
+        if not self._is_modification_allowed(abs_dest):
+             return f"cp: cannot create regular file '{dest}': Permission denied\n", {}
+
         # Get Source Content
         content, source = self._generate_or_get_content("cp", src, context)
         # Note: _generate calls LLM if missing... we trust it returns content?
@@ -1228,10 +1374,13 @@ class CommandHandler:
             # cp /tmp/foo.txt /home/user/ -> /home/user/foo.txt
             abs_dest = os.path.join(abs_dest, os.path.basename(abs_src))
             
+            if not self._is_modification_allowed(abs_dest): # Check resolved path
+                 return f"cp: cannot create regular file '{dest}': Permission denied\n", {}
+
         self.db.update_user_file(client_ip, user, abs_dest, os.path.dirname(abs_dest), 'file',
                                 {'size': len(content), 'permissions': '-rw-r--r--', 'owner': user, 'group': user}, content)
                                 
-        return "", {'file_modifications': [abs_dest]}
+        return "", {'file_modifications': [{'action': 'create', 'path': abs_dest}]}
         
     def handle_mv(self, cmd, context):
         # reuse cp + rm logic
@@ -1242,8 +1391,19 @@ class CommandHandler:
         src = args[0]
         dest = args[1]
         
+        # Check permissions handled by delegated cp and rm
+        # BUT mv needs atomic check usually. 
+        # If dest not allowed, cp fails. If src not allowed, rm fails.
+        # Let's do explicit check for clarity.
+        
+        abs_dest = self._resolve_path(context.get('cwd'), dest)
+        if not self._is_modification_allowed(abs_dest):
+             return f"mv: cannot move '{src}' to '{dest}': Permission denied\n", {}
+        
         # 1. CP
-        self.handle_cp(f"cp {src} {dest}", context)
+        res_cp = self.handle_cp(f"cp {src} {dest}", context)
+        if "Permission denied" in res_cp[0]: return res_cp
+        
         # 2. RM
         self.handle_rm(f"rm -rf {src}", context)
         

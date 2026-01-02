@@ -7,8 +7,10 @@ import time
 
 try:
     from .db_interface import DatabaseBackend
+    from .logger import log
 except ImportError:
     from db_interface import DatabaseBackend
+    from logger import log
 
 # Resolve absolute path relative to this file (ssh_honeypot/honey_db.py -> ssh_honeypot/../data/honeypot.sqlite)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -157,7 +159,7 @@ class HoneyDB(DatabaseBackend):
             conn.commit()
             conn.close()
         except Exception as e:
-            print(f"[!] DB Error log_auth_event: {e}")
+            log.error(f"[!] DB Error log_auth_event: {e}")
 
     def start_session(self, session_id, ip, username, password, client_version, fingerprint=None):
         conn = self._get_conn()
@@ -178,13 +180,28 @@ class HoneyDB(DatabaseBackend):
         conn.close()
 
     def log_interaction(self, session_id, cwd, command, response, source="unknown", was_cached=False, duration_ms=0, request_md5=None):
+        # Defensive Type Casting to prevent SQLite InterfaceError with dicts
+        try:
+            if isinstance(source, dict) or isinstance(source, list):
+                 log.warning(f"[DB] Warning: 'source' param was {type(source)} (Val: {source}), casting to str.")
+                 source = str(source.get('source', str(source))) if isinstance(source, dict) else str(source)
+            else:
+                 source = str(source)
+
+            if request_md5 and (isinstance(request_md5, dict) or isinstance(request_md5, list)):
+                 log.warning(f"[DB] Warning: 'request_md5' param was {type(request_md5)}, casting to str.")
+                 request_md5 = str(request_md5)
+        except Exception as caste:
+            log.error(f"[DB] Critical Cast Error: {caste}")
+            source = "error_casting"
+
         conn = self._get_conn()
         try:
             conn.execute("INSERT INTO interactions (session_id, cwd, command, response, source, request_md5) VALUES (?, ?, ?, ?, ?, ?)",
                         (session_id, cwd, command, response, source, request_md5))
             conn.commit()
         except Exception as e:
-            print(f"[DB] Error logging interaction: {e}")
+            log.error(f"[DB] Error logging interaction: {e}")
         finally:
             conn.close()
 
@@ -222,7 +239,7 @@ class HoneyDB(DatabaseBackend):
             with open(log_file, "a") as f:
                 f.write(json.dumps(log_entry) + "\n")
         except Exception as e:
-            print(f"Error writing to JSON log: {e}")
+            log.error(f"Error writing to JSON log: {e}")
 
     def get_cached_response(self, command, cwd):
         h = hashlib.sha256(f"{cwd}:{command}".encode()).hexdigest()
@@ -261,6 +278,11 @@ class HoneyDB(DatabaseBackend):
 
     def update_fs_node(self, path, parent_path, type, metadata, content=None):
         conn = self._get_conn()
+        
+        # Ensure content is string (handle LLM returning dicts in generic handlers)
+        if isinstance(content, (dict, list)):
+            content = str(content)
+            
         try:
             conn.execute("""
                 INSERT OR REPLACE INTO global_filesystem (path, parent_path, type, metadata, content)
@@ -272,6 +294,11 @@ class HoneyDB(DatabaseBackend):
 
     def update_user_file(self, ip, username, path, parent_path, type, metadata, content=None):
         conn = self._get_conn()
+        
+        # Ensure content is string
+        if isinstance(content, (dict, list)):
+            content = str(content)
+            
         try:
             conn.execute("""
                 INSERT OR REPLACE INTO user_filesystem (ip, username, path, parent_path, type, metadata, content)
@@ -361,14 +388,14 @@ class HoneyDB(DatabaseBackend):
              for row in c.fetchall():
                  creds.add((row[0], row[1]))
         except Exception as e:
-             print(f"Error querying sessions for creds: {e}")
+             log.error(f"Error querying sessions for creds: {e}")
 
         try:
              c.execute("SELECT username, auth_data FROM auth_events WHERE client_ip = ? AND success = 1 AND auth_method='password' AND timestamp > ?", (ip, cutoff))
              for row in c.fetchall():
                  creds.add((row[0], row[1]))
         except Exception as e:
-             print(f"Error querying auth_events for creds: {e}")
+             log.error(f"Error querying auth_events for creds: {e}")
              
         conn.close()
         return creds
@@ -413,7 +440,7 @@ class HoneyDB(DatabaseBackend):
             ))
             conn.commit()
         except Exception as e:
-            print(f"[DB] Error saving analysis: {e}")
+            log.error(f"[DB] Error saving analysis: {e}")
         finally:
             conn.close()
             

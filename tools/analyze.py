@@ -94,6 +94,7 @@ def list_commands(limit=50):
             s.remote_ip,
             s.username,
             i.command,
+            i.source,
             i.request_md5,
             ca.activity_type,
             ca.risk_score,
@@ -119,11 +120,12 @@ def list_commands(limit=50):
     w_ts = 20
     w_ip = 15
     w_user = 10
+    w_src = 8  # New Source Column
     w_risk = 5
     w_type = 15
     
-    # Separators: " | " * 6 = 3 * 6 = 18 chars
-    used_width = w_ts + w_ip + w_user + w_risk + w_type + 18 
+    # Separators: " | " * 7 = 3 * 7 = 21 chars
+    used_width = w_ts + w_ip + w_user + w_src + w_risk + w_type + 21
     remaining = term_width - used_width
     
     if remaining < 40: remaining = 40 # Minimum expectation
@@ -136,13 +138,14 @@ def list_commands(limit=50):
     if w_cmd < 20: w_cmd = 20
     if w_expl < 20: w_expl = 20
     
-    print(f"{'Timestamp':<{w_ts}} | {'IP':<{w_ip}} | {'User':<{w_user}} | {'Risk':<{w_risk}} | {'Type':<{w_type}} | {'Command':<{w_cmd}} | {'Analysis'}")
+    print(f"{'Timestamp':<{w_ts}} | {'IP':<{w_ip}} | {'User':<{w_user}} | {'Src':<{w_src}} | {'Risk':<{w_risk}} | {'Type':<{w_type}} | {'Command':<{w_cmd}} | {'Analysis'}")
     print("-" * term_width)
     
     for r in rows:
         ts = to_local_time(r['timestamp'])
         ip = r['remote_ip']
         user = r['username']
+        src = (r['source'] or "UNK")[:8] # Limit to 8 chars (e.g. "LLM", "Local", "Chain")
         risk = str(r['risk_score']) if r['risk_score'] is not None else "-"
         atype = r['activity_type'] if r['activity_type'] else "-"
         cmd = r['command'].replace('\r', '')
@@ -159,27 +162,22 @@ def list_commands(limit=50):
         # Max of lines to determine height of row
         height = max(len(cmd_lines), len(expl_lines))
         
-        # Calculate offset for Command column
-        # widths: ts(20) | ip(15) | user(10) | risk(5) | type(15) |
-        # separators are " | " (3 chars)
-        # 20+3 + 15+3 + 10+3 + 5+3 + 15+3 = 23+18+13+8+18 = 80 chars
-        cmd_offset_len = w_ts + w_ip + w_user + w_risk + w_type + 15 # 5 separators * 3 = 15
-        
-        # Adjusting slightly because the first col doesn't have a leading separator, but internal ones do.
-        # "TS   | IP   | ..."
-        # TS(20) + " | "(3) + IP(15) + " | "(3) + User(10) + " | "(3) + Risk(5) + " | "(3) + Type(15) + " | "(3)
-        # Total chars before Command = 20+3+15+3+10+3+5+3+15+3 = 80.
-        cmd_padding = " " * 80
+        # Calculate offset for Command column padding
+        # Widths: TS(20) | IP(15) | User(10) | Src(8) | Risk(5) | Type(15) |
+        # Separators: 6 * 3 chars = 18 chars
+        # 20+15+10+8+5+15 = 73 + 18 = 91
+        cmd_offset_len = w_ts + w_ip + w_user + w_src + w_risk + w_type + 18
+        cmd_padding = " " * cmd_offset_len
         
         for i in range(height):
             c_line = cmd_lines[i] if i < len(cmd_lines) else ""
             e_line = expl_lines[i] if i < len(expl_lines) else ""
             
             if i == 0:
-                print(f"{ts:<{w_ts}} | {ip:<{w_ip}} | {user:<{w_user}} | {risk:<{w_risk}} | {atype:<{w_type}} | {c_line:<{w_cmd}} | {e_line}")
+                print(f"{ts:<{w_ts}} | {ip:<{w_ip}} | {user:<{w_user}} | {src:<{w_src}} | {risk:<{w_risk}} | {atype:<{w_type}} | {c_line:<{w_cmd}} | {e_line}")
             else:
-                # Clean Indent: Don't print separators for empty left columns
-                print(f"{cmd_padding}{c_line:<{w_cmd}} | {e_line}")
+                # Clean Indent
+                print(f"{cmd_padding} | {c_line:<{w_cmd}} | {e_line}")
         
     print(f"\n[!] Showing last {limit} commands.")
 

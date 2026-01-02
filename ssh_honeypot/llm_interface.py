@@ -9,6 +9,10 @@ except ImportError:
     from config_manager import config
 
 # Configuration loaded from config_manager
+try:
+    from .logger import log
+except ImportError:
+    from logger import log
 
 
 class LLMInterface:
@@ -16,10 +20,10 @@ class LLMInterface:
         # Fetch API KEY lazily to ensure environment is loaded
         raw_key = api_key or os.getenv("GOOGLE_API_KEY") or ""
         self.api_key = raw_key.strip()
-        print(f"[DEBUG] LLMInterface Init - api_key arg: {bool(api_key)}, self.api_key set: {bool(self.api_key)} (Len: {len(self.api_key)})")
+        log.debug(f"LLMInterface Init - api_key arg: {bool(api_key)}, self.api_key set: {bool(self.api_key)} (Len: {len(self.api_key)})")
         
         if not self.api_key:
-            print("[WARN] No GOOGLE_API_KEY provided. LLM calls will fail.")
+            log.warning("[WARN] No GOOGLE_API_KEY provided. LLM calls will fail.")
 
         # Load Prompt Template
         self.prompt_template = ""
@@ -28,7 +32,7 @@ class LLMInterface:
             with open(prompt_path, 'r') as f:
                 self.prompt_template = f.read()
         except Exception as e:
-            print(f"[!] Error loading prompt template: {e}")
+            log.error(f"[!] Error loading prompt template: {e}")
             self.prompt_template = "Error: Prompt template missing."
 
 
@@ -40,7 +44,7 @@ class LLMInterface:
         known_paths: List of directory paths that definitely exist in the VFS.
         override_prompt: If set, ignores the template and sends this string directly to LLM.
         """
-        print(f"[DEBUG] generate_response called for '{command}'. Key Len: {len(self.api_key) if self.api_key else 0}", flush=True)
+        log.debug(f"generate_response called for '{command}'. Key Len: {len(self.api_key) if self.api_key else 0}")
         if not self.api_key:
             return '{"output": "Error: AI Core Offline.", "cwd_update": null}'
 
@@ -87,7 +91,7 @@ class LLMInterface:
                 command=command
             )
         except Exception as e:
-            print(f"[!] Prompt Formatting Error: {e}")
+            log.error(f"[!] Prompt Formatting Error: {e}")
             return '{"output": "Error: Internal System Error", "new_cwd": null}'
 
         
@@ -111,7 +115,8 @@ class LLMInterface:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.api_key}"
         
         try:
-            resp = requests.post(url, headers=headers, json=data, timeout=10)
+            timeout_val = config.get('llm', 'timeout') or 60
+            resp = requests.post(url, headers=headers, json=data, timeout=timeout_val)
             if resp.status_code != 200:
                 print(f"[!] LLM API Error {resp.status_code}: {resp.text}")
                 return '{"output": "Error: AI Core Malfunction.", "new_cwd": null}'

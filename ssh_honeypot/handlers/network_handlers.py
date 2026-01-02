@@ -46,8 +46,109 @@ def handle_ip(args):
     return network_persona.get_ip_addr_output() # Default fallback
 
 def handle_ifconfig(args):
-    """Handles 'ifconfig' command."""
-    return network_persona.get_ifconfig_output()
+    """
+    Handles 'ifconfig' command.
+    Supports: -a, interface name (eth0, lo)
+    """
+    # Check for specific interface or -a
+    show_all = False
+    target_iface = None
+    
+    for arg in args:
+        if arg == '-a':
+            show_all = True
+        elif not arg.startswith('-'):
+            target_iface = arg
+            
+    full_output = network_persona.get_ifconfig_output()
+    
+    if target_iface:
+        # Simple extraction logic
+        # ifconfig output format has interface at start of block
+        blocks = full_output.split('\n\n')
+        for block in blocks:
+            if block.startswith(target_iface + ":"):
+                return block + '\n'
+        return f"{target_iface}: error fetching interface information: Device not found\n"
+        
+    return full_output
+
+def handle_netstat(args, client_ip="192.168.1.100"):
+    """
+    Handles 'netstat' command.
+    Supports: -r (route), -n (numeric), -t (tcp), -u (udp), -l (listening), -a (all)
+    """
+    # Parse Flags
+    flags = set()
+    for arg in args:
+        if arg.startswith('-'):
+            for char in arg[1:]:
+                flags.add(char)
+                
+    # Logic
+    if 'r' in flags:
+        # Route Table
+        return f"""Kernel IP routing table
+Destination     Gateway         Genmask         Flags   MSS Window  irtt Iface
+0.0.0.0         {network_persona.gateway}     0.0.0.0         UG        0 0          0 eth0
+{network_persona.ip_eth0.rsplit('.', 1)[0] + '.0'}     0.0.0.0         255.255.255.0   U         0 0          0 eth0
+"""
+
+    # Default: Active Internet Connections (Servers and Established)
+    attacker_port = 54321 # Static or random?
+    
+    # TCP Listening Ports
+    tcp_ports = [
+        ("0.0.0.0:22", "0.0.0.0:*", "LISTEN"),
+        ("0.0.0.0:80", "0.0.0.0:*", "LISTEN"),
+        ("127.0.0.1:3306", "0.0.0.0:*", "LISTEN"), # Internal MySQL
+        (f"{network_persona.ip_eth0}:22", f"{client_ip}:{attacker_port}", "ESTABLISHED"), # Established SSH
+    ]
+    
+    udp_ports = [
+        ("0.0.0.0:68", "0.0.0.0:*", "") # DHCP
+    ]
+    
+    output = []
+    output.append("Active Internet connections (servers and established)")
+    output.append("Proto Recv-Q Send-Q Local Address           Foreign Address         State")
+    
+    # Filter Logic
+    show_listening = 'l' in flags or 'a' in flags
+    show_established = 'l' not in flags or 'a' in flags 
+    
+    # TCP
+    if 't' in flags or not ('u' in flags or 'x' in flags): # Default includes TCP
+        for local, foreign, state in tcp_ports:
+            if state == "LISTEN":
+                if show_listening:
+                    output.append(f"tcp        0      0 {local:<23} {foreign:<23} {state}")
+            elif state == "ESTABLISHED":
+                if show_established:
+                    output.append(f"tcp        0     64 {local:<23} {foreign:<23} {state}")
+
+    # UDP
+    if 'u' in flags or not ('t' in flags or 'x' in flags):
+        for local, foreign, state in udp_ports:
+             if show_listening:
+                 output.append(f"udp        0      0 {local:<23} {foreign:<23} {state}")
+
+    return '\n'.join(output) + '\n'
+
+def handle_ss(args, client_ip="192.168.1.100"):
+    """
+    Handles 'ss' command.
+    """
+    attacker_port = 54321
+    header = "Netid  State   Recv-Q  Send-Q   Local Address:Port   Peer Address:Port   Process"
+    
+    rows = [
+        f"tcp    LISTEN  0       128      0.0.0.0:22           0.0.0.0:*                      ",
+        f"tcp    LISTEN  0       128      0.0.0.0:80           0.0.0.0:*                      ",
+        f"tcp    ESTAB   0       0        {network_persona.ip_eth0}:22        {client_ip}:{attacker_port}                     "
+    ]
+    
+    return header + "\n" + "\n".join(rows) + "\n"
 
 def handle_ping(args):
     """
@@ -121,6 +222,9 @@ def handle_ping(args):
         if delay < 0: delay = 0.0001
         
         # Sleep to simulate network time (blocks the thread, creating feel of latency)
+        # Note: In production this blocks the handler thread. 
+        # Since we are single-threaded per session (mostly), this pauses the user's terminal.
+        # This is DESIRED behavior for ping.
         time.sleep(delay)
         total_time += delay
         
@@ -138,46 +242,3 @@ def handle_ping(args):
     output.append(f"rtt min/avg/max/mdev = {min_t:.3f}/{avg_t:.3f}/{max_t:.3f}/{latency_jitter*1000:.3f} ms")
     
     return "\n".join(output)
-
-def handle_netstat(args, client_ip):
-    """
-    Handles 'netstat' command.
-    Shows the attacker's connection to port 22.
-    """
-    import random
-    
-    # Check flags roughly (simplistic)
-    # Default to showing listening and established
-    
-    attacker_port = random.randint(30000, 60000) # Fake ephemeral port
-    
-    header = "Active Internet connections (servers and established)\nProto Recv-Q Send-Q Local Address           Foreign Address         State"
-    
-    rows = [
-        f"tcp        0      0 0.0.0.0:22              0.0.0.0:*               LISTEN",
-        f"tcp        0      0 0.0.0.0:80              0.0.0.0:*               LISTEN",
-        f"tcp        0      0 127.0.0.53:53           0.0.0.0:*               LISTEN", 
-        f"tcp        0      0 {network_persona.ip_eth0}:22        {client_ip}:{attacker_port}       ESTABLISHED",
-        f"udp        0      0 127.0.0.53:53           0.0.0.0:*                          ",
-        f"udp        0      0 {network_persona.ip_eth0}:68        0.0.0.0:*                          "
-    ]
-    
-    return header + "\n" + "\n".join(rows)
-
-def handle_ss(args, client_ip):
-    """
-    Handles 'ss' command.
-    Modern replacement for netstat.
-    """
-    import random
-    attacker_port = random.randint(30000, 60000)
-    
-    header = "Netid  State   Recv-Q  Send-Q   Local Address:Port   Peer Address:Port   Process"
-    
-    rows = [
-        f"tcp    LISTEN  0       128      0.0.0.0:22           0.0.0.0:*                      ",
-        f"tcp    LISTEN  0       128      0.0.0.0:80           0.0.0.0:*                      ",
-        f"tcp    ESTAB   0       0        {network_persona.ip_eth0}:22        {client_ip}:{attacker_port}                     "
-    ]
-    
-    return header + "\n" + "\n".join(rows)

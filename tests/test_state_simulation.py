@@ -89,8 +89,10 @@ class TestStateSimulation:
         file_mods = updates.get('file_modifications', [])
         assert len(file_mods) > 0
         
-        # It's a list of strings now
-        assert "/home/user/newfile.txt" in file_mods
+        # It's a list of dictionaries now
+        mod = file_mods[0]
+        assert mod['path'] == "/home/user/newfile.txt"
+        assert mod['action'] == "create"
         
         # Simulate Server Logic for test validity (though server logic uses DB mostly now)
         # But for VFS update in context?
