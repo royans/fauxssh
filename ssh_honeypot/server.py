@@ -20,6 +20,7 @@ try:
     from .sftp_handler import HoneySFTPServer
     from .alert_manager import AlertManager
     from . import fs_seeder
+    from .utils import random_response_delay, ensure_user_home
     # Initialize Logging
     from .logger import log
 except ImportError:
@@ -422,6 +423,10 @@ def _handle_connection_logic(client, addr):
     # Virtual Filesystem State (Simple Dict: Path -> List of Filenames)
     # We assume standard linux dirs exist, this tracks *contents* we want to show.
     # Initialize dynamic home with default files - Blogofy Persona
+    
+    # PERSISTENCE FIX: Ensure DB has these files so `ls` sees them even if VFS logic is bypassed/delayed
+    ensure_user_home(db, ip, user)
+
     vfs = {
         cwd: [
             "blogofy_db_dump_2021.sql",
@@ -431,7 +436,9 @@ def _handle_connection_logic(client, addr):
             "docker-compose.yml.bak",
             "aws_keys.txt",
             "id_rsa_backup",
-            "wallet.dat"
+            "wallet.dat",
+            ".bash_history",
+            ".profile"
         ],
         "/tmp": [],
         "/var/www/html": ["index.php", "config.php", "assets", "uploads"]

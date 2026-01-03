@@ -943,11 +943,26 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         abs_path = self._resolve_path(cwd, target_path)
         
         # Check integrity
+        # Check User FS first (override)
+        user_node = self.db.get_user_node(context.get('client_ip'), context.get('user'), abs_path)
+        if user_node:
+             if user_node.get('type') == 'file':
+                 return f"bash: cd: {target_path}: Not a directory\n", {}
+             elif user_node.get('type') == 'dir': # 'dir' or 'directory'? standardized to 'dir' in mkdir but 'directory' in fs_seeder?
+                 # mkdir uses 'dir'. fs_seeder seems to use 'directory'? 
+                 # Let's support both or check strict.
+                 # If it IS a directory, success.
+                 log.debug(f"[Handler] CD Optimization Hit (User): {abs_path}")
+                 return "", {'new_cwd': abs_path}
+
         node = self.db.get_fs_node(abs_path)
-        if node and node.get('type') == 'directory':
-            # Local Success! Return updates without LLM cost
-            log.debug(f"[Handler] CD Optimization Hit: {abs_path}")
-            return "", {'new_cwd': abs_path}
+        if node:
+             if node.get('type') == 'file':
+                  return f"bash: cd: {target_path}: Not a directory\n", {}
+             elif node.get('type') == 'directory':
+                # Local Success! Return updates without LLM cost
+                log.debug(f"[Handler] CD Optimization Hit (Global): {abs_path}")
+                return "", {'new_cwd': abs_path}
 
         # 2. Fallback to LLM if path not found locally (maybe simulated in cache only?)
         # Instruct LLM to be silent on success
