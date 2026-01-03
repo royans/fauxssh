@@ -4,7 +4,7 @@
 
 set -u
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Check for override via env var, consistent with python code
 if [ -n "${FAUXSSH_DATA_DIR:-}" ]; then

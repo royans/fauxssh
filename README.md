@@ -128,7 +128,7 @@ ssh -p 2222 user@localhost
 For long-running deployments, use the included startup script which handles logging and auto-restarts:
 
 ```bash
-./tools/public/startup.sh
+./tools/startup.sh
 ```
 
 ## Deployment (Port Forwarding)
