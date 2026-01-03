@@ -761,7 +761,7 @@ def _handle_connection_logic(client, addr):
                     # Display Output
                     fmt_resp = resp_text.replace('\n', '\r\n')
                     chan.send(fmt_resp)
-                    if fmt_resp:
+                    if fmt_resp and not fmt_resp.endswith('\r\n'):
                         chan.send(b'\r\n')
                         
                     # Log Interaction
@@ -787,7 +787,7 @@ def _handle_connection_logic(client, addr):
                     history.append((cmd, resp_text))
 
                 # Update prompt with potentially new CWD or User
-                prompt = f"\r\n{user}@{hostname}:{cwd}$ "
+                prompt = f"{user}@{hostname}:{cwd}$ "
                 chan.send(prompt)
                 history_cursor = len(history) # Reset history cursor
             

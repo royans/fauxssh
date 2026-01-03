@@ -116,6 +116,117 @@ class CommandHandler:
              return response, {}, {'source': 'simulated', 'cached': False}
         return None
 
+    # --- NEW HANDLERS (Jan 2nd) ---
+
+    def handle_time(self, cmd, context):
+        """
+        Executes a command and reports its execution time.
+        Format:
+        real    0m0.000s
+        user    0m0.000s
+        sys     0m0.000s
+        """
+        parts = cmd.split(maxsplit=1)
+        if len(parts) < 2:
+            return "bash: time: usage: time COMMAND [ARGS...]\n", {}, {'source': 'local', 'cached': False}
+        
+        sub_cmd = parts[1]
+        
+        # Measurement
+        start = time.time()
+        
+        # Recursive execution
+        out, updates, meta = self.process_command(sub_cmd, context)
+        
+        duration = time.time() - start
+        
+        # Format typical bash time output
+        # real 0m0.002s
+        mins = int(duration // 60)
+        secs = duration % 60
+        
+        time_stats = f"\nreal\t{mins}m{secs:.3f}s\nuser\t0m0.000s\nsys\t0m0.000s\n"
+        
+        return out + time_stats, updates, meta
+
+    def handle_fdisk(self, cmd, context):
+        """
+        Simulates fdisk -l output.
+        """
+        # Only support -l or no args (which usually errors but we can be nice or error)
+        if '-l' not in cmd:
+             return "fdisk: usage: fdisk [options] <disk>    change partition table\n       fdisk [options] -l <disk> list partition table(s)\n", {}, {'source': 'local', 'cached': False}
+
+        # Simulated Output
+        output = """Disk /dev/sda: 40 GiB, 42949672960 bytes, 83886080 sectors
+Units: sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disklabel type: gpt
+Disk identifier: 9A8B7C6D-1E2F-3G4H-5I6J-7K8L9M0N1O2P
+
+Device        Start      End  Sectors  Size Type
+/dev/sda1      2048     4095     2048    1M BIOS boot
+/dev/sda2      4096 83884031 83880000   40G Linux filesystem
+
+Disk /dev/sdb: 10 GiB, 10737418240 bytes, 20971520 sectors
+Units: sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+"""
+        return output, {}, {'source': 'local', 'cached': False}
+
+    def handle_history(self, cmd, context):
+        """
+        Lists or clears history.
+        """
+        history = context.get('history', [])
+        
+        if '-c' in cmd:
+            history.clear()
+            return "", {}, {'source': 'local', 'cached': False}
+            
+        # List history
+        lines = []
+        for i, (c, _) in enumerate(history):
+            lines.append(f" {i+1}  {c}")
+            
+        return '\n'.join(lines) + '\n', {}, {'source': 'local', 'cached': False}
+
+    def handle_sudo(self, cmd, context):
+        """
+        Simulates sudo behavior.
+        Anti-Escalation:
+        - Rejects 'sudo su', 'sudo -i', 'sudo bash' (Root attempt)
+        - Allows 'sudo su <user>' if user matches current user (No-op realism)
+        - Generally returns 'Sorry' or incident report for others.
+        """
+        user = context.get('user', 'unknown')
+        parts = cmd.split()
+        
+        # Logic: If they try to become root, block it realistically
+        # "user is not in the sudoers file. This incident will be reported."
+        
+        if 'su' in parts:
+             # Check if target user is self
+             # sudo su user
+             if len(parts) > 2 and parts[2] == user:
+                 return "", {}, {'source': 'local', 'cached': False} # Success (no-op)
+             
+             if len(parts) == 2 or (len(parts) > 2 and parts[2] == '-'):
+                 # sudo su / sudo su - (Root)
+                 random_response_delay(1.0, 2.5) # Fake password delay?
+                 # Actually, real sudo asks password first.
+                 # We skip interaction and fail.
+                 return f"[sudo] password for {user}: \nSorry, try again.\n[sudo] password for {user}: \n", {}, {'source': 'local', 'cached': False}
+
+        if '-i' in parts or '/bin/bash' in cmd or 'sh' in cmd:
+             random_response_delay(1.0, 2.0)
+             return f"{user} is not in the sudoers file.  This incident will be reported.\n", {}, {'source': 'local', 'cached': False}
+
+        # Default fail
+        return f"sudo: a password is required\n", {}, {'source': 'local', 'cached': False}
+
+
     def process_command(self, cmd, context):
         """
         Input: cmd (str), context (dict)
@@ -530,6 +641,25 @@ class CommandHandler:
                     break
         
         return '\n'.join(filtered)
+
+    # --- NETWORK HANDLERS (Simulated Latency) ---
+    
+    def handle_ssh(self, cmd, context):
+        # Fake connection time
+        random_response_delay(1.0, 3.0)
+        # Fallback to generic LLM for the actual interaction/error
+        # But we can prime the LLM context or cache
+        return self.handle_generic(cmd, context)
+
+    def handle_curl(self, cmd, context):
+        # Fake network transfer time
+        random_response_delay(1.0, 4.0)
+        return self.handle_generic(cmd, context)
+
+    def handle_wget(self, cmd, context):
+        # Fake network transfer time
+        random_response_delay(1.0, 4.0)
+        return self.handle_generic(cmd, context)
 
     # --- SPECIFIC HANDLERS ---
     
