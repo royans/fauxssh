@@ -40,7 +40,17 @@ def get_ignored_ips():
     raw = os.getenv('ANALYTICS_IGNORE_IPS', '')
     if not raw:
         return []
-    return [ip.strip() for ip in raw.split(',') if ip.strip()]
+    
+    ips = [ip.strip() for ip in raw.split(',') if ip.strip()]
+    expanded_ips = []
+    
+    for ip in ips:
+        expanded_ips.append(ip)
+        # If it looks like an IPv4 address, also ignore the IPv6-mapped version
+        if '.' in ip and ':' not in ip:
+            expanded_ips.append(f"::ffff:{ip}")
+            
+    return expanded_ips
 
 DEFAULT_CONFIG = {
     "server": {
