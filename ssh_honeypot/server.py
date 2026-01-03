@@ -923,8 +923,25 @@ def main(argv=None):
         except Exception as e:
              print(f"[!] Warning: Could not set IPV6_V6ONLY=0: {e}")
 
-    sock.bind((BIND_IP, PORT))
-    sock.listen(100)
+    # Bind with Graceful Retry
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            sock.bind((BIND_IP, PORT))
+            sock.listen(100)
+            break # Success
+        except OSError as e:
+            if e.errno == 98: # Address already in use
+                if attempt < max_retries - 1:
+                     print(f"[!] Address {BIND_IP}:{PORT} currently in use. Retrying in 2s... ({attempt+1}/{max_retries})")
+                     time.sleep(2)
+                     continue
+                else:
+                     log.error(f"[!] Critical: Failed to bind to {BIND_IP}:{PORT} after {max_retries} attempts. Port occupied.")
+                     import sys
+                     sys.exit(1) # Clean exit without traceback
+            else:
+                 raise # Re-raise unexpected errors
 
     # Generate Host Key if needed
     if not os.path.exists(HOST_KEY_FILE):

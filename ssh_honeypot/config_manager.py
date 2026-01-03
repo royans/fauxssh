@@ -111,17 +111,17 @@ DEFAULT_CONFIG = {
     },
     "persona": {
         "kernel_name": "Linux",
-        "kernel_release": "5.10.0-21-cloud-amd64",
-        "kernel_version": "#1 SMP Debian 5.10.162-1 (2023-01-21)",
+        "kernel_release": "6.1.0-18-cloud-amd64",
+        "kernel_version": "#1 SMP PREEMPT_DYNAMIC Debian 6.1.76-1 (2024-02-01)",
         "machine": "x86_64",
         "processor": "x86_64",
         "hardware_platform": "x86_64",
         "os_name": "GNU/Linux",
         "distro_name": "Debian GNU/Linux",
-        "distro_version": "11 (bullseye)",
+        "distro_version": "12 (bookworm)",
         "distro_id": "debian",
-        "distro_version_id": "11",
-        "distro_pretty_name": "Debian GNU/Linux 11 (bullseye)",
+        "distro_version_id": "12",
+        "distro_pretty_name": "Debian GNU/Linux 12 (bookworm)",
         "processor_version": "Intel(R) Xeon(R) Platinum 8480+"
     }
 }

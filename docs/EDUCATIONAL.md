@@ -61,15 +61,21 @@ If you are studying honeypots, try these experiments with FauxSSH:
 
 To help researchers extract insights from the collected data, we provide a suite of analytic tools in `tools/analytics/`.
 
-### Log Viewer (Session Replay)
-Understanding attacker behavior requires more than just reading raw logs. The `log_viewer.py` tool allows you to replay user sessions step-by-step.
+### Session Analysis & Replay
+The `analyze.py` tool is the primary way to inspect sessions.
 
 ```bash
 # List all captured sessions
-python3 tools/analytics/log_viewer.py --list
+python3 tools/analytics/analyze.py --sessions
 
-# Replay a specific session to see the command flow
-python3 tools/analytics/log_viewer.py --replay <SESSION_ID>
+# List all commands across all sessions
+python3 tools/analytics/analyze.py --commands
+
+# Replay a specific session (view all commands and output logic)
+python3 tools/analytics/analyze.py --session-id <SESSION_ID>
+
+# Filter commands by IP
+python3 tools/analytics/analyze.py --ip <IP_ADDRESS>
 ```
 
 ### Upload Inspector (Malware Analysis)

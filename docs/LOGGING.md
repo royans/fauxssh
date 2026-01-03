@@ -37,11 +37,26 @@ They are stripped of execution permissions but should still be handled with care
 FauxSSH includes CLI tools to visualize the data.
 
 ### `tools/analytics/analyze.py`
-The primary reporting tool.
+The primary reporting tool with multiple modes.
 
 **List Recent Sessions:**
 ```bash
 python3 tools/analytics/analyze.py --sessions
+```
+
+**List Recent Commands:**
+```bash
+python3 tools/analytics/analyze.py --commands
+```
+
+**Review Specific Session (Replay):**
+```bash
+python3 tools/analytics/analyze.py --session-id <SESSION_ID>
+```
+
+**Filter by IP:**
+```bash
+python3 tools/analytics/analyze.py --ip <IP_ADDRESS>
 ```
 
 **List Recent Commands:**

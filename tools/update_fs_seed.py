@@ -45,16 +45,16 @@ CAPTURE_CONTENT = {
 # Custom content overrides to ensure Honeypot Persona (Debian 9)
 # regardless of Host OS.
 CONTENT_OVERRIDES = {
-    "/etc/os-release": """PRETTY_NAME="Debian GNU/Linux 9 (stretch)"
+    "/etc/os-release": """PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
 NAME="Debian GNU/Linux"
-VERSION_ID="9"
-VERSION="9 (stretch)"
+VERSION_ID="12"
+VERSION="12 (bookworm)"
 ID=debian
 HOME_URL="https://www.debian.org/"
 SUPPORT_URL="https://www.debian.org/support"
 BUG_REPORT_URL="https://bugs.debian.org/"
 """,
-    "/etc/issue": "Debian GNU/Linux 9 \\n \\l\n\n",
+    "/etc/issue": "Debian GNU/Linux 12 \\n \\l\n\n",
     "/etc/hostname": "npc-main-server-01\n",
     "/etc/passwd": """root:x:0:0:root:/root:/bin/bash
 daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin

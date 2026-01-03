@@ -50,7 +50,7 @@ FauxSSH includes powerful CLI tools to visualize captured data. See [Logging & A
 `python3 tools/analytics/analyze.py --commands`
 ![Command History](docs/images/report_commands.png)
 
-### Session Verification
+### Session Verification (Replay)
 `python3 tools/analytics/analyze.py --session-id <ID>`
 ![Session Detail](docs/images/report_session_detail.png)
 

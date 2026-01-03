@@ -30,16 +30,43 @@ WATCH_FILE="ssh_honeypot/restart_trigger"
 LOG_FILE="$DATA_DIR/server_startup.log"
 
 
+CRON_MODE=false
+FORCE_MODE=false
+
+for arg in "$@"; do
+    case $arg in
+        --cron)
+            CRON_MODE=true
+            ;;
+        --force)
+            FORCE_MODE=true
+            ;;
+    esac
+done
+
+if [ "$CRON_MODE" = true ]; then
+    echo "Running in CRON mode (Loop disabled)"
+fi
+
 # Singleton execution via lockfile
 LOCK_FILE="/tmp/sshpot_startup.lock"
+
+if [ "$FORCE_MODE" = true ]; then
+    echo "[!] Force mode enabled. Attempting to kill existing startup script..."
+    if command -v fuser >/dev/null; then
+         # Kill process holding the lock
+         fuser -k -TERM "$LOCK_FILE" >/dev/null 2>&1 || true
+         sleep 1
+    else 
+         echo "[!] Warning: 'fuser' command not found. Cannot force kill safely."
+    fi
+fi
 
 # Note: We use file descriptor 200 for the lock
 exec 200>"$LOCK_FILE"
 flock -n 200 || { echo "Startup script is already running."; exit 1; }
 
-CRON_MODE=false
-if [[ "${1:-}" == "--cron" ]]; then
-    CRON_MODE=true
+if [ "$CRON_MODE" = true ]; then
     echo "Running in CRON mode (Loop disabled)"
 fi
 
@@ -56,10 +83,10 @@ else
     exit 1
 fi
 
-
-
 echo "SSH Honeypot Startup Script"
 echo "Watching: $WATCH_FILE"
+
+
 
 # Trap to kill child process on exit
 cleanup() {
@@ -88,12 +115,23 @@ while true; do
   PID=$!
   echo "[$(date)] Server started with PID: $PID"
 
+  # Calculate Auto-Restart Time (24h + random 0-60m)
+  # 86400 seconds = 24 hours
+  RESTART_OFFSET=$((RANDOM % 3601))
+  RESTART_SECONDS=$((86400 + RESTART_OFFSET))
+  START_TS=$(date +%s)
+  RESTART_DEADLINE=$((START_TS + RESTART_SECONDS))
+  
+  echo "[$(date)] Scheduled auto-restart in $RESTART_SECONDS seconds (approx $(date -d @$RESTART_DEADLINE))."
+
   # Initial timestamp
   if [ -f "$WATCH_FILE" ]; then
       LAST_MTIME=$(stat -c %Y "$WATCH_FILE")
   else
       LAST_MTIME=0
   fi
+  
+  PLANNED_RESTART=false
 
   # Monitor loop
   while kill -0 $PID 2>/dev/null; do
@@ -102,19 +140,35 @@ while true; do
           if [ "$curr_mtime" != "$LAST_MTIME" ]; then
               echo "[$(date)] Detected change in $WATCH_FILE. Restarting..."
               kill $PID
+              PLANNED_RESTART=true
               wait $PID 2>/dev/null
               break
           fi
       fi
+      
+      # Check for 24h Auto-Restart
+      NOW_TS=$(date +%s)
+      if [ "$NOW_TS" -ge "$RESTART_DEADLINE" ]; then
+           echo "[$(date)] Reached 24h auto-restart limit. Restarting..."
+           kill $PID
+           PLANNED_RESTART=true
+           wait $PID 2>/dev/null
+           break
+      fi
+
       sleep 5
   done
 
   # If server crashed/exited on its own, wait a bit before restart
-  if ! kill -0 $PID 2>/dev/null; then
+  if [ "$PLANNED_RESTART" = true ]; then
+      echo "[$(date)] Server stopped for planned restart."
+      sleep 1
+  elif ! kill -0 $PID 2>/dev/null; then
       echo "[$(date)] Server exited unexpectedly. Restarting in 2 seconds..."
       sleep 2
   else
-      # We broke out of loop due to restart trigger
+      # We broke out of loop due to restart trigger but PID might still be technically up if kill failed?
+      # Should be handled by wait above.
       sleep 1
   fi
 

@@ -66,10 +66,10 @@
     "type": "directory",
     "metadata": {
       "permissions": "drwxr-xr-x",
-      "size": 16776,
+      "size": 16820,
       "owner": "root",
       "group": "root",
-      "modified": "Dec 30 12:41"
+      "modified": "Dec 31 08:34"
     },
     "content": ""
   },
@@ -2703,10 +2703,10 @@
     "type": "directory",
     "metadata": {
       "permissions": "drwxr-xr-x",
-      "size": 2620,
+      "size": 2654,
       "owner": "root",
       "group": "root",
-      "modified": "Dec 25 09:34"
+      "modified": "Dec 31 08:34"
     },
     "content": ""
   },
@@ -3213,7 +3213,7 @@
       "size": 832,
       "owner": "root",
       "group": "root",
-      "modified": "Dec 30 12:43"
+      "modified": "Jan 03 07:22"
     },
     "content": ""
   },
@@ -3239,7 +3239,7 @@
       "size": 701,
       "owner": "root",
       "group": "shadow",
-      "modified": "Dec 30 12:43"
+      "modified": "Jan 03 07:22"
     },
     "content": ""
   },
@@ -3327,10 +3327,10 @@
     "type": "file",
     "metadata": {
       "permissions": "-rw-r--r--",
-      "size": 168,
+      "size": 188,
       "owner": "root",
       "group": "root",
-      "modified": "Nov 16 15:30"
+      "modified": "Dec 31 07:00"
     },
     "content": ""
   },
@@ -3410,7 +3410,7 @@
       "group": "root",
       "modified": "Mar 07 09:30"
     },
-    "content": "Debian GNU/Linux 9 \\n \\l\n\n"
+    "content": "Debian GNU/Linux 12 \\n \\l\n\n"
   },
   {
     "path": "/etc/issue.net",
@@ -3720,7 +3720,7 @@
       "size": 0,
       "owner": "royans",
       "group": "royans",
-      "modified": "Dec 30 12:54"
+      "modified": "Jan 03 07:35"
     },
     "content": ""
   },
@@ -3826,7 +3826,7 @@
       "group": "root",
       "modified": "Aug 24 09:05"
     },
-    "content": "PRETTY_NAME=\"Debian GNU/Linux 9 (stretch)\"\nNAME=\"Debian GNU/Linux\"\nVERSION_ID=\"9\"\nVERSION=\"9 (stretch)\"\nID=debian\nHOME_URL=\"https://www.debian.org/\"\nSUPPORT_URL=\"https://www.debian.org/support\"\nBUG_REPORT_URL=\"https://bugs.debian.org/\"\n"
+    "content": "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nNAME=\"Debian GNU/Linux\"\nVERSION_ID=\"12\"\nVERSION=\"12 (bookworm)\"\nID=debian\nHOME_URL=\"https://www.debian.org/\"\nSUPPORT_URL=\"https://www.debian.org/support\"\nBUG_REPORT_URL=\"https://bugs.debian.org/\"\n"
   },
   {
     "path": "/etc/pam.conf",
@@ -3863,7 +3863,7 @@
       "size": 1446,
       "owner": "root",
       "group": "root",
-      "modified": "Dec 30 12:43"
+      "modified": "Jan 03 07:22"
     },
     "content": "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\nbin:x:2:2:bin:/bin:/usr/sbin/nologin\nsys:x:3:3:sys:/dev:/usr/sbin/nologin\nsync:x:4:65534:sync:/bin:/bin/sync\ngames:x:5:60:games:/usr/games:/usr/sbin/nologin\nman:x:6:12:man:/var/cache/man:/usr/sbin/nologin\nlp:x:7:7:lp:/var/spool/lpd:/usr/sbin/nologin\nmail:x:8:8:mail:/var/mail:/usr/sbin/nologin\nnews:x:9:9:news:/var/spool/news:/usr/sbin/nologin\nuucp:x:10:10:uucp:/var/spool/uucp:/usr/sbin/nologin\nproxy:x:13:13:proxy:/bin:/usr/sbin/nologin\nwww-data:x:33:33:www-data:/var/www:/usr/sbin/nologin\nbackup:x:34:34:backup:/var/backups:/usr/sbin/nologin\nlist:x:38:38:Mailing List Manager:/var/list:/usr/sbin/nologin\nirc:x:39:39:ircd:/var/run/ircd:/usr/sbin/nologin\ngnats:x:41:41:Gnats Bug-Reporting System (admin):/var/lib/gnats:/usr/sbin/nologin\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\nsystemd-timesync:x:100:102:systemd Time Synchronization,,,:/run/systemd:/bin/false\nsystemd-network:x:101:103:systemd Network Management,,,:/run/systemd/netif:/bin/false\nsystemd-resolve:x:102:104:systemd Resolver,,,:/run/systemd/resolve:/bin/false\n_apt:x:103:65534::/nonexistent:/bin/false\nalabaster:x:1000:1000:Alabaster Snowball,,,:/home/alabaster:/bin/bash\n"
   },
@@ -4123,7 +4123,7 @@
       "size": 48,
       "owner": "root",
       "group": "root",
-      "modified": "Dec 30 12:38"
+      "modified": "Jan 03 07:22"
     },
     "content": ""
   },
@@ -4253,7 +4253,7 @@
       "size": 761,
       "owner": "root",
       "group": "shadow",
-      "modified": "Dec 30 12:43"
+      "modified": "Jan 03 07:22"
     },
     "content": ""
   },
@@ -7361,10 +7361,10 @@
     "type": "directory",
     "metadata": {
       "permissions": "drwxr-xr-x",
-      "size": 16776,
+      "size": 16820,
       "owner": "root",
       "group": "root",
-      "modified": "Dec 30 12:41"
+      "modified": "Dec 31 08:34"
     }
   },
   {
@@ -7412,10 +7412,10 @@
     "type": "directory",
     "metadata": {
       "permissions": "drwxr-xr-x",
-      "size": 16776,
+      "size": 16820,
       "owner": "root",
       "group": "root",
-      "modified": "Dec 30 12:41"
+      "modified": "Dec 31 08:34"
     },
     "content": ""
   },
@@ -12621,10 +12621,10 @@
     "type": "file",
     "metadata": {
       "permissions": "-rw-r--r--",
-      "size": 21146,
+      "size": 21458,
       "owner": "root",
       "group": "root",
-      "modified": "Dec 30 12:41"
+      "modified": "Dec 31 08:34"
     },
     "content": ""
   },
@@ -12650,7 +12650,7 @@
       "size": 60,
       "owner": "root",
       "group": "root",
-      "modified": "Dec 30 12:39"
+      "modified": "Dec 31 08:34"
     },
     "content": ""
   },
@@ -12686,10 +12686,10 @@
     "type": "file",
     "metadata": {
       "permissions": "-rw-r--r--",
-      "size": 642697,
+      "size": 644051,
       "owner": "root",
       "group": "root",
-      "modified": "Dec 30 12:42"
+      "modified": "Dec 31 08:34"
     },
     "content": ""
   },
@@ -12777,10 +12777,10 @@
     "type": "file",
     "metadata": {
       "permissions": "-rw-rw-r--",
-      "size": 177792,
+      "size": 188928,
       "owner": "root",
       "group": "utmp",
-      "modified": "Dec 30 12:38"
+      "modified": "Jan 03 07:22"
     },
     "content": ""
   }

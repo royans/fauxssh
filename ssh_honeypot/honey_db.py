@@ -327,6 +327,15 @@ class HoneyDB(DatabaseBackend):
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (ip, username, path, parent_path, type, json.dumps(metadata) if isinstance(metadata, dict) else metadata, content))
             conn.commit()
+            
+            # recursive directory creation
+            if type == 'file':
+                self._ensure_parent_dirs(conn, ip, username, parent_path)
+            elif type == 'directory':
+                 # also ensure parents of this directory exist
+                 self._ensure_parent_dirs(conn, ip, username, parent_path)
+                 
+            conn.commit()
         finally:
             conn.close()
 
@@ -398,6 +407,43 @@ class HoneyDB(DatabaseBackend):
          conn.execute("DELETE FROM user_filesystem WHERE ip=? AND username=? AND path=?", (ip, username, path))
          conn.commit()
          conn.close()
+
+    def _ensure_parent_dirs(self, conn, ip, username, path):
+        """
+        Recursively ensures that 'path' and all its parents exist as directories in user_filesystem.
+        """
+        if not path or path == '/' or path == '.':
+            return
+            
+        # Check if exists
+        c = conn.cursor()
+        c.execute("SELECT 1 FROM user_filesystem WHERE ip=? AND username=? AND path=?", (ip, username, path))
+        if c.fetchone():
+            return # Exists
+            
+        # Does not exist, create it
+        parent_path = os.path.dirname(path)
+        
+        # Ensure parent exists first (recursion)
+        self._ensure_parent_dirs(conn, ip, username, parent_path)
+        
+        # Create this directory
+        now = datetime.datetime.now().strftime("%b %d %H:%M")
+        meta = {
+            'permissions': 'drwxr-xr-x', # Default dir perms
+            'size': 4096,
+            'owner': username,
+            'group': username,
+            'modified': now
+        }
+        
+        try:
+            c.execute("""
+                INSERT OR IGNORE INTO user_filesystem (ip, username, path, parent_path, type, metadata, content)
+                VALUES (?, ?, ?, ?, 'directory', ?, NULL)
+            """, (ip, username, path, parent_path, json.dumps(meta)))
+        except Exception as e:
+            log.error(f"[DB] Error creating parent dir {path}: {e}")
 
     def get_unique_creds_last_24h(self, ip):
         cutoff = datetime.datetime.now() - datetime.timedelta(hours=24)

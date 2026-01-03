@@ -229,7 +229,7 @@ class TestCommandHandler:
         
         # Flag -r
         resp_r, _, _ = handler.handle_uname("uname -r", context)
-        assert "5.10" in resp_r
+        assert "6.1" in resp_r
 
     def test_handle_ps(self, handler):
         context = {'user': 'root'}
