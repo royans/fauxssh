@@ -12,7 +12,7 @@ from ssh_honeypot.server import main as server_main
 import ssh_honeypot.server
 import ssh_honeypot.fs_seeder
 
-TEST_PORT = 2225 # Use a dedicated port for this specific test
+TEST_PORT = 2226 # Use a dedicated port for this specific test
 
 def is_server_running(port):
     try:
@@ -65,7 +65,7 @@ class TestCDIntegreation(unittest.TestCase):
     def setUp(self):
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self.client.connect('127.0.0.1', port=TEST_PORT, username='testuser', password='password')
+        self.client.connect('127.0.0.1', port=TEST_PORT, username='testuser', password='password', look_for_keys=False, allow_agent=False)
 
     def tearDown(self):
         self.client.close()

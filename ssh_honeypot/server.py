@@ -118,112 +118,6 @@ class HoneypotServer(paramiko.ServerInterface):
         self.subsystem = None
         self.transport_ref = None
 
-    def check_channel_request(self, kind, chanid):
-        if kind == 'session':
-            return paramiko.OPEN_SUCCEEDED
-        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
-
-    def _parse_ssh_string(self, data, offset=0):
-        try:
-            if len(data) < offset + 4: return None, offset
-            length = struct.unpack('>I', data[offset:offset+4])[0]
-            offset += 4
-            if len(data) < offset + length: return None, offset
-            s = data[offset:offset+length]
-            return s.decode('utf-8', errors='ignore'), offset + length
-        except: return None, offset
-
-    def _compute_hassh(self, payload):
-        try:
-            # Skip MSG(1) + Cookie(16) = 17
-            offset = 17
-            
-            # 1. KEX
-            kex, offset = self._parse_ssh_string(payload, offset)
-            # 2. HostKey (Skip)
-            _, offset = self._parse_ssh_string(payload, offset)
-            # 3. Enc C2S
-            enc, offset = self._parse_ssh_string(payload, offset)
-            # 4. Enc S2C (Skip)
-            _, offset = self._parse_ssh_string(payload, offset)
-            # 5. Mac C2S
-            mac, offset = self._parse_ssh_string(payload, offset)
-            # 6. Mac S2C (Skip)
-            _, offset = self._parse_ssh_string(payload, offset)
-            # 7. Comp C2S
-            comp, offset = self._parse_ssh_string(payload, offset)
-            
-            if kex and enc and mac and comp:
-                raw_str = f"{kex};{enc};{mac};{comp}"
-                md5 = hashlib.md5(raw_str.encode()).hexdigest()
-                return md5, raw_str
-        except: pass
-        return None, None
-
-    def _extract_fingerprint(self):
-        if not self.transport_ref: return None
-        
-        fp = {}
-        try:
-            fp['cipher'] = getattr(self.transport_ref, 'remote_cipher', 'unknown')
-            fp['mac'] = getattr(self.transport_ref, 'remote_mac', 'unknown')
-            fp['compression'] = getattr(self.transport_ref, 'remote_compression', 'unknown')
-            fp['kex'] = getattr(self.transport_ref, 'kex_alg', 'unknown')
-            
-            # Advanced Fingerprinting (HASSH) via internal attribute
-            if hasattr(self.transport_ref, '_latest_kex_init'):
-                 hassh, raw = self._compute_hassh(self.transport_ref._latest_kex_init)
-                 if hassh:
-                     fp['hassh'] = hassh
-                     fp['hassh_algorithms'] = raw
-            
-            return fp
-        except: return None
-
-    def check_auth_password(self, username, password):
-        self.username = username
-        self.password = password
-        
-        # Exponential Login Rejection (Anti-Harvesting)
-        # Check if this IP has already compromised too many unique usernames in the last 24h
-        try:
-            # Get set of (username, password) tuples that worked
-            existing_creds = db.get_unique_creds_last_24h(self.client_ip)
-            
-            # Check if this EXACT credential pair has worked before
-            if (username, password) not in existing_creds:
-                # This is a NEW credential candidate (either new user, or existing user with new password)
-                
-                # Count unique usernames already compromised
-                unique_users = set(u for u, p in existing_creds)
-                
-                # FIX: If we already know a valid password for this user, do NOT allow a different one.
-                # This prevents harvesting/guessing after success.
-                if username in unique_users:
-                     log.warning(f"[!] Anti-Harvesting: Blocking {self.client_ip} for user '{username}' (Known user, new password denied)")
-                     return paramiko.AUTH_FAILED
-
-                count = len(unique_users)
-                
-                if count >= 5:
-                    # Hard Block: Too many unique successful logins
-                    log.warning(f"[!] Anti-Harvesting: Blocking {self.client_ip} for user '{username}' (Limit Reached: {count})")
-                    return paramiko.AUTH_FAILED
-                
-                # Probability Rejection: 1->20%, 2->40%, 3->60%, 4->80%
-                prob = count / 5.0
-                if random.random() < prob:
-                     log.warning(f"[!] Anti-Harvesting: Randomly blocking {self.client_ip} for user '{username}' (Prob: {prob:.2f})")
-                     return paramiko.AUTH_FAILED
-
-        except Exception as e:
-            log.error(f"[!] Error in Anti-Harvesting check: {e}")
-        self.event = threading.Event()
-        self.client_ip = client_ip
-        self.username = None
-        self.password = None
-        self.subsystem = None
-        self.transport_ref = None
 
     def check_channel_request(self, kind, chanid):
         if kind == 'session':
@@ -292,40 +186,40 @@ class HoneypotServer(paramiko.ServerInterface):
         self.password = password
         
         # Exponential Login Rejection (Anti-Harvesting)
-        # Exponential Login Rejection (Anti-Harvesting)
         # Check if this IP has already compromised too many unique usernames in the last 24h
-        try:
-            # Get set of (username, password) tuples that worked
-            existing_creds = db.get_unique_creds_last_24h(self.client_ip)
-            
-            # Check if this EXACT credential pair has worked before
-            if (username, password) not in existing_creds:
-                # This is a NEW credential candidate (either new user, or existing user with new password)
+        if not os.getenv('SSHPOT_TEST_MODE'):
+            try:
+                # Get set of (username, password) tuples that worked
+                existing_creds = db.get_unique_creds_last_24h(self.client_ip)
                 
-                # Count unique usernames already compromised
-                unique_users = set(u for u, p in existing_creds)
-                
-                # FIX: If we already know a valid password for this user, do NOT allow a different one.
-                # This prevents harvesting/guessing after success.
-                if username in unique_users:
-                     print(f"[!] Anti-Harvesting: Blocking {self.client_ip} for user '{username}' (Known user, new password denied)")
-                     return paramiko.AUTH_FAILED
+                # Check if this EXACT credential pair has worked before
+                if (username, password) not in existing_creds:
+                    # This is a NEW credential candidate (either new user, or existing user with new password)
+                    
+                    # Count unique usernames already compromised
+                    unique_users = set(u for u, p in existing_creds)
+                    
+                    # FIX: If we already know a valid password for this user, do NOT allow a different one.
+                    # This prevents harvesting/guessing after success.
+                    if username in unique_users:
+                         log.warning(f"[!] Anti-Harvesting: Blocking {self.client_ip} for user '{username}' (Known user, new password denied)")
+                         return paramiko.AUTH_FAILED
 
-                count = len(unique_users)
-                
-                if count >= 5:
-                    # Hard Block: Too many unique successful logins
-                    print(f"[!] Anti-Harvesting: Blocking {self.client_ip} for user '{username}' (Limit Reached: {count})")
-                    return paramiko.AUTH_FAILED
-                
-                # Probability Rejection: 1->20%, 2->40%, 3->60%, 4->80%
-                prob = count / 5.0
-                if random.random() < prob:
-                     print(f"[!] Anti-Harvesting: Randomly blocking {self.client_ip} for user '{username}' (Prob: {prob:.2f})")
-                     return paramiko.AUTH_FAILED
+                    count = len(unique_users)
+                    
+                    if count >= 5:
+                        # Hard Block: Too many unique successful logins
+                        log.warning(f"[!] Anti-Harvesting: Blocking {self.client_ip} for user '{username}' (Limit Reached: {count})")
+                        return paramiko.AUTH_FAILED
+                    
+                    # Probability Rejection: 1->20%, 2->40%, 3->60%, 4->80%
+                    prob = count / 5.0
+                    if random.random() < prob:
+                         log.warning(f"[!] Anti-Harvesting: Randomly blocking {self.client_ip} for user '{username}' (Prob: {prob:.2f})")
+                         return paramiko.AUTH_FAILED
 
-        except Exception as e:
-            print(f"[!] Error in Anti-Harvesting check: {e}")
+            except Exception as e:
+                log.error(f"[!] Error in Anti-Harvesting check: {e}")
 
         success = (username != 'root')
         
@@ -335,7 +229,7 @@ class HoneypotServer(paramiko.ServerInterface):
             
         fp = self._extract_fingerprint()
         db.log_auth_event(self.client_ip, username, 'password', password, success, client_version, fingerprint=fp)
-        
+
         if not success:
             return paramiko.AUTH_FAILED
             

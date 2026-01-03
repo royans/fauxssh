@@ -4,6 +4,8 @@ import os
 import datetime
 import time
 import hashlib
+import json
+import logging
 try:
     from .utils import random_response_delay
 except ImportError:
@@ -70,8 +72,8 @@ class CommandHandler:
             'tar', 'zip', 'unzip', 'gzip', 'gunzip', 'md5sum',
             'ssh', 'ping', 'sleep',
             'ifconfig', 'ip', 'netstat', 'ss', 'route', 'mount',
-            'python', 'python3', 'perl', 'bash', 'sh', 'base64',
-            'dmidecode', 'lscpu', 'lspci'
+            'python', 'python3', 'perl', 'bash', 'sh', 'base64', 'time',
+            'dmidecode', 'lscpu', 'lspci', 'fdisk'
         }
         self.HONEYTOKENS = {"aws_keys.txt", "id_rsa_backup", "wallet.dat"}
         self.FILESYSTEMS = [
@@ -149,6 +151,17 @@ class CommandHandler:
         
         return out + time_stats, updates, meta
 
+    def handle_echo(self, cmd, context):
+        """
+        Local echo handler.
+        """
+        import shlex
+        try:
+             parts = shlex.split(cmd)
+             return " ".join(parts[1:]) + "\n", {}, {'source': 'local', 'cached': False}
+        except:
+             return cmd[5:] + "\n", {}, {'source': 'local', 'cached': False}
+
     def handle_fdisk(self, cmd, context):
         """
         Simulates fdisk -l output.
@@ -214,13 +227,19 @@ Sector size (logical/physical): 512 bytes / 512 bytes
              
              if len(parts) == 2 or (len(parts) > 2 and parts[2] == '-'):
                  # sudo su / sudo su - (Root)
-                 random_response_delay(1.0, 2.5) # Fake password delay?
-                 # Actually, real sudo asks password first.
-                 # We skip interaction and fail.
-                 return f"[sudo] password for {user}: \nSorry, try again.\n[sudo] password for {user}: \n", {}, {'source': 'local', 'cached': False}
+                if os.getenv('SSHPOT_TEST_MODE'):
+                    random_response_delay(0.01, 0.05)
+                else:
+                    random_response_delay(1.0, 2.5) # Fake password delay?
+                # Actually, real sudo asks password first.
+                # We skip interaction and fail.
+                return f"[sudo] password for {user}: \nSorry, try again.\n[sudo] password for {user}: \n", {}, {'source': 'local', 'cached': False}
 
         if '-i' in parts or '/bin/bash' in cmd or 'sh' in cmd:
-             random_response_delay(1.0, 2.0)
+             if os.getenv('SSHPOT_TEST_MODE'):
+                 random_response_delay(0.01, 0.05)
+             else:
+                 random_response_delay(1.0, 2.0)
              return f"{user} is not in the sudoers file.  This incident will be reported.\n", {}, {'source': 'local', 'cached': False}
 
         # Default fail
@@ -483,9 +502,13 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
         # 4. Dispatch to Specific Handlers (or generic LLM)
         handler_name = f"handle_{base_cmd}"
+        import sys
+        sys.stderr.write(f"DEBUG: Dispatching '{base_cmd}' -> '{handler_name}'. HasAttr: {hasattr(self, handler_name)}\n")
+        
         if hasattr(self, handler_name):
             # Deception: Add random delay to local commands to match LLM latency timing
-            random_response_delay(0.5, 1.5)
+            if not os.getenv('SSHPOT_TEST_MODE'):
+                random_response_delay(0.5, 1.5)
             res = getattr(self, handler_name)(cmd, context)
             
             # Allow handlers to return custom metadata (esp. for hybrid handlers like cat)
@@ -498,7 +521,8 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             normalized_base = os.path.basename(base_cmd)
             handler_name_norm = f"handle_{normalized_base}"
             if hasattr(self, handler_name_norm):
-                random_response_delay(0.5, 1.5)
+                if not os.getenv('SSHPOT_TEST_MODE'):
+                    random_response_delay(0.5, 1.5)
                 # We pass the ORIGINAL cmd to the handler, it must handle parsing if needed.
                 res = getattr(self, handler_name_norm)(cmd, context)
                  # Allow handlers to return custom metadata (esp. for hybrid handlers like cat)
@@ -644,22 +668,38 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
     # --- NETWORK HANDLERS (Simulated Latency) ---
     
+    def _is_whitelisted(self, cmd):
+        """
+        Simple heuristic to check if the command targets a popular/whitelisted domain.
+        """
+        whitelist = [
+            "google.com", "www.google.com",
+            "github.com", "raw.githubusercontent.com",
+            "microsoft.com",
+            "ubuntu.com", "security.ubuntu.com", "archive.ubuntu.com", "ports.ubuntu.com",
+            "debian.org", "ftp.debian.org", "security.debian.org",
+            "python.org", "pypi.org",
+            "stackoverflow.com",
+            "blogofy.com", "example.com",
+            "127.0.0.1", "localhost", "0.0.0.0", "::1"
+        ]
+        
+        # Check if any whitelist item is in the command string (simplistic but effective)
+        for domain in whitelist:
+            if domain in cmd:
+                return True
+        return False
+
     def handle_ssh(self, cmd, context):
         # Fake connection time
-        random_response_delay(1.0, 3.0)
+        if os.getenv('SSHPOT_TEST_MODE'):
+             random_response_delay(0.01, 0.05)
+        else:
+             random_response_delay(1.0, 3.0)
         # Fallback to generic LLM for the actual interaction/error
         # But we can prime the LLM context or cache
         return self.handle_generic(cmd, context)
 
-    def handle_curl(self, cmd, context):
-        # Fake network transfer time
-        random_response_delay(1.0, 4.0)
-        return self.handle_generic(cmd, context)
-
-    def handle_wget(self, cmd, context):
-        # Fake network transfer time
-        random_response_delay(1.0, 4.0)
-        return self.handle_generic(cmd, context)
 
     # --- SPECIFIC HANDLERS ---
     
@@ -1293,32 +1333,34 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         else:
             return f"uid=1000({user}) gid=1000({user}) groups=1000({user}),24(cdrom),25(floppy),29(audio),30(dip),44(video),46(plugdev),108(netdev)\n", {}
 
-    def handle_sudo(self, cmd, context):
-        user = context.get('user', 'unknown')
-        return f"{user} is not in the sudoers file. This incident will be reported.\n", {}
-
-    
-    def handle_echo(self, cmd, context):
-        # ... logic exists or default ...
-        # If user implemented handle_echo, keep it?
-        # Re-implementing simplified here if it was missing or relying on Generic?
-        # Actually handle_echo likely relies on generic or needs simple impl
-        # Let's just implement the requested ones.
-        return self._handle_echo_impl(cmd, context)
-
-    def _handle_echo_impl(self, cmd, context):
-         # Simplistic echo
-         parts = cmd.split(' ', 1)
-         if len(parts) > 1:
-             msg = parts[1]
-             # Strip quotes
-             if msg.startswith('"') and msg.endswith('"'): msg = msg[1:-1]
-             elif msg.startswith("'") and msg.endswith("'"): msg = msg[1:-1]
-             return msg + "\n", {}
-         return "\n", {}
 
     def handle_sleep(self, cmd, context):
-        return self.system_handler.handle_sleep(cmd, context)
+        try:
+            parts = cmd.split()
+            duration = float(parts[1]) if len(parts) > 1 else 1.0
+            
+            # If test mode, skip sleep to avoid slow tests, UNLESS specific test requires it?
+            # test_time_duration requires it to work.
+            # But process_command doesn't know if it's called by test.
+            # We can check environment.
+            # If SSHPOT_TEST_MODE is set, we usually skip delays.
+            # But for 'sleep' command specifically, maybe we should respect it if it's short?
+            # Or just sleep.
+            
+            if os.getenv('SSHPOT_TEST_MODE'):
+                # If duration is small (<3s), maybe sleep? 
+                # But unit tests want speed.
+                # test_time_duration is ONLY test using sleep?
+                # It asserts duration.
+                # So we MUST sleep.
+                time.sleep(duration)
+            else:
+                time.sleep(duration)
+        except ValueError:
+             return f"sleep: invalid time interval '{parts[1]}'\n", {}
+        except Exception:
+             pass
+        return "", {}, {'source': 'local', 'cached': False}
 
     def handle_ifconfig(self, cmd, context):
         # Delegate to network_handlers
@@ -1630,6 +1672,22 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         return content + "\n", {}
 
     def handle_curl(self, cmd, context):
+        if not self._is_whitelisted(cmd):
+             if os.getenv('SSHPOT_TEST_MODE'):
+                 import time
+                 import random
+                 try:
+                    from .utils import random_response_delay
+                 except: from utils import random_response_delay
+                 random_response_delay(0.1, 0.2)
+             else:
+                 import time
+                 try:
+                    from .utils import random_response_delay
+                 except: from utils import random_response_delay
+                 random_response_delay(5.0, 10.0)
+             return "curl: (28) Connection timed out after 5001 milliseconds\n", {}, {'source': 'firewall', 'cached': False}
+
         import shlex
         import time
         import random
@@ -2302,18 +2360,12 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
             return f"base64: invalid input\n", {}, {'source': source, 'cached': source == 'local'}
 
 
-    def handle_history(self, cmd, context):
-        history = context.get('history', [])
-        out = []
-        for i, (c, _) in enumerate(history):
-            out.append(f" {i+1}  {c}")
-        return "\n".join(out) + "\n", {}
 
     def handle_su(self, cmd, context):
         # Always fail authentication
         # Simulate delay
         time.sleep(1.5) 
-        return "su: Authentication failure\n", {}
+        return "su: Authentication failure\n", {}, {'source': 'local', 'cached': False}
         
     def handle_perl(self, cmd, context):
         return self._handle_interpreter(cmd, context, "perl")

@@ -20,13 +20,13 @@ class TestMoreHandlers:
         context = {
             'history': [("ls", "out1"), ("whoami", "root")]
         }
-        resp, _ = handler.handle_history("history", context)
+        resp, _, _ = handler.handle_history("history", context)
         assert " 1  ls" in resp
         assert " 2  whoami" in resp
 
     def test_su_failure(self, handler):
         start = time.time()
-        resp, _ = handler.handle_su("su root", {})
+        resp, _, _ = handler.handle_su("su root", {})
         end = time.time()
         
         assert "Authentication failure" in resp

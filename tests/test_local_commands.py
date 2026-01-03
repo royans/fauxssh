@@ -14,10 +14,10 @@ def handler():
 
 class TestLocalCommands:
     def test_echo(self, handler):
-        resp, _ = handler.handle_echo("echo hello world", {})
+        resp, _, _ = handler.handle_echo("echo hello world", {})
         assert "hello world" in resp
         
-        resp, _ = handler.handle_echo("echo 'quoted string'", {})
+        resp, _, _ = handler.handle_echo("echo 'quoted string'", {})
         assert "quoted string" in resp
         assert "'" not in resp # Naive stripping check
 
