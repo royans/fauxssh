@@ -6,7 +6,18 @@ import argparse
 import json
 from collections import defaultdict
 
-DB_PATH = os.path.join(os.path.dirname(__file__), '../../data/honeypot.sqlite')
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(BASE_DIR))
+sys.path.append(os.path.join(PROJECT_ROOT, "ssh_honeypot"))
+
+from dotenv import load_dotenv
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+
+try:
+    from config_manager import get_data_dir
+    DB_PATH = os.path.join(get_data_dir(), "honeypot.sqlite")
+except ImportError:
+    DB_PATH = os.path.join(PROJECT_ROOT, "data", "honeypot.sqlite")
 
 def get_conn():
     if not os.path.exists(DB_PATH):

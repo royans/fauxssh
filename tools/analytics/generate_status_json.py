@@ -7,9 +7,19 @@ import time
 from datetime import datetime, timedelta
 
 # Find DB path relative to this script
+# Find DB path relative to this script
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(BASE_DIR))
-DB_PATH = os.path.join(PROJECT_ROOT, "data", "honeypot.sqlite")
+sys.path.append(os.path.join(PROJECT_ROOT, "ssh_honeypot"))
+
+from dotenv import load_dotenv
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+
+try:
+    from config_manager import get_data_dir
+    DB_PATH = os.path.join(get_data_dir(), "honeypot.sqlite")
+except ImportError:
+    DB_PATH = os.path.join(PROJECT_ROOT, "data", "honeypot.sqlite")
 
 def anonymize_ip(ip):
     if not ip: return "unknown"
