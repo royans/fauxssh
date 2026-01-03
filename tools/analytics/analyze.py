@@ -25,7 +25,7 @@ sys.path.append(os.path.join(PROJECT_ROOT, "ssh_honeypot"))
 
 
 try:
-    from config_manager import get_data_dir
+    from config_manager import get_data_dir, get_ignored_ips
     DB_PATH = os.path.join(get_data_dir(), "honeypot.sqlite")
 except ImportError:
     # Fallback if import fails (e.g. structure change)
@@ -94,6 +94,17 @@ def list_sessions(limit=50, no_failed=False):
     """
     params = []
     # logic for no_failed filtering could go here if implemented in query
+    
+    # Filter Ignored IPs
+    try:
+        ignored = get_ignored_ips()
+    except: ignored = []
+    
+    if ignored:
+        placeholders = ','.join(['?'] * len(ignored))
+        query += f" WHERE s.remote_ip NOT IN ({placeholders})"
+        params.extend(ignored)
+    
     query += " ORDER BY s.start_time DESC LIMIT ?"
     params.append(limit)
     
@@ -183,6 +194,17 @@ def list_commands(limit=50, ip_filter=None, session_filter=None):
     """
     
     params = []
+    
+    # Filter Ignored IPs
+    try:
+        ignored = get_ignored_ips()
+    except: ignored = []
+    
+    if ignored:
+        placeholders = ','.join(['?'] * len(ignored))
+        query += f" AND s.remote_ip NOT IN ({placeholders})"
+        params.extend(ignored)
+
     if ip_filter:
         query += " AND s.remote_ip = ?"
         params.append(ip_filter)

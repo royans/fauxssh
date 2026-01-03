@@ -14,7 +14,7 @@ sys.path.append(os.path.join(PROJECT_ROOT, "ssh_honeypot"))
 
 
 try:
-    from config_manager import get_data_dir
+    from config_manager import get_data_dir, get_ignored_ips
     DB_PATH = os.path.join(get_data_dir(), "honeypot.sqlite")
 except ImportError:
     DB_PATH = os.path.join(PROJECT_ROOT, "data", "honeypot.sqlite")
@@ -49,18 +49,33 @@ def generate_report():
     }
     
     try:
+        # Prepare IP Filter
+        try:
+            ignored = get_ignored_ips()
+        except: ignored = []
+        
+        sess_filter = ""
+        auth_filter = ""
+        params = []
+        
+        if ignored:
+            placeholders = ','.join(['?'] * len(ignored))
+            sess_filter = f" AND remote_ip NOT IN ({placeholders})"
+            auth_filter = f" AND client_ip NOT IN ({placeholders})"
+            params = ignored
+
         # 1. General Stats
-        cursor.execute("SELECT COUNT(*) FROM sessions WHERE username != 'royans'")
+        cursor.execute(f"SELECT COUNT(*) FROM sessions WHERE username != 'royans'{sess_filter}", params)
         total_sessions = cursor.fetchone()[0]
         
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT COUNT(*) FROM interactions i
             JOIN sessions s ON i.session_id = s.session_id
-            WHERE s.username != 'royans'
-        """)
+            WHERE s.username != 'royans' {sess_filter.replace('remote_ip', 's.remote_ip')}
+        """, params)
         total_commands = cursor.fetchone()[0]
         
-        cursor.execute("SELECT MIN(start_time) FROM sessions WHERE username != 'royans'")
+        cursor.execute(f"SELECT MIN(start_time) FROM sessions WHERE username != 'royans'{sess_filter}", params)
         row_min = cursor.fetchone() # returns (None,) if no sessions
         first_seen = row_min[0] if row_min else None
         
@@ -72,14 +87,14 @@ def generate_report():
         
         # 2. Top Requesters (IPs)
         # We look at sessions for unique IPs
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT remote_ip, COUNT(*) as count 
             FROM sessions 
-            WHERE username != 'royans'
+            WHERE username != 'royans'{sess_filter}
             GROUP BY remote_ip 
             ORDER BY count DESC 
             LIMIT 10
-        """)
+        """, params)
         top_ips = []
         for row in cursor.fetchall():
             top_ips.append({
@@ -89,14 +104,14 @@ def generate_report():
         report["activity"]["top_ips"] = top_ips
         
         # 3. Top Usernames
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT username, COUNT(*) as count 
             FROM auth_events 
-            WHERE username != 'royans'
+            WHERE username != 'royans'{auth_filter}
             GROUP BY username 
             ORDER BY count DESC 
             LIMIT 10
-        """)
+        """, params)
         top_users = []
         for row in cursor.fetchall():
             top_users.append({
@@ -106,15 +121,15 @@ def generate_report():
         report["activity"]["top_usernames"] = top_users
         
         # 4. Top Commands
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT i.command, COUNT(*) as count 
             FROM interactions i
             JOIN sessions s ON i.session_id = s.session_id
-            WHERE s.username != 'royans'
+            WHERE s.username != 'royans' {sess_filter.replace('remote_ip', 's.remote_ip')}
             GROUP BY i.command 
             ORDER BY count DESC 
             LIMIT 10
-        """)
+        """, params)
         top_cmds = []
         for row in cursor.fetchall():
             top_cmds.append({
@@ -124,14 +139,14 @@ def generate_report():
         report["activity"]["top_commands"] = top_cmds
         
         # 5. Top Client Versions
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT client_version, COUNT(*) as count 
             FROM sessions 
-            WHERE username != 'royans'
+            WHERE username != 'royans'{sess_filter}
             GROUP BY client_version 
             ORDER BY count DESC 
             LIMIT 10
-        """)
+        """, params)
         top_clients = []
         for row in cursor.fetchall():
             top_clients.append({
@@ -141,13 +156,13 @@ def generate_report():
         report["activity"]["top_clients"] = top_clients
 
         # 6. Recent Sessions
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT session_id, remote_ip, username, start_time, client_version 
             FROM sessions 
-            WHERE username != 'royans'
+            WHERE username != 'royans'{sess_filter}
             ORDER BY start_time DESC 
             LIMIT 5
-        """)
+        """, params)
         recent_sessions = []
         for row in cursor.fetchall():
             recent_sessions.append({

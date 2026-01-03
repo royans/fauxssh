@@ -13,7 +13,7 @@ sys.path.append(os.path.join(PROJECT_ROOT, "ssh_honeypot"))
 
 
 try:
-    from config_manager import get_data_dir
+    from config_manager import get_data_dir, get_ignored_ips
     DB_PATH = os.path.join(get_data_dir(), "honeypot.sqlite")
 except ImportError:
     DB_PATH = os.path.join(PROJECT_ROOT, "data", "honeypot.sqlite")
@@ -32,7 +32,20 @@ def calculate_sha256(content):
 def list_uploads():
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT ip, username, path, content, created_at, metadata FROM user_filesystem")
+    
+    query = "SELECT ip, username, path, content, created_at, metadata FROM user_filesystem"
+    params = []
+    
+    try:
+        ignored = get_ignored_ips()
+    except: ignored = []
+
+    if ignored:
+        placeholders = ','.join(['?'] * len(ignored))
+        query += f" WHERE ip NOT IN ({placeholders})"
+        params = ignored
+        
+    c.execute(query, params)
     rows = c.fetchall()
     conn.close()
 

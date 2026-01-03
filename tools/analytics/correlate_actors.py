@@ -12,7 +12,7 @@ sys.path.append(os.path.join(PROJECT_ROOT, "ssh_honeypot"))
 
 
 try:
-    from config_manager import get_data_dir
+    from config_manager import get_data_dir, get_ignored_ips
     DB_PATH = os.path.join(get_data_dir(), "honeypot.sqlite")
 except ImportError:
     DB_PATH = os.path.join(PROJECT_ROOT, "data", "honeypot.sqlite")
@@ -27,11 +27,26 @@ def correlate(by_cred=True, by_hassh=True):
     conn = get_conn()
     c = conn.cursor()
     
+    # Prepare IP Filter
+    try:
+        ignored = get_ignored_ips()
+    except: ignored = []
+    
+    client_filter = ""
+    remote_filter = ""
+    params = []
+    
+    if ignored:
+        placeholders = ','.join(['?'] * len(ignored))
+        client_filter = f" WHERE client_ip NOT IN ({placeholders})"
+        remote_filter = f" WHERE remote_ip NOT IN ({placeholders})"
+        params = ignored
+
     # 1. Correlate by Credentials (actors using same password/key)
     if by_cred:
         print("\n=== Correlating by Credentials (Password/Key) ===")
         print("Finding credentials used by multiple distinct IPs...")
-        c.execute("SELECT client_ip, auth_data, success FROM auth_events")
+        c.execute(f"SELECT client_ip, auth_data, success FROM auth_events{client_filter}", params)
         rows = c.fetchall()
         
         cred_map = defaultdict(set)
@@ -58,7 +73,7 @@ def correlate(by_cred=True, by_hassh=True):
         
         # Check sessions
         try:
-            c.execute("SELECT remote_ip, fingerprint FROM sessions")
+            c.execute(f"SELECT remote_ip, fingerprint FROM sessions{remote_filter}", params)
             rows = c.fetchall()
         except: rows = []
         

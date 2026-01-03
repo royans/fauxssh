@@ -33,6 +33,15 @@ def get_data_dir():
             
     return data_dir
 
+def get_ignored_ips():
+    """
+    Returns a list of IPs to ignore in analytics, parsed from ANALYTICS_IGNORE_IPS.
+    """
+    raw = os.getenv('ANALYTICS_IGNORE_IPS', '')
+    if not raw:
+        return []
+    return [ip.strip() for ip in raw.split(',') if ip.strip()]
+
 DEFAULT_CONFIG = {
     "server": {
         "host_key_file": "data/host.key",
