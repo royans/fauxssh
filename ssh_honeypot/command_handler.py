@@ -936,7 +936,14 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         # Instruct LLM to be silent on success
         # 1. OPTIMIZATION: Check Local DB First
         parts = cmd.strip().split()
-        target_path = parts[1] if len(parts) > 1 else "~"
+        
+        # Default to correct user home if no args
+        if len(parts) > 1:
+            target_path = parts[1]
+        else:
+            # HOME determination logic
+            user = context.get('user', 'root')
+            target_path = "/root" if user == 'root' else f"/home/{user}"
         
         # Resolve target path relative to CWD
         cwd = context.get('cwd', '/')
