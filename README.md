@@ -1,204 +1,73 @@
 # FauxSSH
 
-**FauxSSH** is a high-interaction SSH honeypot that leverages Generative AI (Google Gemini) to simulate a realistic Linux environment. It traps attackers in a simulated shell where their commands are processed by an LLM, generating believable responses without putting your real system at risk.
+**A high-interaction SSH honeypot powered by Google Gemini.**
 
-## Features
+FauxSSH deceptively emulates a realistic Linux server, engaging attackers in long, hallucinated sessions while recording every keystroke, file upload, and command output for threat intelligence analysis.
 
-- **Dynamic AI Responses**: Uses Google Gemini to generate believable output for shell commands.
-- **Virtual Filesystem (VFS)**: Maintains an in-memory filesystem state per session.
-- **Session Persistence**: Tracks working directory, environment variables, and command history.
-- **SFTP Support**: Accepts file uploads (quarantined safely) and allows simulated file browsing.
-- **DoS Protection**: Rate limiting per IP and global session limits.
-- **Secure**: Isolates attackers from the host system; explicitly forbids `root` login.
+## Key Features
 
-## Prerequisites
-
-- **Python 3.8+**
-- **Google Cloud API Key** with Gemini API enabled.
-
-
-## ⚠️ Security & Disclaimer
-
-> [!CAUTION]
-> **Use at your own risk.** FauxSSH is a honeypot designed to attract attackers. It should **ONLY** be run in a strictly isolated environment (dedicated VPS, VM, or sandbox) that you are willing to lose.
-
-See [SECURITY.md](SECURITY.md) for detailed risk warnings and reporting instructions.
-
-**Do not run this on your personal workstation or mission-critical servers.**
-
-
-
-## Recent Improvements
-
-### Jan 2nd 2026
-- **Keyword Alerts**: Support for immediate Discord alerts based on configured keywords or regex patterns.
-- **Webhook Integration**: Real-time session streaming and alerting via Discord webhooks.
-- **Startup Script**: Enhanced `startup.sh` with `--cron` mode and parent directory `.env` discovery.
-- **Bug Fixes**: Resolved critical runtime errors in analysis loop and webhook payload formatting.
-
-### Jan 1st 2026
-- **Hardware Emulation**: Added handlers for `dmidecode`, `lspci`, and `lscpu` to simulate a dual NVIDIA H100 server.
-- **Enhanced Realism**: Implemented Recon Script Interception and smarter "Alabaster" persona aliases.
-- **Security Scaling**: Increased input processing limit to 50,000 characters to support analyzing large malware payloads.
-
-### Dec 31st 2025
-- **Native SCP Protocol**: Full support for `scp` file uploads (quarantined locally) and downloads.
-- **Malware Persistence**: Uploaded files can now be "executed" (simulated via LLM) to observe behavioral analysis.
-- **Prompt Injection Hardening**: New framework to detect and neutralize adversarial LLM prompts.
-
-### Dec 30th 2025
-- **Network Tarpitting**: Implemented "sticky" connections and honeytokens to slow down automated scanners.
-- **Advanced Chaining**: Support for complex command chains (`|`, `&&`, `;`) and redirections (`>`).
-- **Local IO Handlers**: Added fast, deterministic handlers for `disk` operations (`df`, `free`, `mount`, `wc`).
-
+- **🧠 LLM-Powered Realism**: Uses Google Gemini to dynamically generate file contents (`cat`, `ls`), command responses (`ps aux`, `docker ps`), and error messages.
+- **🕵️‍♂️ Behavioral Analysis**: Automatically analyzes attacker commands for risk, intent, and TTPs (Tactics, Techniques, and Procedures).
+- **🔒 Safe & Isolated**: All uploaded files are sandboxed. The "filesystem" is virtual and strictly isolated from the host.
+- **🚨 Real-Time Alerting**: Stream high-risk sessions live to Discord or Slack.
+- **📊 Built-in Analytics**: CLI tools to visualize sessions, inspect malware, and correlate threat actors.
 
 ## Quick Start
 
-### 🌐 Live Demo
-You can try FauxSSH right now! It is running on **blogofy.com** on standard port 22.
-```bash
-ssh blogofy.com
-# Password: any (except root)
-```
-
-### 1. Installation
-
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/royans/fauxssh.git
-    cd fauxssh
-    ```
-
-2.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-3.  **Configure Environment:**
-    Create a `.env` file in the root directory.
-    ```bash
-    echo "GOOGLE_API_KEY=your_actual_api_key_here" > .env
-    ```
-
-## Configuration
-
-You can override default settings by creating a `config.yaml` file in the root directory.
-
-**Example `config.yaml` (with defaults shown):**
-
-```yaml
-server:
-  port: 2222
-  bind_ip: "0.0.0.0"
-  hostname: "web.blogofy.com"   # Fake hostname shown in prompt
-  host_key_file: "data/host.key"
-
-llm:
-  model_name: "gemma-3-27b-it"  # Google Gemini model
-  max_tokens: 2048
-  temperature: 1.0
-
-upload:
-  max_file_size: 1048576        # 1MB limit for SFTP/SCP
-  max_quota_per_ip: 1048576     # Total upload quota per IP
-  cleanup_days: 30              # Upload retention period
-```
-
-## Usage
-
-### 1. Start the Server
-
-Run the server module. By default, it listens on port **2222** to avoid requiring root privileges.
+### 1. Manual Run (Developer Mode)
+Great for testing quickly without background services.
 
 ```bash
-python -m ssh_honeypot.server
+# 1. Clone & Install
+git clone https://github.com/royans/fauxssh.git
+cd fauxssh
+pip install -r requirements.txt
+
+# 2. Configure
+cp .env.example .env
+nano .env # Add your GOOGLE_API_KEY
+
+# 3. Run
+python3 -m ssh_honeypot.server
 ```
 
-### 2. Connect
-
-Test the honeypot from another terminal:
-
-```bash
-ssh -p 2222 user@localhost
-```
-*Note: You can use any username/password combination (except `root`).*
-
-### 3. Production Deployment
-
-For long-running deployments, use the included startup script which handles logging and auto-restarts:
+### 2. Production Startup
+Use the included script for robust background execution and logging.
 
 ```bash
 ./tools/startup.sh
 ```
 
-## Deployment (Port Forwarding)
+## Analytics Examples
 
-To make FauxSSH reachable on the standard SSH port (22) without running the Python script as root, use `iptables` to forward traffic.
+FauxSSH includes powerful CLI tools to visualize captured data. See [Logging & Analytics](docs/LOGGING.md) for details.
 
-**Redirect port 22 to 2222:**
+### Recent Sessions
+`python3 tools/analytics/analyze.py --sessions --anon`
+![Recent Sessions](docs/images/report_sessions.png)
 
-```bash
-sudo iptables -t nat -A PREROUTING -p tcp --dport 22 -j REDIRECT --to-port 2222
-```
+### Command History
+`python3 tools/analytics/analyze.py --commands`
+![Command History](docs/images/report_commands.png)
 
-*Note: Make sure your real SSH server is moved to a different port or restricted by other rules to avoid locking yourself out if you are configuring this remotely.*
+### Session Verification
+`python3 tools/analytics/analyze.py --session-id <ID>`
+![Session Detail](docs/images/report_session_detail.png)
 
-## Real-time Alerting
+## Documentation
 
-FauxSSH can send real-time webhooks (e.g., Slack, Discord) when high-risk activity is detected.
-
-### Configuration
-Add to your `.env` file:
-```bash
-# Webhook URL (Discord/Slack/Etc)
-WEBHOOK_URL="https://discord.com/api/webhooks/..."
-
-# Tier 1: Notify Only (Risk >= 6). Default: 6
-ALERT_THRESHOLD_NOTIFY=6
-
-# Tier 2: Stream Session (Risk >= 7). Default: 7
-ALERT_THRESHOLD_SESSION=7
-
-# Tier 3: Stream IP (Risk >= 9). Default: 9
-# Tier 3: Stream IP (Risk >= 9). Default: 9
-ALERT_THRESHOLD_IP=9
-
-# Keyword Triggers (Pipe-separated, case-insensitive)
-ALERT_KEYWORDS="hackblogofy|bashcrack|root"
-```
-
-### ⚠️ Security Warning (Alerting)
-> [!WARNING]
-> Enabling this feature causes the honeypot to generate outbound HTTP traffic to the configured URL.
-> 1. Ensure `WEBHOOK_URL` is **HTTPS** to protect payload data.
-> 2. Sophisticated attackers monitoring network traffic from the collection point might correlate command execution with outbound bursts (timing attack). Use with caution in covert deployments.
-
-## Logging
-
-All logs and captured data are stored in the `data/` directory:
-- `data/honeypot.json.log`: Structured application logs (JSON format).
-- `data/honeypot.sqlite`: SQLite database containing:
-    - `sessions`: Session metadata and client fingerprints.
-    - `auth_events`: Log of all login attempts (passwords/keys).
-    - `interactions`: Full command/response history.
-- `data/uploaded_files/`: Quarantined files uploaded by attackers.
-
-## 🎓 For Researchers & Educators
-
-FauxSSH can serve as an interesting case study for **Deception Technology** and **LLM Behavior**. We have prepared a dedicated guide for students and researchers exploring this concept:
-
-*   **[Educational Guide (EDUCATIONAL.md)](EDUCATIONAL.md)**: Explains the concepts of Simulated High-Interaction Honeypots and suggested experiments.
-
+*   [**Configuration Guide**](docs/CONFIGURATION.md): `.env` settings, port binding, and model tuning.
+*   [**Deployment Guide**](docs/DEPLOYMENT.md): Production startup, cron jobs, and port forwarding (Port 22).
+*   [**Alerting Setup**](docs/ALERTING.md): Configure Discord/Slack webhooks and keyword triggers.
+*   [**Logging & Data**](docs/LOGGING.md): understanding the database schema, JSON logs, and uploaded files.
+*   [**Changelog**](docs/CHANGELOG.md): Version history and recent features.
+*   [**Educational Use**](docs/EDUCATIONAL.md): A guide for researchers and students.
 
 ## Security Warning
 
 > [!WARNING]
-> **This is a honeypot designed to be attacked.**
-> *   **Isolation**: Run this in an isolated environment (VM, VPS, or container).
-> *   **Monitoring**: High traffic or scripted attacks can consume your API quota quickly.
-> *   **Network**: Be careful exposing this on your primary network.
+> This software is designed to be attacked. While FauxSSH is built with isolation in mind, **never run honeypots on critical production infrastructure** or networks containing sensitive data. Always use a dedicated VPS or isolated VLAN.
 
-## Contact
+## Disclaimer
 
-For questions, feedback, or educational collaboration:
-*   **Email**: royans@gmail.com
+This tool is for educational and defensive research purposes only. The authors are not responsible for any misuse or damage caused by this software.
