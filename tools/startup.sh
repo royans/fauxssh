@@ -13,7 +13,8 @@ export PYTHONPATH="$PROJECT_ROOT"
 
 # Query Python for the authoritative Data Directory
 # This ensures shell and python always agree, respecting .env logic handled by config_manager
-DATA_DIR=$(python3 -c "from ssh_honeypot.config_manager import get_data_dir; print(get_data_dir())")
+# We use tail -n 1 to ensure we only get the final path, ignoring any potential import noise
+DATA_DIR=$(python3 -c "from ssh_honeypot.config_manager import get_data_dir; print(get_data_dir())" | tail -n 1)
 
 if [ -z "$DATA_DIR" ]; then
     echo "[ERROR] Could not resolve DATA_DIR from Python config."

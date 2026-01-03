@@ -110,11 +110,13 @@ class ConfigManager:
                     user_config = yaml.safe_load(f)
                     if user_config:
                         self._merge(self._config, user_config)
-                print(f"[*] Loaded configuration from {self.config_path}")
+                # print(f"[*] Loaded configuration from {self.config_path}")
             except Exception as e:
-                print(f"[!] Error loading config: {e}")
+                # print(f"[!] Error loading config: {e}")
+                pass
         else:
-            print("[*] No config.yaml found, using defaults.")
+            # print("[*] No config.yaml found, using defaults.")
+            pass
 
         # Environment Override (Priority over config.yaml)
         if os.getenv("WEBHOOK_URL"):
