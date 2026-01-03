@@ -5,6 +5,7 @@ import os
 import time
 import json
 import random
+import logging
 from dotenv import load_dotenv, find_dotenv
 
 # Load .env from anywhere in the tree (e.g. parent dir)
@@ -15,7 +16,7 @@ try:
     from .command_handler import CommandHandler
     from .micro_editor import MicroEditor
     from .micro_editor import MicroEditor
-    from .config_manager import config
+    from .config_manager import config, get_data_dir
     from .sftp_handler import HoneySFTPServer
     from .alert_manager import AlertManager
     from . import fs_seeder
@@ -27,7 +28,7 @@ except ImportError:
     from llm_interface import LLMInterface
     from command_handler import CommandHandler
     # from micro_editor import MicroEditor
-    from config_manager import config
+    from config_manager import config, get_data_dir
     from sftp_handler import HoneySFTPServer
     from alert_manager import AlertManager
     import fs_seeder
@@ -37,7 +38,25 @@ except ImportError:
 
 # Settings
 SERVER_BANNER = "SSH-2.0-OpenSSH_7.4p1 Debian-10+deb9u7"
-HOST_KEY_FILE = config.get('server', 'host_key_file') or 'host.key'
+HOST_KEY_FILE = os.path.join(get_data_dir(), 'host.key')
+
+# --- Logging Filter for Paramiko Noise ---
+class ParamikoFilter(logging.Filter):
+    def filter(self, record):
+        # Suppress "Error reading SSH protocol banner" tracebacks
+        msg = record.getMessage()
+        if "Error reading SSH protocol banner" in msg:
+            return False
+        if record.exc_info:
+            exc_type, exc_value, _ = record.exc_info
+            if "Error reading SSH protocol banner" in str(exc_value):
+                return False
+        return True
+
+# Apply Filter
+logging.getLogger("paramiko.transport").addFilter(ParamikoFilter())
+# -----------------------------------------
+
 try:
     PORT = int(os.getenv('SSHPOT_PORT', config.get('server', 'port') or 2222))
 except ValueError:

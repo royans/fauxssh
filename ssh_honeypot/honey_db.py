@@ -8,14 +8,14 @@ import time
 try:
     from .db_interface import DatabaseBackend
     from .logger import log
+    from .config_manager import get_data_dir
 except ImportError:
     from db_interface import DatabaseBackend
     from logger import log
+    from config_manager import get_data_dir
 
-# Resolve absolute path relative to this file (ssh_honeypot/honey_db.py -> ssh_honeypot/../data/honeypot.sqlite)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(BASE_DIR)
-DB_PATH = os.path.join(PROJECT_ROOT, "data", "honeypot.sqlite")
+# Use centralized data directory
+DB_PATH = os.path.join(get_data_dir(), "honeypot.sqlite")
 
 class HoneyDB(DatabaseBackend):
     def __init__(self, db_path=DB_PATH):
@@ -23,10 +23,7 @@ class HoneyDB(DatabaseBackend):
         self._init_db()
 
     def _init_db(self):
-        # Ensure directory exists
-        db_dir = os.path.dirname(self.db_path)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir)
+        # Directory creation handled by get_data_dir()
             
         conn = sqlite3.connect(self.db_path)
         # Enable WAL mode for better concurrency

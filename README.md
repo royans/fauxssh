@@ -30,6 +30,12 @@ See [SECURITY.md](SECURITY.md) for detailed risk warnings and reporting instruct
 
 ## Recent Improvements
 
+### Jan 2nd 2026
+- **Keyword Alerts**: Support for immediate Discord alerts based on configured keywords or regex patterns.
+- **Webhook Integration**: Real-time session streaming and alerting via Discord webhooks.
+- **Startup Script**: Enhanced `startup.sh` with `--cron` mode and parent directory `.env` discovery.
+- **Bug Fixes**: Resolved critical runtime errors in analysis loop and webhook payload formatting.
+
 ### Jan 1st 2026
 - **Hardware Emulation**: Added handlers for `dmidecode`, `lspci`, and `lscpu` to simulate a dual NVIDIA H100 server.
 - **Enhanced Realism**: Implemented Recon Script Interception and smarter "Alabaster" persona aliases.
@@ -154,7 +160,11 @@ ALERT_THRESHOLD_NOTIFY=6
 ALERT_THRESHOLD_SESSION=7
 
 # Tier 3: Stream IP (Risk >= 9). Default: 9
+# Tier 3: Stream IP (Risk >= 9). Default: 9
 ALERT_THRESHOLD_IP=9
+
+# Keyword Triggers (Pipe-separated, case-insensitive)
+ALERT_KEYWORDS="hackblogofy|bashcrack|root"
 ```
 
 ### ⚠️ Security Warning (Alerting)

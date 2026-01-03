@@ -1,5 +1,33 @@
+# config_manager.py
 import yaml
 import os
+
+# Base directory relative to this file
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
+
+def get_data_dir():
+    """
+    Returns the absolute path to the data directory.
+    Priority:
+    1. FAUXSSH_DATA_DIR environment variable (absolute or relative to CWD)
+    2. Default: PROJECT_ROOT/data
+    """
+    env_path = os.getenv('FAUXSSH_DATA_DIR')
+    if env_path:
+        # Resolve path (handles relative paths from CWD)
+        data_dir = os.path.abspath(env_path)
+    else:
+        data_dir = os.path.join(PROJECT_ROOT, 'data')
+    
+    # Auto-create if missing
+    if not os.path.exists(data_dir):
+        try:
+            os.makedirs(data_dir, exist_ok=True)
+        except Exception as e:
+            print(f"[!] Critical: Could not create data directory at {data_dir}: {e}")
+            
+    return data_dir
 
 DEFAULT_CONFIG = {
     "server": {
