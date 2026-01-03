@@ -28,10 +28,7 @@ def ensure_user_home(db, ip, user):
     else:
         home_dir = f"/home/{user}"
         
-    # Check if we already have files
-    existing = db.list_user_dir(ip, user, home_dir)
-    if existing:
-        return # Already seeded
+        home_dir = f"/home/{user}"
         
     # Seed Defaults
     # Persona: Blogofy
@@ -52,6 +49,12 @@ def ensure_user_home(db, ip, user):
     
     for filename, content in files.items():
         abs_path = os.path.join(home_dir, filename)
+        
+        # Check if SPECIFIC file exists to avoid overwriting user data/status
+        existing_node = db.get_user_node(ip, user, abs_path)
+        if existing_node:
+            continue
+
         size = len(content)
         # Randomize size for realism if 'binary'
         if content == "binary_content_simulation": size = 1048576 

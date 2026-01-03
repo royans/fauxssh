@@ -37,6 +37,24 @@ class TestSCP(unittest.TestCase):
             cls.server_thread.start()
             time.sleep(2)
 
+    def setUp(self):
+        # Reset quotas for 127.0.0.1 (DELETE FROM user_filesystem WHERE ip='127.0.0.1')
+        try:
+            from ssh_honeypot.honey_db import HoneyDB, DB_PATH
+            
+            # Increase Quota for Test (config object is shared if imported)
+            # Necessary because ensure_user_home seeds ~1MB of files on login, consuming default quota.
+            from ssh_honeypot.config_manager import config
+            config._config['upload']['max_quota_per_ip'] = 10 * 1024 * 1024 # 10MB
+            
+            db = HoneyDB()
+            conn = db._get_conn()
+            conn.execute("DELETE FROM user_filesystem WHERE ip = ?", ('127.0.0.1',))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Warning: Failed to reset quotas in setUp: {e}")
+
     def test_scp_upload(self):
         import paramiko
         client = paramiko.SSHClient()

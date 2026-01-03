@@ -122,13 +122,17 @@ class TestVFSPopulation:
         files = mock_db.list_user_dir(ip, user, cwd)
         assert len(files) == 0
         
+        # 1b. Simulate Pre-existing user file (Regression for "ABORT if not empty" bug)
+        mock_db.update_user_file(ip, user, f"{cwd}/existing", cwd, 'file', {'size': 0}, "content")
+        
         # 2. Call Seeder
         ensure_user_home(mock_db, ip, user)
         
         # 3. Check DB
         files = mock_db.list_user_dir(ip, user, cwd)
-        assert len(files) > 0
+        assert len(files) > 1 # Should include 'existing' AND default files
         filenames = [f['path'].split('/')[-1] for f in files]
+        assert "existing" in filenames
         assert "aws_keys.txt" in filenames
         assert ".bash_history" in filenames
         
