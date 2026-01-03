@@ -1,6 +1,10 @@
 # config_manager.py
 import yaml
 import os
+from dotenv import load_dotenv, find_dotenv
+
+# Load environment variables from .env file (searching parent directories)
+load_dotenv(find_dotenv(usecwd=True))
 
 # Base directory relative to this file
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

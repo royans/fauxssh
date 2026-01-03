@@ -23,9 +23,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(BASE_DIR))
 sys.path.append(os.path.join(PROJECT_ROOT, "ssh_honeypot"))
 
-from dotenv import load_dotenv, find_dotenv
-# Load .env explicitly so config_manager sees FAUXSSH_DATA_DIR
-load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 try:
     from config_manager import get_data_dir

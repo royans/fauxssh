@@ -6,11 +6,18 @@ set -u
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+
 # Check for override via env var, consistent with python code
-if [ -n "${FAUXSSH_DATA_DIR:-}" ]; then
-    DATA_DIR="$FAUXSSH_DATA_DIR"
-else
-    DATA_DIR="$PROJECT_ROOT/data"
+# Export PYTHONPATH so the python one-liner can find the module
+export PYTHONPATH="$PROJECT_ROOT"
+
+# Query Python for the authoritative Data Directory
+# This ensures shell and python always agree, respecting .env logic handled by config_manager
+DATA_DIR=$(python3 -c "from ssh_honeypot.config_manager import get_data_dir; print(get_data_dir())")
+
+if [ -z "$DATA_DIR" ]; then
+    echo "[ERROR] Could not resolve DATA_DIR from Python config."
+    exit 1
 fi
 
 # Ensure data directory exists
