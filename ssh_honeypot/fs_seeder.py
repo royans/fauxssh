@@ -7,64 +7,46 @@ try:
 except ImportError:
     from honey_db import HoneyDB
 
-def seed_filesystem(db, json_path=None):
+
+def get_skeleton_data(json_path=None):
     """
-    Seeds the database with static filesystem entries from a JSON file.
-    Args:
-        db: HoneyDB instance
-        json_path: Path to the JSON seed file. If None, defaults to static_fs_seed.json in the same dir.
+    Returns a list of file nodes for the Skeleton layer.
+    Combines static_fs_seed.json and dynamic defaults.
     """
     if not json_path:
         json_path = os.path.join(os.path.dirname(__file__), 'static_fs_seed.json')
 
-    if not os.path.exists(json_path):
-        logging.warning(f"FS Seeder: JSON file not found at {json_path}")
-        return
-
-    try:
-        with open(json_path, 'r') as f:
-            data = json.load(f)
-    except Exception as e:
-        logging.error(f"FS Seeder: Failed to load JSON: {e}")
-        return
-
-    count = 0
+    nodes = []
     
-    # OPTIMIZATION: Use a single transaction to avoid spamming connection/locks
-    # for 900+ items.
-    
-    try:
-        conn = db._get_conn()
-        cursor = conn.cursor()
-        
-        for item in data:
-            path = item.get('path')
-            parent = item.get('parent_path')
-            ftype = item.get('type')
-            meta = item.get('metadata')
-            content = item.get('content', '')
-
-            if not path or not parent:
-                continue
+    # 1. Load Static Seed
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r') as f:
+                nodes = json.load(f)
+        except Exception as e:
+            logging.error(f"FS Seeder: Failed to load JSON: {e}")
             
-            # Use INSERT OR IGNORE to respect existing data without a read query
-            cursor.execute("""
-                INSERT OR IGNORE INTO global_filesystem (path, parent_path, type, metadata, content)
-                VALUES (?, ?, ?, ?, ?)
-            """, (path, parent, ftype, json.dumps(meta) if isinstance(meta, dict) else meta, content))
-            
-            if cursor.rowcount > 0:
-                count += 1
-                
-        conn.commit()
-        conn.close()
-        
-    except Exception as e:
-        logging.error(f"FS Seeder DB Error: {e}")
-        # Try to clean up if needed, though conn variable scope is safe enough here.
+    # 2. Append Dynamic User Defaults (Formerly in utils.py)
+    # We use a placeholder path prefix ~ for home dir relative paths
     
-    if count > 0:
-        print(f"[*] Seeded {count} static filesystem items.")
-    else:
-        # print("[*] Filesystem already seeded.")
-        pass
+    home_defaults = [
+        {"path": "~/.bash_history", "type": "file", "content": "ls\ncd /var/www\ncat config.php\nexit", "metadata": {"permissions": "-rw-r--r--"}},
+        {"path": "~/.profile", "type": "file", "content": "# ~/.profile: executed by the command interpreter for login shells.\n", "metadata": {"permissions": "-rw-r--r--"}},
+        {"path": "~/blogofy_db_dump_2021.sql", "type": "file", "content": "CREATE TABLE users (id INT, username VARCHAR(255));\nINSERT INTO users VALUES (1, 'admin');", "metadata": {"permissions": "-rw-r--r--"}},
+        {"path": "~/access_log.old.gz", "type": "file", "content": "binary_content_simulation", "metadata": {"permissions": "-rw-r--r--", "size": 1048576}}, 
+        {"path": "~/migration_notes.txt", "type": "file", "content": "Todo: migrate to v4. Check heavy queries on auth table.", "metadata": {"permissions": "-rw-r--r--"}},
+        {"path": "~/deploy_v3.sh", "type": "file", "content": "#!/bin/bash\necho 'Deploying v3...'\ncp -r /src /var/www/html", "metadata": {"permissions": "-rwxr-xr-x"}},
+        {"path": "~/docker-compose.yml.bak", "type": "file", "content": "version: '3'\nservices:\n  web:\n    image: nginx", "metadata": {"permissions": "-rw-r--r--"}},
+        {"path": "~/aws_keys.txt", "type": "file", "content": "AKIAABCDEFGHIJKLMNOP\nSECRET_KEY=...", "metadata": {"permissions": "-rw-------"}},
+        {"path": "~/id_rsa_backup", "type": "file", "content": "-----BEGIN OPENSSH PRIVATE KEY-----\n...", "metadata": {"permissions": "-rw-------"}},
+        {"path": "~/wallet.dat", "type": "file", "content": "binary_wallet_data", "metadata": {"permissions": "-rw-------"}}
+    ]
+    
+    nodes.extend(home_defaults)
+    
+    return nodes
+    
+def seed_filesystem(db, json_path=None):
+    """Deprecated: Skeleton Layer now handles this dynamically."""
+    pass
+

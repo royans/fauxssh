@@ -21,6 +21,21 @@ class HoneyDB(DatabaseBackend):
     def __init__(self, db_path=DB_PATH):
         self.db_path = db_path
         self._init_db()
+        self.skeleton_cache = []
+        self._load_skeleton()
+
+    def _load_skeleton(self):
+        try:
+            from .fs_seeder import get_skeleton_data
+            self.skeleton_cache = get_skeleton_data()
+            log.info(f"[*] Loaded {len(self.skeleton_cache)} skeleton items (COW Layer)")
+        except ImportError:
+            # Fallback for direct testing
+            try:
+                from fs_seeder import get_skeleton_data
+                self.skeleton_cache = get_skeleton_data()
+            except:
+                log.warning("[!] Failed to load skeleton data")
 
     def _init_db(self):
         # Directory creation handled by get_data_dir()
@@ -133,6 +148,10 @@ class HoneyDB(DatabaseBackend):
 
         try:
             c.execute("ALTER TABLE interactions ADD COLUMN request_md5 TEXT")
+        except sqlite3.OperationalError: pass
+
+        try:
+            c.execute("ALTER TABLE user_filesystem ADD COLUMN last_accessed DATETIME")
         except sqlite3.OperationalError: pass
 
         # Requested URLs Log (Network Intelligence)
@@ -340,27 +359,97 @@ class HoneyDB(DatabaseBackend):
             conn.close()
 
     def get_user_node(self, ip, username, path):
+        # 1. Check User DB (Modifications)
         conn = self._get_conn()
         c = conn.cursor()
         c.execute("SELECT * FROM user_filesystem WHERE ip = ? AND username = ? AND path = ?", (ip, username, path))
         row = c.fetchone()
+        
         result = None
         if row:
             columns = [col[0] for col in c.description]
             result = dict(zip(columns, row))
         conn.close()
-        return result
+        
+        if result:
+            # Touch access time for aggressive cleanup tracking
+            self.touch_user_file(ip, username, path)
+            return result
+
+        # 2. Check Skeleton (COW Layer)
+        # Resolve home dir
+        home_dir = "/root" if username == "root" else f"/home/{username}"
+        
+        for item in self.skeleton_cache:
+            skel_path = item['path']
+            # Dynamic Home Replacement
+            if skel_path.startswith('~'):
+                resolved_path = skel_path.replace('~', home_dir, 1)
+            else:
+                resolved_path = skel_path
+                
+            if resolved_path == path:
+                 # Found in skeleton! Return ephemeral node.
+                 # We need to construct a node dict similar to DB row
+                 return {
+                     'ip': ip,
+                     'username': username,
+                     'path': resolved_path,
+                     'type': item['type'],
+                     'metadata': json.dumps(item.get('metadata', {})),
+                     'content': item.get('content'),
+                     'created_at': datetime.datetime.now().isoformat() # Fake TS
+                 }
+                 
+        return None
 
     def list_user_dir(self, ip, username, parent_path):
+        # 1. Fetch DB items
         conn = self._get_conn()
         c = conn.cursor()
+        db_items = []
         try:
             c.execute("SELECT * FROM user_filesystem WHERE ip = ? AND username = ? AND parent_path = ?", (ip, username, parent_path))
             rows = c.fetchall()
             columns = [col[0] for col in c.description]
-            return [dict(zip(columns, r)) for r in rows]
+            db_items = [dict(zip(columns, r)) for r in rows]
         finally:
             conn.close()
+            
+        # 2. Merge Skeleton items
+        # To avoid duplicates if user modified them (and they exist in DB), track known names
+        known_names = set(os.path.basename(i['path']) for i in db_items)
+        
+        home_dir = "/root" if username == "root" else f"/home/{username}"
+        
+        for item in self.skeleton_cache:
+            skel_path = item['path']
+            
+            # Resolve Dynamic Path
+            if skel_path.startswith('~'):
+                resolved_path = skel_path.replace('~', home_dir, 1)
+            else:
+                resolved_path = skel_path
+                
+            # Check Parent Match
+            # We strictly check if the PARENT of the resolved path matches the requested parent_path
+            item_parent = os.path.dirname(resolved_path)
+            
+            if item_parent == parent_path:
+                filename = os.path.basename(resolved_path)
+                if filename not in known_names:
+                     # Add simulated node
+                     db_items.append({
+                         'ip': ip,
+                         'username': username,
+                         'path': resolved_path,
+                         'type': item['type'],
+                         'metadata': json.dumps(item.get('metadata', {})),
+                         'content': item.get('content'),
+                         'created_at': datetime.datetime.now().isoformat()
+                     })
+                     
+        return db_items
 
     def cache_response(self, command, cwd, response):
         h = hashlib.sha256(f"{cwd}:{command}".encode()).hexdigest()
@@ -387,20 +476,37 @@ class HoneyDB(DatabaseBackend):
         return total_size
 
     def prune_uploads(self, days=30):
-        import time
         cutoff_time = datetime.datetime.now() - datetime.timedelta(days=days)
         
         conn = self._get_conn()
         c = conn.cursor()
         
-        c.execute("SELECT ip, username, path FROM user_filesystem WHERE created_at < ?", (cutoff_time,))
+        # Use COALESCE to fallback to created_at if last_accessed is NULL (never read)
+        # This implements: "Assume NULL means it was last accessed at create time"
+        c.execute("SELECT ip, username, path FROM user_filesystem WHERE COALESCE(last_accessed, created_at) < ?", (cutoff_time,))
         to_delete = c.fetchall()
         
-        c.execute("DELETE FROM user_filesystem WHERE created_at < ?", (cutoff_time,))
+        c.execute("DELETE FROM user_filesystem WHERE COALESCE(last_accessed, created_at) < ?", (cutoff_time,))
         conn.commit()
         conn.close()
         
         return [{'ip': r[0], 'username': r[1], 'path': r[2]} for r in to_delete]
+
+    def touch_user_file(self, ip, username, path):
+        """
+        Updates the last_accessed timestamp for a user file to prevent cleanup.
+        """
+        try:
+            conn = self._get_conn()
+            conn.execute("""
+                UPDATE user_filesystem 
+                SET last_accessed = CURRENT_TIMESTAMP 
+                WHERE ip=? AND username=? AND path=?
+            """, (ip, username, path))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.error(f"[DB] Failed to touch user file {path}: {e}")
 
     def delete_user_file(self, ip, username, path):
          conn = self._get_conn()

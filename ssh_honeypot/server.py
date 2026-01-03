@@ -20,7 +20,7 @@ try:
     from .sftp_handler import HoneySFTPServer
     from .alert_manager import AlertManager
     from . import fs_seeder
-    from .utils import random_response_delay, ensure_user_home
+    from .utils import random_response_delay
     # Initialize Logging
     from .logger import log
 except ImportError:
@@ -424,9 +424,9 @@ def _handle_connection_logic(client, addr):
     # We assume standard linux dirs exist, this tracks *contents* we want to show.
     # Initialize dynamic home with default files - Blogofy Persona
     
-    # PERSISTENCE FIX: Ensure DB has these files so `ls` sees them even if VFS logic is bypassed/delayed
-    ensure_user_home(db, ip, user)
-
+    # COW REFACTOR: Removed ensure_user_home. 
+    # HoneyDB now handles default file visibility via Skeleton layer.
+    
     vfs = {
         cwd: [
             "blogofy_db_dump_2021.sql",

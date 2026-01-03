@@ -58,6 +58,13 @@ FauxSSH includes powerful CLI tools to visualize captured data. See [Logging & A
 `python3 tools/analytics/analyze.py --session-id <ID>`
 ![Session Detail](docs/images/report_session_detail.png)
 
+### Filesystem Forensics
+Inspect and manage attacker uploads in real-time.
+`python3 tools/analytics/fs_inspector.py --tree`
+`python3 tools/analytics/fs_inspector.py --ip <IP> --cat /path/to/malware.sh`
+`python3 tools/analytics/fs_inspector.py --ip <IP> --delete`
+
+
 ## Documentation
 
 *   [**Configuration Guide**](docs/CONFIGURATION.md): `.env` settings, port binding, and model tuning.

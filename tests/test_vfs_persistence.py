@@ -111,37 +111,45 @@ class TestVFSPopulation:
         assert "default_file.txt" in resp
         assert "secret.key" in resp
 
-    def test_ensure_user_home_persistence(self, handler, mock_db):
-        from ssh_honeypot.utils import ensure_user_home
-        
+    def test_skeleton_persistence(self, handler, mock_db):
+        """
+        Verifies that default files appear for a new user via COW/Skeleton layer
+        without explicit DB seeding.
+        """
         user = "newuser"
         ip = "1.1.1.1"
         cwd = f"/home/{user}"
         
-        # 1. Ensure empty initially
+        # 1. Ensure Skeleton Defaults are visible immediately
         files = mock_db.list_user_dir(ip, user, cwd)
-        assert len(files) == 0
         
-        # 1b. Simulate Pre-existing user file (Regression for "ABORT if not empty" bug)
-        mock_db.update_user_file(ip, user, f"{cwd}/existing", cwd, 'file', {'size': 0}, "content")
-        
-        # 2. Call Seeder
-        ensure_user_home(mock_db, ip, user)
-        
-        # 3. Check DB
-        files = mock_db.list_user_dir(ip, user, cwd)
-        assert len(files) > 1 # Should include 'existing' AND default files
+        # Use simple check just for defaults expected in Skeleton
         filenames = [f['path'].split('/')[-1] for f in files]
-        assert "existing" in filenames
+        
+        # Note: Depending on actual loaded skeleton defaults. 
+        # fs_seeder.py has aws_keys.txt, .bash_history etc.
+        # But in test env, it might load actual defaults.
+        # Let's check for standard ones defined in fs_seeder.py
+        
         assert "aws_keys.txt" in filenames
         assert ".bash_history" in filenames
         
-        # 4. Check Handler Integration (mimic normal flow)
+        # 2. Simulate User Modification (Add file)
+        mock_db.update_user_file(ip, user, f"{cwd}/user_created.txt", cwd, 'file', {'size': 0}, "content")
+        
+        # 3. Check Listing Merge
+        files = mock_db.list_user_dir(ip, user, cwd)
+        filenames = [f['path'].split('/')[-1] for f in files]
+        assert "user_created.txt" in filenames
+        assert "aws_keys.txt" in filenames
+        
+        # 4. Check Handler Integration
         context = {
             'cwd': cwd,
             'user': user,
             'client_ip': ip,
-            'vfs': {} # Empty VFS, relies on DB
+            'vfs': {} 
         }
         resp, _, _ = handler.process_command("ls", context)
         assert "aws_keys.txt" in resp
+

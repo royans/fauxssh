@@ -31,11 +31,13 @@ except ImportError:
     # Fallback if import fails (e.g. structure change)
     DB_PATH = os.path.join(PROJECT_ROOT, "data", "honeypot.sqlite")
 
-def get_db_connection():
-    if not os.path.exists(DB_PATH):
-        console.print(f"[bold red][!] Database not found at {DB_PATH}[/bold red]")
+
+def get_db_connection(db_path_override=None):
+    path = db_path_override if db_path_override else DB_PATH
+    if not os.path.exists(path):
+        console.print(f"[bold red][!] Database not found at {path}[/bold red]")
         sys.exit(1)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -74,8 +76,8 @@ def get_risk_style(score):
         return "white"
 
 
-def list_sessions(limit=50, no_failed=False, anon=False):
-    conn = get_db_connection()
+def list_sessions(limit=50, no_failed=False, anon=False, db_path=None):
+    conn = get_db_connection(db_path)
     c = conn.cursor()
     
     # ... (query logic remains the same) ...
@@ -182,8 +184,8 @@ def list_sessions(limit=50, no_failed=False, anon=False):
     console.print(table)
 
 
-def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False):
-    conn = get_db_connection()
+def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_path=None):
+    conn = get_db_connection(db_path)
     c = conn.cursor()
     
     query = """
@@ -257,8 +259,8 @@ def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False):
  
     console.print(table)
 
-def reset_failed_analysis():
-    conn = get_db_connection()
+def reset_failed_analysis(db_path=None):
+    conn = get_db_connection(db_path)
     c = conn.cursor()
     console.print("[*] Checking for failed analysis records...")
     c.execute("SELECT COUNT(*) FROM command_analysis WHERE explanation LIKE '%Batch Miss%'")
@@ -290,20 +292,21 @@ def main():
     parser.add_argument("--ip", help="Filter by IP")
     parser.add_argument("--session-id", help="Filter by Session ID")
     parser.add_argument("--anon", action="store_true", help="Mask the last octet of IP addresses")
+    parser.add_argument("--db", help="Path to SQLite database file")
     
     args = parser.parse_args()
     
     if args.sessions:
-        list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon)
+        list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon, db_path=args.db)
     elif args.commands:
-        list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon)
+        list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon, db_path=args.db)
     elif args.retry_failed:
-        reset_failed_analysis()
+        reset_failed_analysis(db_path=args.db)
     else:
         if args.ip or args.session_id:
-            list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon)
+            list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon, db_path=args.db)
         else:
-            list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon)
+            list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon, db_path=args.db)
 
 if __name__ == "__main__":
     main()
