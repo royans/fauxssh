@@ -1,14 +1,43 @@
 # config_manager.py
 import yaml
 import os
-from dotenv import load_dotenv, find_dotenv
 
-# Load environment variables from .env file (searching parent directories)
-load_dotenv(find_dotenv(usecwd=True))
-
-# Base directory relative to this file
+# Base directories
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(BASE_DIR)
+
+# Robust .env loading
+try:
+    from dotenv import load_dotenv
+    
+    # 1. Search specific paths relevant to deployment structure
+    candidate_paths = [
+        # Explicit locations
+        os.path.join(PROJECT_ROOT, '.env'),                 # ./sshpot/.env (Clone root)
+        os.path.join(os.path.dirname(PROJECT_ROOT), '.env') # ../.env (User deploy root, e.g. ~/c/.env)
+    ]
+    
+    # 2. Try implicit search
+    try:
+        from dotenv import find_dotenv
+        found = find_dotenv(usecwd=True)
+        if found:
+            candidate_paths.append(found)
+    except ImportError: pass
+
+    env_loaded = False
+    for p in candidate_paths:
+        if os.path.exists(p):
+            load_dotenv(p)
+            env_loaded = True
+            # Don't break; load all found in hierarchy (child overrides parent usually, but load_dotenv does NOT override by default)
+            # So we should actually load CHILD first if we wanted override, but typically we want the "closest" one.
+            # load_dotenv priority: The first value set "wins".
+            # So if we load specific paths first, they win.
+            
+except ImportError:
+    # Fail silently if dotenv missing, simply relying on OS environment
+    pass
 
 def get_data_dir():
     """
