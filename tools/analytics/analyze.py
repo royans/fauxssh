@@ -49,10 +49,18 @@ def to_local_time(ts_str):
     except:
         return ts_str
 
-def clean_ip(ip):
-    """Removes ::ffff: prefix from IPv4 mapped addresses."""
-    if ip and ip.startswith("::ffff:"):
-        return ip.replace("::ffff:", "")
+def clean_ip(ip, anon=False):
+    """Removes ::ffff: prefix from IPv4 mapped addresses and optionally masks last octet."""
+    if not ip: return "-"
+    if ip.startswith("::ffff:"):
+        ip = ip.replace("::ffff:", "")
+    
+    if anon:
+        if "." in ip:
+            parts = ip.split(".")
+            if len(parts) == 4:
+                parts[3] = "XXX"
+                return ".".join(parts)
     return ip
 
 def get_risk_style(score):
@@ -66,9 +74,11 @@ def get_risk_style(score):
         return "white"
 
 
-def list_sessions(limit=50, no_failed=False):
+def list_sessions(limit=50, no_failed=False, anon=False):
     conn = get_db_connection()
     c = conn.cursor()
+    
+    # ... (query logic remains the same) ...
     
     # query updated to fetch first/last command times
     query = """
@@ -126,7 +136,7 @@ def list_sessions(limit=50, no_failed=False):
 
     for r in rows:
         start = to_local_time(r['start_time'])
-        ip = clean_ip(r['remote_ip'])
+        ip = clean_ip(r['remote_ip'], anon=anon)
         user = r['username']
         pwd = r['password'] or ""
         ver = (r['client_version'] or "").replace("SSH-2.0-", "")[:15]
@@ -172,7 +182,7 @@ def list_sessions(limit=50, no_failed=False):
     console.print(table)
 
 
-def list_commands(limit=50, ip_filter=None, session_filter=None):
+def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False):
     conn = get_db_connection()
     c = conn.cursor()
     
@@ -230,7 +240,7 @@ def list_commands(limit=50, ip_filter=None, session_filter=None):
 
     for r in rows:
         ts = to_local_time(r['timestamp'])
-        ip = clean_ip(r['remote_ip']) or "-"
+        ip = clean_ip(r['remote_ip'], anon=anon) or "-"
         user = r['username'] or "-"
         src = r['source'] or "-"
         
@@ -279,20 +289,21 @@ def main():
     parser.add_argument("--no-failed", action="store_true")
     parser.add_argument("--ip", help="Filter by IP")
     parser.add_argument("--session-id", help="Filter by Session ID")
+    parser.add_argument("--anon", action="store_true", help="Mask the last octet of IP addresses")
     
     args = parser.parse_args()
     
     if args.sessions:
-        list_sessions(limit=args.limit, no_failed=args.no_failed)
+        list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon)
     elif args.commands:
-        list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id)
+        list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon)
     elif args.retry_failed:
         reset_failed_analysis()
     else:
         if args.ip or args.session_id:
-            list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id)
+            list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon)
         else:
-            list_sessions(limit=args.limit, no_failed=args.no_failed)
+            list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon)
 
 if __name__ == "__main__":
     main()
