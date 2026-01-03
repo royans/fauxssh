@@ -6,10 +6,20 @@ set -u
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+# Check for override via env var, consistent with python code
+if [ -n "${FAUXSSH_DATA_DIR:-}" ]; then
+    DATA_DIR="$FAUXSSH_DATA_DIR"
+else
+    DATA_DIR="$PROJECT_ROOT/data"
+fi
+
+# Ensure data directory exists
+mkdir -p "$DATA_DIR"
+
 # export SSHPOT_PORT=2222 # Unleash to change port
-SERVER_CMD="python3 ssh_honeypot/server.py"
+SERVER_CMD="python3 -m ssh_honeypot.server"
 WATCH_FILE="ssh_honeypot/restart_trigger"
-LOG_FILE="data/server_startup.log"
+LOG_FILE="$DATA_DIR/server_startup.log"
 
 
 # Singleton execution via lockfile
@@ -38,7 +48,6 @@ else
     exit 1
 fi
 
-mkdir -p data
 
 
 echo "SSH Honeypot Startup Script"
