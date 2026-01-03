@@ -1,5 +1,9 @@
 # FauxSSH
 
+![License](https://img.shields.io/github/license/royans/fauxssh)
+![Python](https://img.shields.io/badge/python-3.8%2B-blue)
+![CI](https://github.com/royans/fauxssh/actions/workflows/ci.yml/badge.svg)
+
 **A high-interaction SSH honeypot powered by Google Gemini.**
 
 FauxSSH deceptively emulates a realistic Linux server, engaging attackers in long, hallucinated sessions while recording every keystroke, file upload, and command output for threat intelligence analysis.
