@@ -4,7 +4,12 @@ import time
 import logging
 import zlib
 
-UPLOAD_DIR = "data/uploaded_files"
+try:
+    from .config_manager import get_data_dir
+except ImportError:
+    from config_manager import get_data_dir
+
+UPLOAD_DIR = os.path.join(get_data_dir(), "uploaded_files")
 
 class HoneySFTPHandle(paramiko.SFTPHandle):
     def __init__(self, flags=0):
