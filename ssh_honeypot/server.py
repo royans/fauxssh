@@ -67,6 +67,8 @@ BIND_IP = os.getenv('SSHPOT_BIND_IP') or config.get('server', 'bind_ip') or '0.0
 
 # Initialize DB
 db = HoneyDB()
+# Auto-clean legacy artifacts
+db.sanitize_artifacts()
 alert_manager = AlertManager()
 
 # Initialize LLM

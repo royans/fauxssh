@@ -15,9 +15,9 @@ except ImportError:
 import random
 
 try:
-    from .config_manager import config
+    from .config_manager import config, get_ignored_ips
 except ImportError:
-    from config_manager import config
+    from config_manager import config, get_ignored_ips
 import shlex
 
 try:
@@ -246,6 +246,38 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         # Default fail
         return f"sudo: a password is required\n", {}, {'source': 'local', 'cached': False}
 
+    def handle_sys_status(self, cmd, context):
+        """
+        Hidden command to dump server stats.
+        Only accessible from trusted IPs.
+        """
+        client_ip = context.get('client_ip')
+        ignored_ips = get_ignored_ips()
+        
+        # Check Trust
+        # We need to handle IPv6 logic inside get_ignored_ips or strict match here.
+        # get_ignored_ips() returns list of strings.
+        if client_ip not in ignored_ips:
+            return None # Fall through to LLM (make it look like unknown command)
+
+        # Get Stats from DB
+        stats = self.db.get_global_stats()
+        
+        # Version (Hardcoded or read?)
+        version = "v0.8.0-beta" # SSHPot Version
+        
+        output = [
+            "------------------------------------------",
+            f" SSHPot Status - Ver: {version}",
+            "------------------------------------------",
+            f" Sessions:       {stats.get('sessions', 0)}",
+            f" Unique IPs:     {stats.get('unique_ips', 0)}",
+            f" Total Commands: {stats.get('total_commands', 0)}",
+            "------------------------------------------",
+            ""
+        ]
+        return "\n".join(output)
+
 
     def _expand_wildcards(self, pattern, context):
         """
@@ -306,6 +338,12 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             print(f"[SECURITY] Blocked Input: {cmd} Reason: {reason}")
             # Log this? self.db.log_interaction(...) - Optional
             return f"bash: command blocked by security policy: {reason}\n", {}, {'source': 'security', 'cached': False}
+
+        # 0.1 Hidden Stats Command
+        if cmd.strip() == 'sys_status':
+             stats_resp = self.handle_sys_status(cmd, context)
+             if stats_resp:
+                 return stats_resp, {}, {'source': 'local', 'cached': False}
 
         # 0. Special Recon Script Interception (Botnet optimization)
         recon_resp = self._handle_known_recon(cmd, context)

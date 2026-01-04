@@ -621,6 +621,70 @@ class HoneyDB(DatabaseBackend):
          finally:
              conn.close()
 
+    def get_global_stats(self):
+        """Returns aggregate server statistics."""
+        conn = self._get_conn()
+        stats = {
+            "sessions": 0,
+            "unique_ips": 0,
+            "total_commands": 0
+        }
+        try:
+            c = conn.cursor()
+            c.execute("SELECT count(*) FROM sessions")
+            row = c.fetchone()
+            if row: stats["sessions"] = row[0]
+
+            c.execute("SELECT count(distinct remote_ip) FROM sessions")
+            row = c.fetchone()
+            if row: stats["unique_ips"] = row[0]
+
+            c.execute("SELECT count(*) FROM interactions")
+            row = c.fetchone()
+            if row: stats["total_commands"] = row[0]
+        except Exception as e:
+            log.error(f"Error fetching global stats: {e}")
+        finally:
+            conn.close()
+        return stats
+
+    def sanitize_artifacts(self):
+        """
+        Automatically removes artifact files (filenames starting with '-') from both
+        User and Global filesystems.
+        Returns: Tuple (deleted_user_files, deleted_global_files)
+        """
+        conn = self._get_conn()
+        deleted_user = 0
+        deleted_global = 0
+        try:
+            c = conn.cursor()
+            
+            # 1. User Filesystem
+            c.execute("SELECT ip, username, path FROM user_filesystem")
+            rows = c.fetchall()
+            for r in rows:
+                if os.path.basename(r[2]).startswith('-'):
+                    c.execute("DELETE FROM user_filesystem WHERE ip=? AND username=? AND path=?", r)
+                    deleted_user += 1
+
+            # 2. Global Filesystem
+            c.execute("SELECT path FROM global_filesystem")
+            rows = c.fetchall()
+            for r in rows:
+                if os.path.basename(r[0]).startswith('-'):
+                    c.execute("DELETE FROM global_filesystem WHERE path=?", (r[0],))
+                    deleted_global += 1
+
+            conn.commit()
+            if deleted_user or deleted_global:
+                log.info(f"[DB] Auto-Sanitized Artifacts: {deleted_user} User, {deleted_global} Global")
+        except Exception as e:
+            log.error(f"[DB] Error sanitizing artifacts: {e}")
+        finally:
+             conn.close()
+        return (deleted_user, deleted_global)
+
     def is_path_deleted(self, ip, username, path):
         """Checks if a path has a tombstone (is_deleted=1) in the User DB."""
         conn = self._get_conn()
