@@ -577,6 +577,8 @@ def _handle_connection_logic(client, addr):
     chan.send(prompt)
     
     command_buffer = ""
+    env = {} # persistent environment variables
+
 
 
     try:
@@ -619,6 +621,7 @@ def _handle_connection_logic(client, addr):
                     
                     # Context for Handler
                     context = {
+                        'env': env,
                         'cwd': cwd,
                         'user': user,
                         'vfs': vfs,
@@ -649,6 +652,10 @@ def _handle_connection_logic(client, addr):
                         if updates.get('new_cwd'):
                             cwd = updates.get('new_cwd')
                             if cwd not in vfs: vfs[cwd] = []
+                            
+                        # Persist Env Updates
+                        if updates.get('env'):
+                             context['env'].update(updates['env'])
                             
                         if updates.get('file_modifications'):
                              for mod in updates.get('file_modifications'):

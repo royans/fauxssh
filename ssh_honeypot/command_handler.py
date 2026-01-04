@@ -74,7 +74,7 @@ class CommandHandler:
             'ssh', 'ping', 'sleep',
             'ifconfig', 'ip', 'netstat', 'ss', 'route', 'mount',
             'python', 'python3', 'perl', 'bash', 'sh', 'base64', 'time',
-            'dmidecode', 'lscpu', 'lspci', 'fdisk'
+            'dmidecode', 'lscpu', 'lspci', 'fdisk', 'tr', 'cut'
         }
         self.HONEYTOKENS = {"aws_keys.txt", "id_rsa_backup", "wallet.dat"}
         self.FILESYSTEMS = [
@@ -263,8 +263,13 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         # Get Stats from DB
         stats = self.db.get_global_stats()
         
-        # Version (Hardcoded or read?)
-        version = "v0.8.0-beta" # SSHPot Version
+        # Version (Dynamic from pyproject.toml)
+        try:
+            from .config_manager import get_version
+        except ImportError:
+            from config_manager import get_version
+            
+        version = f"v{get_version()}" 
         
         output = [
             "------------------------------------------",
@@ -325,14 +330,69 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         updates_dict = {'new_cwd': str, 'file_modifications': list}
         metadata = {'source': 'llm'|'cache'|'local', 'cached': bool}
         """
-        cwd = context.get('cwd', '/')
+        cwd = context.setdefault('cwd', '/')
         vfs = context.get('vfs', {})
         history = context.get('history', [])
         client_ip = context.get('client_ip', 'Unknown')
         honeypot_ip = context.get('honeypot_ip', '192.168.1.55')
         llm_call_count = context.get('llm_call_count', 0)
+        
+        # Initialize env if not present
+        if 'env' not in context:
+            context['env'] = {}
 
-        # 0. Security / Injection Check
+        # 0. Sanitization (Redirection stripping)
+        # Strip 2>/dev/null, 2>&1, 1>/dev/null, >/dev/null
+        # Note: We replace with space to preserve separation
+        cmd = re.sub(r'2>/dev/null', ' ', cmd)
+        cmd = re.sub(r'1>/dev/null', ' ', cmd)
+        cmd = re.sub(r'>/dev/null', ' ', cmd)
+        cmd = re.sub(r'2>&1', ' ', cmd)
+        cmd = re.sub(r'\s+', ' ', cmd).strip()
+        
+        # 0. Variable Substitution ($VAR)
+        # Simple substitution for now: $VAR or ${VAR}
+        # Iterate env keys to replace
+        if '$' in cmd:
+             for key, val in context['env'].items():
+                 # Replace $VAR
+                 cmd = cmd.replace(f"${key}", str(val))
+                 # Replace ${VAR}
+                 cmd = cmd.replace(f"${{{key}}}", str(val))
+                 
+        # 0. Variable Assignment (VAR=$(cmd) or VAR=val)
+        # Detect simple assignment VAR=$(...) first
+        # Regex for VAR=$(...)
+        match_cmd_sub = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\=\$\((.*)\)\s*$', cmd.strip(), re.DOTALL)
+        if match_cmd_sub:
+             var_name = match_cmd_sub.group(1)
+             inner_cmd = match_cmd_sub.group(2)
+             
+             # Recursively execute inner command
+             # We need to capture output, suppress updates?
+             # For honeypot, we probably want to allow side effects of inner cmd (e.g. touch file)
+             sub_out, sub_updates, sub_meta = self.process_command(inner_cmd, context)
+             
+             # Strip trailing newline for assignment
+             val = sub_out.strip()
+             
+             # Update env
+             new_env = context['env'].copy()
+             new_env[var_name] = val
+             
+             # Return empty output, update env in context updates
+             # Note: This returns control immediately, does not continue to other checks
+             return "", {'env': new_env, 'file_modifications': sub_updates.get('file_modifications', [])}, {'source': 'var_assign', 'cached': False}
+
+        # Detect Simple VAR=val
+        # Only support simple literal strings for now to avoid complexity of parsing quotes
+        match_simple_assign = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\=(.*)$', cmd.strip())
+        if match_simple_assign and ' ' not in cmd.strip(): # Very restrictive: only VAR=val with no spaces
+             var_name = match_simple_assign.group(1)
+             val = match_simple_assign.group(2)
+             new_env = context['env'].copy()
+             new_env[var_name] = val
+             return "", {'env': new_env}, {'source': 'var_assign', 'cached': False}
         is_safe, reason = self.security.validate_input(cmd)
         if not is_safe:
             print(f"[SECURITY] Blocked Input: {cmd} Reason: {reason}")
@@ -344,6 +404,34 @@ Sector size (logical/physical): 512 bytes / 512 bytes
              stats_resp = self.handle_sys_status(cmd, context)
              if stats_resp:
                  return stats_resp, {}, {'source': 'local', 'cached': False}
+
+        # 0.2 Debug Env Command (Hidden)
+        if cmd.strip() == 'debug_env':
+             client_ip = context.get('client_ip')
+             ignored_ips = get_ignored_ips()
+             if client_ip in ignored_ips:
+                 env_str = str(context.get('env', {}))
+                 return f"DEBUG ENV: {env_str}\n", {}, {'source': 'debug', 'cached': False}
+
+        # 0.3 Debug Cmd Info (Hidden)
+        # Usage: debug_cmd_info A=1
+        if cmd.startswith('debug_cmd_info '):
+             client_ip = context.get('client_ip')
+             ignored_ips = get_ignored_ips()
+             if client_ip in ignored_ips:
+                 target_cmd = cmd[len('debug_cmd_info '):]
+                 # Run RECURSIVELY but catch output
+                 # We want to know what process_command returns for target_cmd
+                 out, updates, meta = self.process_command(target_cmd, context)
+                 debug_out = (
+                     f"--- DEBUG INFO for '{target_cmd}' ---\n"
+                     f"Output Len: {len(out)}\n"
+                     f"Updates Keys: {list(updates.keys())}\n"
+                     f"Updates Env: {updates.get('env', 'None')}\n"
+                     f"Meta Source: {meta.get('source')}\n"
+                     f"----------------------------------\n"
+                 )
+                 return debug_out, {}, {'source': 'debug', 'cached': False}
 
         # 0. Special Recon Script Interception (Botnet optimization)
         recon_resp = self._handle_known_recon(cmd, context)
@@ -404,6 +492,10 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                              elif k == 'file_modifications':
                                  if 'file_modifications' not in final_updates: final_updates['file_modifications'] = []
                                  final_updates['file_modifications'].extend(v)
+                             # Propagate env updates
+                             elif k == 'env':
+                                 current_context['env'] = v
+                                 final_updates['env'] = v
 
                 return "".join(final_out), final_updates, {'source': 'chain', 'cached': False}
 
@@ -439,6 +531,10 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                              elif k == 'file_modifications':
                                  if 'file_modifications' not in final_updates: final_updates['file_modifications'] = []
                                  final_updates['file_modifications'].extend(v)
+                             # Propagate env updates
+                             elif k == 'env':
+                                 current_context['env'] = v
+                                 final_updates['env'] = v
 
                 return "".join(final_out), final_updates, {'source': 'chain', 'cached': False}
 
@@ -1321,6 +1417,230 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         content, source = self._generate_or_get_content("cat", target_path, context)
         return content + "\n", {}, {'source': source, 'cached': source == 'local'}
 
+    def handle_tr(self, cmd, context):
+        """
+        Handle 'tr' command (simple transliterate/delete)
+        Supports:
+        tr 'set1' 'set2'
+        tr -d 'set'
+        Stdin is required (usually piped)
+        """
+        parts = shlex.split(cmd)
+        input_text = context.get('stdin', '')
+        
+        if not input_text:
+            return "", {}
+            
+        args = parts[1:]
+        if not args:
+            return "tr: missing operand\n", {}
+            
+        # Handle Options
+        delete_mode = False
+        if args[0] == '-d':
+            delete_mode = True
+            args = args[1:]
+            
+        if not args:
+            return "tr: missing operand\n", {}
+            
+        set1 = args[0]
+        # Unescape common sequences
+        set1 = set1.replace('\\n', '\n').replace('\\t', '\t')
+        
+        if delete_mode:
+            # Delete chars in set1 from input
+            out = input_text
+            for char in set1:
+                out = out.replace(char, '')
+            return out, {}
+            
+        if len(args) < 2:
+            return "tr: missing operand after '{}'\n".format(set1), {}
+            
+        set2 = args[1]
+        set2 = set2.replace('\\n', '\n').replace('\\t', '\t').replace('\\r', '\r').replace('\\0', '\0')
+        
+        # Transliterate
+        # If set2 is shorter than set1, last char is repeated (standard tr)
+        # But python translate needs equal length
+        
+        # Build translation table mapping
+        trans_map = {}
+        len2 = len(set2)
+        if len2 == 0: return input_text, {} # Should error?
+        
+        for i, char in enumerate(set1):
+            repl = set2[i] if i < len2 else set2[-1]
+            input_text = input_text.replace(char, repl)
+            
+        return input_text, {}
+
+    def handle_head(self, cmd, context):
+        parts = cmd.split()
+        num_lines = 10
+        files = []
+        
+        # Parse args manually similar to other handlers
+        i = 1
+        while i < len(parts):
+            arg = parts[i]
+            if arg.startswith('-n'):
+                if arg == '-n':
+                    if i + 1 < len(parts):
+                        try:
+                            num_lines = int(parts[i+1])
+                            i += 2
+                            continue
+                        except: pass
+                else:
+                    try:
+                        num_lines = int(arg[2:])
+                    except: pass
+            elif arg.startswith('-') and len(arg) > 1 and arg[1:].isdigit():
+                 try:
+                     num_lines = int(arg[1:])
+                 except: pass
+            elif not arg.startswith('-'):
+                files.append(arg)
+            i += 1
+            
+        content = ""
+        # If no files, use stdin
+        if not files:
+            content = context.get('stdin', '')
+        else:
+            # First file only for simplicity
+            target_path = files[0] # Use local var
+            # Check if using stdin anyway? No, if file present, use file.
+            c, src = self._generate_or_get_content("head", target_path, context)
+            content = c
+            
+        lines = content.splitlines(keepends=True)
+        return "".join(lines[:num_lines]), {}
+
+    def handle_tail(self, cmd, context):
+        parts = cmd.split()
+        num_lines = 10
+        files = []
+        
+        i = 1
+        while i < len(parts):
+            arg = parts[i]
+            if arg.startswith('-n'):
+                if arg == '-n':
+                    if i + 1 < len(parts):
+                        try:
+                            num_lines = int(parts[i+1])
+                            i += 2
+                            continue
+                        except: pass
+                else:
+                    try:
+                        num_lines = int(arg[2:])
+                    except: pass
+            elif arg.startswith('-') and len(arg) > 1 and arg[1:].isdigit():
+                 try:
+                     num_lines = int(arg[1:])
+                 except: pass
+            elif not arg.startswith('-'):
+                files.append(arg)
+            i += 1
+            
+        content = ""
+        if not files:
+            content = context.get('stdin', '')
+        else:
+            c, src = self._generate_or_get_content("tail", files[0], context)
+            content = c
+            
+        lines = content.splitlines(keepends=True)
+        if len(lines) > num_lines:
+            return "".join(lines[-num_lines:]), {}
+        return "".join(lines), {}
+
+    def handle_cut(self, cmd, context):
+        """
+        Handle 'cut' command
+        Supports:
+        -d DELIM : Delimiter (default TAB)
+        -f LIST  : Select only these fields;  also print any line
+                    that contains no delimiter character, unless
+                    the -s option is specified (not supported yet)
+        LIST: N, N-M, N-
+        """
+        parts = shlex.split(cmd)
+        
+        # Parse args manually
+        delim = "\t"
+        fields_str = ""
+        files = []
+        
+        i = 1
+        while i < len(parts):
+            arg = parts[i]
+            if arg.startswith('-d'):
+                if len(arg) > 2:
+                    delim = arg[2:]
+                elif i + 1 < len(parts):
+                    delim = parts[i+1]
+                    i += 1
+            elif arg.startswith('-f'):
+                if len(arg) > 2:
+                    fields_str = arg[2:]
+                elif i + 1 < len(parts):
+                    fields_str = parts[i+1]
+                    i += 1
+            elif not arg.startswith('-'):
+                files.append(arg)
+            i += 1
+            
+        if not fields_str:
+            return "cut: you must specify a list of bytes, characters, or fields\n", {}
+            
+        # Parse fields
+        # ranges: 1, 1-3, 1-, -3
+        # We need to collect 1-based indices
+        indices = set()
+        for group in fields_str.split(','):
+            if '-' in group:
+                start, end = group.split('-', 1)
+                s = int(start) if start else 1
+                # If end is empty, it means 'until end'. We handle this by a special flag or large number?
+                # Let's use 1000 for now or manage differently.
+                e = int(end) if end else 1000
+                for k in range(s, e + 1):
+                    indices.add(k)
+            else:
+                try:
+                    indices.add(int(group))
+                except: pass
+                
+        content = ""
+        if not files:
+            content = context.get('stdin', '')
+        else:
+             # handle files
+             target_path = files[0]
+             c, src = self._generate_or_get_content("cut", target_path, context)
+             content = c
+        
+        output_lines = []
+        for line in content.splitlines():
+            if delim in line:
+                parts_line = line.split(delim)
+                selected = []
+                # indices are 1-based
+                for idx in sorted(list(indices)):
+                    if idx <= len(parts_line):
+                        selected.append(parts_line[idx-1])
+                output_lines.append(delim.join(selected))
+            else:
+                # Default cut behavior: print line as is if no delimiter found (unless -s)
+                output_lines.append(line)
+                
+        return "\n".join(output_lines) + "\n", {}
+
     def handle_grep(self, cmd, context):
         # Delegate to _simple_grep for consistent logic (flags -i, -v, -E, -m)
         try:
@@ -1360,20 +1680,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
              
         return result_text, {}, {'source': source, 'cached': source == 'local'}
 
-    def handle_head(self, cmd, context):
-        parts = cmd.split()
-        # simplified parsing: ignore -n for now or just take last arg as file
-        target_path = parts[-1] if len(parts) > 1 else ""
-        content, source = self._generate_or_get_content("head", target_path, context)
-        lines = content.split('\n')
-        return '\n'.join(lines[:10]) + "\n", {}, {'source': source, 'cached': source == 'local'}
 
-    def handle_tail(self, cmd, context):
-        parts = cmd.split()
-        target_path = parts[-1] if len(parts) > 1 else ""
-        content, source = self._generate_or_get_content("tail", target_path, context)
-        lines = content.split('\n')
-        return '\n'.join(lines[-10:]) + "\n", {}, {'source': source, 'cached': source == 'local'}
 
     def handle_wc(self, cmd, context):
         parts = cmd.split()

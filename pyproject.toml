@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fauxssh"
-version = "0.1.0"
+version = "0.1.003"
 description = "A GenAI-powered SSH Honeypot"
 readme = "README.md"
 requires-python = ">=3.8"

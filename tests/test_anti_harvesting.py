@@ -12,8 +12,11 @@ from ssh_honeypot.server import HoneypotServer
 
 @pytest.fixture
 def mock_db():
-    with patch('ssh_honeypot.server.db') as mock:
-        yield mock
+    # Patch SSHPOT_TEST_MODE to None so logic actually runs
+    with patch.dict(os.environ, {'SSHPOT_TEST_MODE': ''}, clear=False):
+        # Also patch db
+        with patch('ssh_honeypot.server.db') as mock:
+            yield mock
 
 def test_anti_harvesting_allow_new_user_initially(mock_db):
     # Setup: No existing creds for this IP

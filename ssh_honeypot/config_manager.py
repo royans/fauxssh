@@ -62,6 +62,20 @@ def get_data_dir():
             
     return data_dir
 
+def get_version():
+    """Reads version from pyproject.toml to avoid hardcoding drift."""
+    try:
+        import tomllib
+        import os
+        # Assuming run from root or finding root relative to this file
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(base_dir, "pyproject.toml"), "rb") as f:
+            data = tomllib.load(f)
+            return data["project"]["version"]
+    except Exception as e:
+        # Fallback or log error
+        return "0.0.0-unknown"
+
 def get_ignored_ips():
     """
     Returns a list of IPs to ignore in analytics, parsed from ANALYTICS_IGNORE_IPS.
