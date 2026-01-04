@@ -77,11 +77,44 @@ def get_risk_style(score):
         return "white"
 
 
-def list_sessions(limit=50, no_failed=False, anon=False, db_path=None):
+
+def parse_sort_param(sort_str, field_map):
+    """
+    Parses "Field1:Desc,Field2:Asc" into a SQL ORDER BY clause.
+    field_map: dict mapping user field names (lowercase) to SQL columns.
+    Returns: SQL substring (e.g., "avg_risk DESC, start_time ASC")
+    """
+    if not sort_str: return None
+    
+    clauses = []
+    for part in sort_str.split(','):
+        if ':' in part:
+            field, direction = part.split(':', 1)
+        else:
+            field, direction = part, "ASC"
+            
+        field = field.strip().lower()
+        direction = direction.strip().upper()
+        
+        if direction not in ("ASC", "DESC"):
+            continue
+            
+        if field in field_map:
+            sql_col = field_map[field]
+            # Special logic for Unique - it is inverse of cmd_ip_count
+            # Unique High (Rare) = Low Count. Desc (High to Low) -> Count ASC
+            # Unique Low (Common) = High Count. Asc (Low to High) -> Count DESC
+            if field == "unique":
+               direction = "ASC" if direction == "DESC" else "DESC"
+
+            clauses.append(f"{sql_col} {direction}")
+            
+    return ", ".join(clauses) if clauses else None
+
+def list_sessions(limit=50, no_failed=False, anon=False, db_path=None, sort_param=None, ip_filter=None):
     conn = get_db_connection(db_path)
     c = conn.cursor()
     
-    # query updated to fetch first/last command times AND all commands for hashing
     query = """
         SELECT 
             s.session_id, 
@@ -103,9 +136,9 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None):
             ) as avg_risk,
             (SELECT group_concat(command, '|||') FROM interactions i WHERE i.session_id = s.session_id) as all_commands
         FROM sessions s
+        WHERE 1=1
     """
     params = []
-    # logic for no_failed filtering could go here if implemented in query
     
     # Filter Ignored IPs
     try:
@@ -114,10 +147,35 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None):
     
     if ignored:
         placeholders = ','.join(['?'] * len(ignored))
-        query += f" WHERE s.remote_ip NOT IN ({placeholders})"
+        query += f" AND s.remote_ip NOT IN ({placeholders})"
         params.extend(ignored)
+
+    if ip_filter:
+        query += " AND (s.remote_ip = ? OR s.remote_ip = ?)"
+        params.append(ip_filter)
+        if not ip_filter.startswith("::ffff:"):
+            params.append(f"::ffff:{ip_filter}")
+        else:
+            params.append(ip_filter)
+
+    # Sorting
+    # Maps: User Field -> SQL Column
+    sort_map = {
+        "risk": "avg_risk",
+        "cmds": "cmd_count",
+        "time": "s.start_time",
+        "ip": "s.remote_ip",
+        "user": "s.username",
+        "client": "s.client_version", 
+        "sessionid": "s.session_id"
+    }
     
-    query += " ORDER BY s.start_time DESC LIMIT ?"
+    order_clause = parse_sort_param(sort_param, sort_map)
+    if order_clause:
+         query += f" ORDER BY {order_clause} LIMIT ?"
+    else:
+         query += " ORDER BY s.start_time DESC LIMIT ?"
+         
     params.append(limit)
     
     c.execute(query, params)
@@ -125,16 +183,16 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None):
     conn.close()
 
     table = Table(title=f"Recent Sessions (Last {limit})", box=box.SIMPLE)
-    table.add_column("Start Time", style="cyan", no_wrap=True)
-    table.add_column("IP Address", style="magenta")
+    table.add_column("Time", style="cyan", no_wrap=True)
+    table.add_column("IP", style="magenta")
     table.add_column("User", style="green")
     table.add_column("Password")
-    table.add_column("Client Ver", style="dim")
-    table.add_column("Cmd Hash", style="bold blue") # Replaced FP
+    table.add_column("Client", style="dim")
+    table.add_column("CmdHash", style="bold blue") # Replaced FP
     table.add_column("Cmds", justify="right")
     table.add_column("Dur", justify="right", style="yellow")
     table.add_column("Risk", justify="right")
-    table.add_column("Session ID", style="dim", no_wrap=True)
+    table.add_column("SessionID", style="dim", no_wrap=True)
 
     for r in rows:
         start = to_local_time(r['start_time'])
@@ -153,7 +211,7 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None):
             except: pass
         elif int(r['cmd_count']) == 0:
              cmd_hash = "no_cmds"
-            
+             
         cmds = str(r['cmd_count'])
         
         # Calculate Duration
@@ -187,7 +245,7 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None):
     console.print(table)
 
 
-def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_path=None):
+def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_path=None, sort_param=None):
     conn = get_db_connection(db_path)
     c = conn.cursor()
     
@@ -232,13 +290,34 @@ def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_
         params.extend(ignored)
 
     if ip_filter:
-        query += " AND s.remote_ip = ?"
+        query += " AND (s.remote_ip = ? OR s.remote_ip = ?)"
         params.append(ip_filter)
+        if not ip_filter.startswith("::ffff:"):
+            params.append(f"::ffff:{ip_filter}")
+        else:
+            params.append(ip_filter)
+
     if session_filter:
         query += " AND i.session_id LIKE ?"
         params.append(f"{session_filter}%")
     
-    query += " ORDER BY i.id DESC LIMIT ?"
+    # Sorting
+    sort_map = {
+        "time": "i.timestamp",
+        "ip": "s.remote_ip",
+        "user": "s.username",
+        "unique": "cmd_ip_count", # Logic handled in parse_sort_param
+        "risk": "ca.risk_score",
+        "src": "i.source"
+    }
+    
+    order_clause = parse_sort_param(sort_param, sort_map)
+    
+    if order_clause:
+        query += f" ORDER BY {order_clause} LIMIT ?"
+    else:
+        query += " ORDER BY i.id DESC LIMIT ?"
+        
     params.append(limit)
     
     c.execute(query, params)
@@ -285,6 +364,7 @@ def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_
         
     console.print(table)
 
+
 def reset_failed_analysis(db_path=None):
     conn = get_db_connection(db_path)
     c = conn.cursor()
@@ -319,20 +399,21 @@ def main():
     parser.add_argument("--session-id", help="Filter by Session ID")
     parser.add_argument("--anon", action="store_true", help="Mask the last octet of IP addresses")
     parser.add_argument("--db", help="Path to SQLite database file")
+    parser.add_argument("--sort", help="Sort order (e.g. Risk:Desc,Cmds:Desc)")
     
     args = parser.parse_args()
     
     if args.sessions:
-        list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon, db_path=args.db)
+        list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon, db_path=args.db, sort_param=args.sort, ip_filter=args.ip)
     elif args.commands:
-        list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon, db_path=args.db)
+        list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon, db_path=args.db, sort_param=args.sort)
     elif args.retry_failed:
         reset_failed_analysis(db_path=args.db)
     else:
         if args.ip or args.session_id:
-            list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon, db_path=args.db)
+            list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon, db_path=args.db, sort_param=args.sort)
         else:
-            list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon, db_path=args.db)
+            list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon, db_path=args.db, sort_param=args.sort, ip_filter=args.ip)
 
 if __name__ == "__main__":
     main()

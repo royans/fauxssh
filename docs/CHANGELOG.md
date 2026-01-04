@@ -1,5 +1,11 @@
 # Changelog
 
+## Jan 4th 2026
+- **Analytics Upgrade**: Added "Unique%" column (rarity score), removed command truncation, and implemented advanced sorting (`--sort Risk:Desc`).
+- **IPv6 Support**: Improved analytics filtering to seamlessly handle IPv4-mapped IPv6 addresses.
+- **Maintenance**: Added automatic cleanup of legacy artifact files (filenames starting with `-`) on startup.
+- **Security Audit**: Verified codebase against SQL injection vulnerabilities (Clean).
+
 ## Jan 3rd 2026
 - **Access Tracking**: Files system now tracks `last_accessed` timestamps to identify abandoned vs. active files.
 - **Aggressive Cleanup**: Auto-pruning now safely deletes old files that haven't been accessed, reducing database bloat.

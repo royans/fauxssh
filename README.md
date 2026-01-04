@@ -47,16 +47,18 @@ Use the included script for robust background execution and logging.
 FauxSSH includes powerful CLI tools to visualize captured data. See [Logging & Analytics](docs/LOGGING.md) for details.
 
 ### Recent Sessions
-`python3 tools/analytics/analyze.py --sessions --anon`
+### Recent Sessions
+`python3 tools/analytics/analyze.py --sessions --anon --sort Risk:Desc`
 ![Recent Sessions](docs/images/report_sessions.png)
 
 ### Command History
-`python3 tools/analytics/analyze.py --commands`
+`python3 tools/analytics/analyze.py --commands --limit 100 --sort Risk:Desc,Unique:Desc`
 ![Command History](docs/images/report_commands.png)
 
-### Session Verification (Replay)
-`python3 tools/analytics/analyze.py --session-id <ID>`
-![Session Detail](docs/images/report_session_detail.png)
+### Advanced Filtering
+Filter by IP (supports IPv4 and mapped IPv6) or Session ID:
+`python3 tools/analytics/analyze.py --ip 111.222.333.444`
+`python3 tools/analytics/analyze.py --commands --session-id 49b8ac`
 
 ### Filesystem Forensics
 Inspect and manage attacker uploads in real-time.
