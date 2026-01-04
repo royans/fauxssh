@@ -364,7 +364,8 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         # 0. Complex Command Chains (Simple Heuristic for now)
         # 0. Complex Command Chains (Simple Heuristic for now)
         # We now support && locally, so remove it from complexity trigger if count is low
-        is_complex = (len(cmd) > 150) or (cmd.count(';') > 2) or (cmd.count('|') > 2) or (cmd.count('&&') > 2) or ('||' in cmd)
+        # User requested higher limits (Jan 3rd): 30 commands, 4096 chars
+        is_complex = (len(cmd) > 4096) or (cmd.count(';') > 30) or (cmd.count('|') > 30) or (cmd.count('&&') > 30) or ('||' in cmd)
         
         # Exempt 'echo' from complexity check (always handle locally to prevent JSON leaks on long strings)
         if is_complex and base_cmd != 'echo':
@@ -1114,9 +1115,10 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 lines.append(name)
                 
         if 'l' in flags:
-            return f"total {total_blocks}\n" + "\n".join(lines)
+            return f"total {total_blocks}\n" + "\n".join(lines) + "\n"
         else:
-            return "  ".join(lines) # Simple column view approximation
+            if not lines: return ""
+            return "  ".join(lines) + "\n" # Simple column view approximation + newline
 
 
     def handle_cd(self, cmd, context):
