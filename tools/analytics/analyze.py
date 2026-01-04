@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import sqlite3
 import argparse
 import os
@@ -80,9 +81,7 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None):
     conn = get_db_connection(db_path)
     c = conn.cursor()
     
-    # ... (query logic remains the same) ...
-    
-    # query updated to fetch first/last command times
+    # query updated to fetch first/last command times AND all commands for hashing
     query = """
         SELECT 
             s.session_id, 
@@ -101,7 +100,8 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None):
                 FROM interactions i 
                 JOIN command_analysis ca ON i.request_md5 = ca.command_hash 
                 WHERE i.session_id = s.session_id
-            ) as avg_risk
+            ) as avg_risk,
+            (SELECT group_concat(command, '|||') FROM interactions i WHERE i.session_id = s.session_id) as all_commands
         FROM sessions s
     """
     params = []
@@ -130,7 +130,7 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None):
     table.add_column("User", style="green")
     table.add_column("Password")
     table.add_column("Client Ver", style="dim")
-    table.add_column("FP", style="dim")
+    table.add_column("Cmd Hash", style="bold blue") # Replaced FP
     table.add_column("Cmds", justify="right")
     table.add_column("Dur", justify="right", style="yellow")
     table.add_column("Risk", justify="right")
@@ -143,13 +143,16 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None):
         pwd = r['password'] or ""
         ver = (r['client_version'] or "").replace("SSH-2.0-", "")[:15]
         
-        # Parse Fingerprint nicely
-        fp = "-"
-        if r['fingerprint']:
+        # Calculate Command Hash
+        cmd_hash = "-"
+        if r['all_commands']:
             try:
-                fp_data = json.loads(r['fingerprint'])
-                fp = " captured" 
+                # MD5 of concatenated commands
+                cmd_data = r['all_commands'].encode('utf-8')
+                cmd_hash = hashlib.md5(cmd_data).hexdigest()[:8] # First 8 chars
             except: pass
+        elif int(r['cmd_count']) == 0:
+             cmd_hash = "no_cmds"
             
         cmds = str(r['cmd_count'])
         
@@ -179,7 +182,7 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None):
         # Full Session ID requested
         sid = r['session_id']
         
-        table.add_row(start, ip, user, pwd, ver, fp, cmds, duration_str, f"[{risk_style}]{risk_str}[/{risk_style}]", sid)
+        table.add_row(start, ip, user, pwd, ver, cmd_hash, cmds, duration_str, f"[{risk_style}]{risk_str}[/{risk_style}]", sid)
 
     console.print(table)
 
@@ -188,6 +191,13 @@ def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_
     conn = get_db_connection(db_path)
     c = conn.cursor()
     
+    # 1. Get Total Unique IPs for Unique% Calculation
+    try:
+        c.execute("SELECT COUNT(DISTINCT remote_ip) FROM sessions")
+        total_ips = c.fetchone()[0] or 1 # Avoid div by zero
+    except:
+        total_ips = 1
+
     query = """
         SELECT 
             i.timestamp,
@@ -198,7 +208,11 @@ def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_
             i.request_md5,
             ca.activity_type,
             ca.risk_score,
-            ca.explanation
+            ca.explanation,
+            (SELECT COUNT(DISTINCT s2.remote_ip) 
+             FROM interactions i2 
+             JOIN sessions s2 ON i2.session_id = s2.session_id 
+             WHERE i2.request_md5 = i.request_md5) as cmd_ip_count
         FROM interactions i
         JOIN sessions s ON i.session_id = s.session_id
         LEFT JOIN command_analysis ca ON i.request_md5 = ca.command_hash
@@ -236,6 +250,7 @@ def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_
     table.add_column("IP", style="magenta")
     table.add_column("User", style="green")
     table.add_column("Src", style="yellow")
+    table.add_column("Unique%", justify="right", style="bold blue")
     table.add_column("Risk", justify="right")
     table.add_column("Command", style="white", overflow="fold") # Enable wrapping
     table.add_column("Analysis", style="italic cyan")
@@ -246,17 +261,28 @@ def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_
         user = r['username'] or "-"
         src = r['source'] or "-"
         
+        # Calculate Unique%
+        # % of IPs that ran this command = cmd_ip_count / total_ips
+        # Unique% = 100% - (Freq%)
+        # High Unique% = Rare command
+        cmd_ip_count = r['cmd_ip_count'] or 0
+        freq = cmd_ip_count / total_ips
+        unique_pct = (1.0 - freq) * 100.0
+        unique_str = f"{unique_pct:.1f}%"
+        
         risk_val = r['risk_score']
-        risk_str = str(risk_val) if risk_val is not None else "-"
+        risk_str = f"{risk_val}" if risk_val is not None else "-"
         risk_style = get_risk_style(risk_val)
         
-        cmd = (r['command'] or "").replace('\r', '').strip()
-        expl = (r['explanation'] or "").replace('\n', ' ').strip()
-        
-        # No more truncation! Rich handles wrapping automatically.
+        cmd = r['command'] or ""
+        # Removed truncation as per user request to see full command
+             
+        explanation = r['explanation'] or ""
+        if len(explanation) > 100:
+             explanation = textwrap.shorten(explanation, width=100, placeholder="...")
 
-        table.add_row(ts, ip, user, src, f"[{risk_style}]{risk_str}[/{risk_style}]", cmd, expl)
- 
+        table.add_row(ts, ip, user, src, unique_str, f"[{risk_style}]{risk_str}[/{risk_style}]", cmd, explanation)
+        
     console.print(table)
 
 def reset_failed_analysis(db_path=None):
