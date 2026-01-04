@@ -133,8 +133,17 @@ while true; do
   
   PLANNED_RESTART=false
 
-  # Monitor loop
+  # Helper to get latest mtime in ssh_honeypot
+  get_latest_code_mtime() {
+      find "ssh_honeypot" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1
+  }
+
+  LAST_CODE_MTIME=$(get_latest_code_mtime)
+  # Default to 0 if find failed (empty dir?)
+  : ${LAST_CODE_MTIME:=0}
+
   while kill -0 $PID 2>/dev/null; do
+      # 1. Check specific restart trigger file
       if [ -f "$WATCH_FILE" ]; then
           curr_mtime=$(stat -c %Y "$WATCH_FILE")
           if [ "$curr_mtime" != "$LAST_MTIME" ]; then
@@ -144,6 +153,18 @@ while true; do
               wait $PID 2>/dev/null
               break
           fi
+      fi
+      
+      # 2. Check for Code Changes (Recursive)
+      curr_code_mtime=$(get_latest_code_mtime)
+      : ${curr_code_mtime:=0}
+      
+      if [ "$curr_code_mtime" -gt "$LAST_CODE_MTIME" ]; then
+           echo "[$(date)] Detected code change in ssh_honeypot/. Restarting server..."
+           kill $PID
+           PLANNED_RESTART=true
+           wait $PID 2>/dev/null
+           break
       fi
       
       # Check for 24h Auto-Restart
