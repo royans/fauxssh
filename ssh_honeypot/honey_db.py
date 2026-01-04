@@ -160,6 +160,17 @@ class HoneyDB(DatabaseBackend):
             c.execute("ALTER TABLE user_filesystem ADD COLUMN is_deleted BOOLEAN DEFAULT 0")
         except sqlite3.OperationalError: pass
 
+        # Analytics: Response Tracking (Jan 3)
+        try:
+            c.execute("ALTER TABLE interactions ADD COLUMN response_md5 TEXT")
+        except sqlite3.OperationalError: pass
+        try:
+            c.execute("ALTER TABLE interactions ADD COLUMN response_head TEXT")
+        except sqlite3.OperationalError: pass
+        try:
+            c.execute("ALTER TABLE interactions ADD COLUMN response_size INTEGER")
+        except sqlite3.OperationalError: pass
+
         # Requested URLs Log (Network Intelligence)
         c.execute('''CREATE TABLE IF NOT EXISTS requested_urls (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -226,7 +237,7 @@ class HoneyDB(DatabaseBackend):
         conn.commit()
         conn.close()
 
-    def log_interaction(self, session_id, cwd, command, response, source="unknown", was_cached=False, duration_ms=0, request_md5=None):
+    def log_interaction(self, session_id, cwd, command, response, source="unknown", was_cached=False, duration_ms=0, request_md5=None, response_md5=None, response_head=None, response_size=None):
         # Defensive Type Casting to prevent SQLite InterfaceError with dicts
         try:
             if isinstance(source, dict) or isinstance(source, list):
@@ -234,7 +245,7 @@ class HoneyDB(DatabaseBackend):
                  source = str(source.get('source', str(source))) if isinstance(source, dict) else str(source)
             else:
                  source = str(source)
-
+            
             if request_md5 and (isinstance(request_md5, dict) or isinstance(request_md5, list)):
                  log.warning(f"[DB] Warning: 'request_md5' param was {type(request_md5)}, casting to str.")
                  request_md5 = str(request_md5)
@@ -244,8 +255,11 @@ class HoneyDB(DatabaseBackend):
 
         conn = self._get_conn()
         try:
-            conn.execute("INSERT INTO interactions (session_id, cwd, command, response, source, request_md5) VALUES (?, ?, ?, ?, ?, ?)",
-                        (session_id, cwd, command, response, source, request_md5))
+            conn.execute("""
+                INSERT INTO interactions 
+                (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size))
             conn.commit()
         except Exception as e:
             log.error(f"[DB] Error logging interaction: {e}")

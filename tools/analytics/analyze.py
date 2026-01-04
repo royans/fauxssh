@@ -264,6 +264,7 @@ def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_
             i.command,
             i.source,
             i.request_md5,
+            i.response_size,
             ca.activity_type,
             ca.risk_score,
             ca.explanation,
@@ -328,10 +329,11 @@ def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_
     table.add_column("Time", style="dim", no_wrap=True)
     table.add_column("IP", style="magenta")
     table.add_column("User", style="green")
+    table.add_column("Command", style="white", overflow="fold") # Enable wrapping
+    table.add_column("Size", justify="right", style="dim")
     table.add_column("Src", style="yellow")
     table.add_column("Unique%", justify="right", style="bold blue")
     table.add_column("Risk", justify="right")
-    table.add_column("Command", style="white", overflow="fold") # Enable wrapping
     table.add_column("Analysis", style="italic cyan")
 
     for r in rows:
@@ -339,6 +341,10 @@ def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_
         ip = clean_ip(r['remote_ip'], anon=anon) or "-"
         user = r['username'] or "-"
         src = r['source'] or "-"
+        
+        # New Size Column
+        size_val = r['response_size']
+        size_str = f"{size_val}" if size_val is not None else "-"
         
         # Calculate Unique%
         # % of IPs that ran this command = cmd_ip_count / total_ips
@@ -360,7 +366,7 @@ def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_
         if len(explanation) > 100:
              explanation = textwrap.shorten(explanation, width=100, placeholder="...")
 
-        table.add_row(ts, ip, user, src, unique_str, f"[{risk_style}]{risk_str}[/{risk_style}]", cmd, explanation)
+        table.add_row(ts, ip, user, cmd, size_str, src, unique_str, f"[{risk_style}]{risk_str}[/{risk_style}]", explanation)
         
     console.print(table)
 

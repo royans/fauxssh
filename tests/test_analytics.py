@@ -17,7 +17,7 @@ def mock_db_conn():
     
     # Create necessary schemas
     c.execute("CREATE TABLE sessions (session_id TEXT, remote_ip TEXT, username TEXT, password TEXT, start_time TEXT, end_time TEXT, client_version TEXT, fingerprint TEXT)")
-    c.execute("CREATE TABLE interactions (id INTEGER PRIMARY KEY, session_id TEXT, timestamp TEXT, remote_ip TEXT, username TEXT, command TEXT, response TEXT, source TEXT, duration_ms INTEGER, request_md5 TEXT)")
+    c.execute("CREATE TABLE interactions (id INTEGER PRIMARY KEY, session_id TEXT, timestamp TEXT, remote_ip TEXT, username TEXT, command TEXT, response TEXT, source TEXT, duration_ms INTEGER, request_md5 TEXT, response_md5 TEXT, response_head TEXT, response_size INTEGER)")
     c.execute("CREATE TABLE command_analysis (command_hash TEXT, risk_score REAL, explanation TEXT, activity_type TEXT)")
     
     conn.commit()
@@ -80,10 +80,10 @@ def test_unique_pct_calculation(mock_db_conn, capsys):
              # We can check columns[4] which is "Unique%"
              
              # Let's inspect the columns. Note: Order matters.
-             # 0:Time, 1:IP, 2:User, 3:Src, 4:Unique%, 5:Risk, 6:Command, 7:Analysis
+             # 0:Time, 1:IP, 2:User, 3:Command, 4:Size, 5:Src, 6:Unique%, 7:Risk, 8:Analysis
              
-             unique_col_index = 4
-             cmd_col_index = 6
+             unique_col_index = 6
+             cmd_col_index = 3
              
              # Extract data from columns (Rich API structure)
              # This depends on rich version, commonly table.columns[i]._cells
@@ -127,8 +127,8 @@ def test_unique_pct_shared_ip(mock_db_conn):
              args, _ = mock_print.call_args
              table = args[0]
              
-             unique_cells = list(table.columns[4].cells) # Unique% col
-             cmd_cells = list(table.columns[6].cells)    # Command col
+             unique_cells = list(table.columns[6].cells) # Unique% col
+             cmd_cells = list(table.columns[3].cells)    # Command col
              
              idx = cmd_cells.index('cmdZ')
              # 1 unique IP out of 2 total IPs = 50% freq -> 50% unique
@@ -139,7 +139,7 @@ def setup_sorting_db():
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     c.execute("CREATE TABLE sessions (session_id TEXT, remote_ip TEXT, username TEXT, password TEXT, start_time TEXT, end_time TEXT, client_version TEXT, fingerprint TEXT)")
-    c.execute("CREATE TABLE interactions (id INTEGER PRIMARY KEY, session_id TEXT, timestamp TEXT, remote_ip TEXT, username TEXT, command TEXT, response TEXT, source TEXT, duration_ms INTEGER, request_md5 TEXT)")
+    c.execute("CREATE TABLE interactions (id INTEGER PRIMARY KEY, session_id TEXT, timestamp TEXT, remote_ip TEXT, username TEXT, command TEXT, response TEXT, source TEXT, duration_ms INTEGER, request_md5 TEXT, response_md5 TEXT, response_head TEXT, response_size INTEGER)")
     c.execute("CREATE TABLE command_analysis (command_hash TEXT, risk_score REAL, explanation TEXT, activity_type TEXT)")
     
     # 1. Setup Sessions
@@ -166,7 +166,7 @@ def test_sorting_risk():
              analyze.list_commands(limit=10, sort_param="Risk:Desc")
              args, _ = mock_print.call_args
              table = args[0]
-             cmd_cells = list(table.columns[6].cells) 
+             cmd_cells = list(table.columns[3].cells) 
              assert cmd_cells[0] == 'cmdRare'
              assert cmd_cells[1] == 'cmdCommon'
 
@@ -177,7 +177,7 @@ def test_sorting_risk_asc():
              analyze.list_commands(limit=10, sort_param="Risk:Asc")
              args, _ = mock_print.call_args
              table = args[0]
-             cmd_cells = list(table.columns[6].cells)
+             cmd_cells = list(table.columns[3].cells)
              assert cmd_cells[0] == 'cmdCommon'
 
 def test_sorting_unique():
@@ -187,7 +187,7 @@ def test_sorting_unique():
              analyze.list_commands(limit=10, sort_param="Unique:Desc")
              args, _ = mock_print.call_args
              table = args[0]
-             cmd_cells = list(table.columns[6].cells)
+             cmd_cells = list(table.columns[3].cells)
              assert cmd_cells[0] == 'cmdRare'
              assert cmd_cells[1] == 'cmdCommon'
 
@@ -216,5 +216,5 @@ def test_ipv6_mapped_filtering():
              # Should be 1 row
              assert table.row_count == 1
              # IP column might be cleaned, check Command column
-             cmd_cells = list(table.columns[6].cells)
+             cmd_cells = list(table.columns[3].cells)
              assert 'cmdMapped' in cmd_cells

@@ -530,6 +530,19 @@ def _handle_connection_logic(client, addr):
         except:
             cmd_hash = "unknown"
             
+        # Compute Response Stats
+        resp_md5 = None
+        resp_head = None
+        resp_size = 0
+        
+        if resp_text:
+            try:
+                resp_size = len(resp_text)
+                resp_md5 = hashlib.md5(resp_text.encode('utf-8', 'ignore')).hexdigest()
+                resp_head = resp_text[:100]
+            except:
+                pass
+
         log.debug(f"[DEBUG] Exec '{cmd}' -> Response Len: {len(resp_text)}")
         log.debug(f"[DEBUG] Logging Interaction: Source Type: {type(metadata.get('source'))} Val: {metadata.get('source')}")
         
@@ -542,7 +555,10 @@ def _handle_connection_logic(client, addr):
             source=str(metadata.get('source', 'unknown')), 
             was_cached=metadata.get('cached', False),
             duration_ms=duration_ms,
-            request_md5=str(cmd_hash)
+            request_md5=str(cmd_hash),
+            response_md5=resp_md5,
+            response_head=resp_head,
+            response_size=resp_size
         )
 
         try:
