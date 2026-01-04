@@ -71,7 +71,8 @@ class TestLongCommands:
         
         # Setup mocks for dependencies
         context = {'cwd': '/root', 'session_id': 'test_sess'}
-        chain_cmd = "apt-get update && apt-get install malware -y"
+        # We need > 2 '&&' to trigger complexity offload (otherwise handled locally)
+        chain_cmd = "apt-get update && apt-get install malware -y && echo persistent && echo done"
         
         # 1. Cache Miss
         mock_db.get_cached_response.return_value = None
@@ -111,7 +112,8 @@ class TestLongCommands:
         context = {'cwd': '/root', 'session_id': 'test_sess'}
         # Must contain && or ;; or be long to trigger offload
         # We use 'sleep' because 'echo' is exempt.
-        chain_cmd = "sleep 1 && sleep 2"
+        # We need > 2 '&&' to trigger complexity now that we support simple chaining locally.
+        chain_cmd = "sleep 1 && sleep 2 && sleep 3 && sleep 4"
         
         # 1. Cache HIT
         # db.get_cached_response returns raw text or JSON string

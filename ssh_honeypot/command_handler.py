@@ -6,6 +6,7 @@ import time
 import hashlib
 import json
 import logging
+import fnmatch
 try:
     from .utils import random_response_delay
 except ImportError:
@@ -246,6 +247,45 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         return f"sudo: a password is required\n", {}, {'source': 'local', 'cached': False}
 
 
+    def _expand_wildcards(self, pattern, context):
+        """
+        Expands a glob pattern (e.g. *.txt, /tmp/*.log) into a list of matching filenames/paths.
+        Returns sorted list of matches.
+        """
+        if '*' not in pattern and '?' not in pattern and '[' not in pattern:
+            return []
+
+        cwd = context.get('cwd', '/')
+        client_ip = context.get('client_ip')
+        user = context.get('user')
+        
+        dirname = os.path.dirname(pattern)
+        basename_pattern = os.path.basename(pattern)
+        
+        # Resolve the directory to search in
+        if dirname:
+            search_path = self._resolve_path(cwd, dirname)
+            prefix = dirname
+        else:
+            search_path = cwd
+            prefix = ""
+            
+        # Get files
+        items = self.db.list_user_dir(client_ip, user, search_path)
+        filenames = [os.path.basename(i['path']) for i in items]
+        
+        # Filter
+        matches = fnmatch.filter(filenames, basename_pattern)
+        
+        if not matches:
+            return []
+            
+        # Reconstruct paths
+        if prefix:
+             return sorted([os.path.join(prefix, m) for m in matches])
+        
+        return sorted(matches)
+
     def process_command(self, cmd, context):
         """
         Input: cmd (str), context (dict)
@@ -284,7 +324,9 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             return "", {}, {'source': 'local', 'cached': False}
 
         # 0. Complex Command Chains (Simple Heuristic for now)
-        is_complex = (len(cmd) > 150) or (cmd.count(';') > 2) or (cmd.count('|') > 2) or ('&&' in cmd) or ('||' in cmd)
+        # 0. Complex Command Chains (Simple Heuristic for now)
+        # We now support && locally, so remove it from complexity trigger if count is low
+        is_complex = (len(cmd) > 150) or (cmd.count(';') > 2) or (cmd.count('|') > 2) or (cmd.count('&&') > 2) or ('||' in cmd)
         
         # Exempt 'echo' from complexity check (always handle locally to prevent JSON leaks on long strings)
         if is_complex and base_cmd != 'echo':
@@ -320,6 +362,41 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                         for k, v in updates.items():
                              if k == 'new_cwd': 
                                  final_updates[k] = v # Last one wins
+                             elif k == 'file_modifications':
+                                 if 'file_modifications' not in final_updates: final_updates['file_modifications'] = []
+                                 final_updates['file_modifications'].extend(v)
+
+                return "".join(final_out), final_updates, {'source': 'chain', 'cached': False}
+
+        # 0.1 Command Chaining Support (&&)
+        # Implemented technically as unconditional chain because we don't have real exit codes from handlers yet.
+        # But this captures the "do A then B" intent for honeypot (user sees both outputs).
+        # We check && before pipe (0.5), similar to ; precedence.
+        if '&&' in cmd:
+            parts = [p.strip() for p in cmd.split('&&') if p.strip()]
+            if len(parts) > 1:
+                final_out = []
+                final_updates = {}
+                current_context = context.copy()
+                
+                for part in parts:
+                    out, updates, meta = self.process_command(part, current_context)
+                    final_out.append(out)
+                    
+                    # Heuristic: If output suggests failure, stop chain?
+                    # Common fail patterns: "bash: ...", "Error:", "command not found"
+                    # But honeypot might want to show errors.
+                    # Standard shell stops. 
+                    if out.startswith("bash:") or "command not found" in out:
+                         # Stop chain
+                         return "".join(final_out), final_updates, {'source': 'chain_abort', 'cached': False}
+
+                    if updates:
+                        if updates.get('new_cwd'):
+                            current_context['cwd'] = updates['new_cwd']
+                        for k, v in updates.items():
+                             if k == 'new_cwd': 
+                                 final_updates[k] = v 
                              elif k == 'file_modifications':
                                  if 'file_modifications' not in final_updates: final_updates['file_modifications'] = []
                                  final_updates['file_modifications'].extend(v)
@@ -761,35 +838,107 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         # 1. Parse Args
         parts = cmd.split()
         flags = set()
-        target_path = context.get('cwd') # Default to CWD
+        raw_targets = []
         
         for p in parts[1:]:
             if p.startswith('-'):
                 for char in p[1:]:
                      flags.add(char)
             else:
-                target_path = p
+                raw_targets.append(p)
         
-        # 2. Resolve Path
-        abs_path = self._resolve_path(context.get('cwd'), target_path)
-        client_ip = context.get('client_ip')
-        user = context.get('user')
+        # 2. Expand Wildcards
+        targets = []
+        if not raw_targets:
+            targets.append(context.get('cwd')) # Default to CWD if no targets
+        else:
+            for t in raw_targets:
+                if '*' in t or '?' in t or '[' in t:
+                    matches = self._expand_wildcards(t, context)
+                    if matches:
+                        targets.extend(matches)
+                    else:
+                        # LS behavior: if glob fails, pass literal.
+                        # It will likely fail "No such file".
+                        targets.append(t)
+                else:
+                    targets.append(t)
+                    
+        # 3. Process each target
+        # If multiple targets, ls prints filename: ... or just lists them? 
+        # Standard ls: lists files directly, lists dir contents with header if multiple dirs.
+        # For simplification, we'll just merge all outputs.
+        
+        all_nodes = []
+        
+        # Helper to fetch nodes for a path
+        def fetch_nodes_for_path(target_path):
+            abs_path = self._resolve_path(context.get('cwd'), target_path)
+            client_ip = context.get('client_ip')
+            user = context.get('user')
+            
+            # A. Check Specific File (User -> Global)
+            user_node = self.db.get_user_node(client_ip, user, abs_path)
+            if user_node:
+                 if 'd' in flags or user_node.get('type') == 'file':
+                     return [user_node]
+            
+            # B. It's a directory (or treated as one)
+            # HoneyDB.list_user_dir now handles merging (User > Skeleton > Global) 
+            # and respects Tombstones.
+            user_files = self.db.list_user_dir(client_ip, user, abs_path)
+            
+            # Map for VFS merging
+            file_map = {f['path'].split('/')[-1]: f for f in user_files}
+                
+            # Merge Session VFS
+            vfs_data = context.get('vfs', {})
+            if abs_path in vfs_data:
+                 # Self-Healing: Iterate copy to flush orphans
+                 for fname in list(vfs_data[abs_path]):
+                     full_vfs_path = os.path.join(abs_path, fname)
+                     
+                     # 1. Check Tombstone (Explicitly deleted)
+                     if self.db.is_path_deleted(context.get('client_ip'), user, full_vfs_path):
+                         vfs_data[abs_path].remove(fname)
+                         continue
 
-        # 2a. Check if it is a specific file (Global or User)
-        # Check User FS first (override)
-        user_node = self.db.get_user_node(client_ip, user, abs_path)
-        if user_node:
-             if 'd' in flags or user_node.get('type') == 'file':
-                 f = flags.copy()
-                 f.add('a')
-                 return self._format_ls_output([user_node], f), {}
+                     # 2. Check Persistence (Must exist in DB/Skeleton/Global)
+                     # If not in file_map, it's a VFS-only ghost/artifact -> Flush it.
+                     if fname not in file_map:
+                         vfs_data[abs_path].remove(fname)
+                         continue
+            
+            return list(file_map.values())
+
+        # If we have multiple targets, we might need to separate output?
+        # Simpler: just collect ALL nodes. 
+        # But wait, ls /tmp /home -> lists /tmp contents AND /home contents.
+        # Our _format_ls_output takes a flat list.
+        # If we list multiple dirs, it will mash them together.
+        # Ideally, we should iterate and print?
+        # But _format_ls_output handles column formatting for the whole set.
         
-        # Check Global FS
-        global_node = self.db.get_fs_node(abs_path)
-        if global_node and global_node.get('type') == 'file': # Only return if it's a file
-             f = flags.copy()
-             f.add('a')
-             return self._format_ls_output([global_node], f), {}
+        # Let's iterate and collect ALL nodes.
+        for t in targets:
+            nodes = fetch_nodes_for_path(t)
+            # If nodes is empty and we expected something?
+            # fetch_nodes_for_path returns empty list if dir empty OR path invalid.
+            # We don't distinguish "No such file" here cleanly.
+            # Ideally we check existence first.
+            if not nodes:
+                 # Check if path existed? 
+                 # For now, just continue (empty dir or invalid path logic needs refinement but good enough for MVP)
+                 pass
+            all_nodes.extend(nodes)
+            
+        if not all_nodes:
+            # Fallback to LLM if we found nothing locally (Unknown dir or empty)
+            # Must return 2 values to match handle_ls contract expected by tests
+            resp, ups, _ = self.handle_generic(cmd, context)
+            return resp, ups
+
+        return self._format_ls_output(all_nodes, flags), {}
 
         # 3. Check Global FS Cache (Treat as Directory)
         cached_files = self.db.list_fs_dir(abs_path)
@@ -1520,7 +1669,24 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         client_ip = context.get('client_ip')
         user = context.get('user')
         
+        # Expand wildcards
+        expanded_targets = []
         for t in targets:
+            if '*' in t or '?' in t or '[' in t:
+                matches = self._expand_wildcards(t, context)
+                if matches:
+                    expanded_targets.extend(matches)
+                else:
+                    # No match: keep regex as literal (will fail "No such file")
+                    expanded_targets.append(t)
+            else:
+                expanded_targets.append(t)
+        
+        for t in expanded_targets:
+            # t is now potentially a full path from expansion, or relative.
+            # _expand_wildcards returns paths relative to CWD if pattern was relative?
+            # My impl returns joined paths.
+            # _resolve_path handles both absolute and relative 
             abs_path = self._resolve_path(context.get('cwd'), t)
             
             if not self._is_modification_allowed(abs_path):
@@ -1531,6 +1697,18 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             curr = self.db.get_user_node(client_ip, user, abs_path)
             
             if not curr:
+                # Check VFS (Ephemeral LLM files)
+                vfs = context.get('vfs', {})
+                parent = os.path.dirname(abs_path)
+                fname = os.path.basename(abs_path)
+                
+                if parent in vfs and fname in vfs[parent]:
+                    # Remove from VFS
+                    vfs[parent].remove(fname)
+                    # We modified VFS in place (passed by ref from server.py)
+                    # No need to DB delete
+                    continue
+
                 # If -f, ignore
                 if not any('f' in f for f in flags):
                      output += f"rm: cannot remove '{t}': No such file or directory\n"

@@ -1,4 +1,10 @@
 import pytest
+import sys
+import os
+
+# Add project root to sys.path
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+
 from unittest.mock import MagicMock
 from ssh_honeypot.command_handler import CommandHandler
 import os
@@ -93,13 +99,21 @@ class TestVFSPopulation:
     def handler(self, mock_llm, mock_db):
         return CommandHandler(mock_llm, mock_db)
 
-    def test_ls_shows_vfs_files(self, handler):
+    def test_ls_shows_vfs_files(self, handler, mock_db):
         user = "royans"
         cwd = f"/home/{user}"
         vfs = {
             cwd: ["default_file.txt", "secret.key"]
         }
         
+        # New Requirement: Files must exist in DB to survive Self-Healing flush
+        # Seed the DB
+        import json
+        mock_db.update_user_file("1.2.3.4", user, f"{cwd}/default_file.txt", cwd, "file",
+                                {'size': 100, 'permissions': '-rw-r--r--'}, "content")
+        mock_db.update_user_file("1.2.3.4", user, f"{cwd}/secret.key", cwd, "file",
+                                {'size': 200, 'permissions': '-rw-r--r--'}, "secret")
+
         context = {
             'cwd': cwd,
             'user': user,

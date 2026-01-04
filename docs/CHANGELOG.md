@@ -5,6 +5,7 @@
 - **Aggressive Cleanup**: Auto-pruning now safely deletes old files that haven't been accessed, reducing database bloat.
 - **Forensics Tooling**: Enhanced `fs_inspector.py` with `--delete`, `--file`, and access time visibility for managing attacker uploads.
 - **Copy-On-Write**: Refactored filesystem to use a Copy-On-Write (COW) architecture, significantly reducing database size for new sessions.
+- **Improved UX**: Fixed `cd` (no args) behavior to reliably default to user home, and added support for local `&&` command chaining .
 
 ## Jan 2nd 2026
 - **Keyword Alerts**: Support for immediate Discord alerts based on configured keywords or regex patterns.

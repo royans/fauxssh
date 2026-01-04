@@ -744,6 +744,10 @@ def _handle_connection_logic(client, addr):
                 except:
                     pass
 
+            # Handle Tab (Autocompletion)
+            elif char == b'\t':
+                command_buffer = handle_tab_completion(chan, command_buffer, vfs, cwd, prompt)
+
             # Normal Char
             else:
                 try:
@@ -762,6 +766,50 @@ def _handle_connection_logic(client, addr):
         transport.close()
 
 
+def handle_tab_completion(chan, command_buffer, vfs, cwd, prompt):
+    """
+    Handles Tab key press for autocompletion.
+    Returns the updated command_buffer.
+    """
+    # Simply Get last word
+    parts = command_buffer.split()
+    if not parts and not command_buffer:
+            prefix = ""
+    elif command_buffer.endswith(' '):
+            prefix = ""
+    else:
+            prefix = parts[-1]
+    
+    candidates = []
+    current_files = vfs.get(cwd, [])
+    
+    for f in current_files:
+        if f.startswith(prefix):
+            candidates.append(f)
+            
+    if len(candidates) == 1:
+        # Completion!
+        match = candidates[0]
+        # We need to append the *remainder* of the word
+        remainder = match[len(prefix):]
+        command_buffer += remainder
+        chan.send(remainder)
+        return command_buffer
+        
+    elif len(candidates) > 1:
+        # Multiple matches
+        # Output list on new line
+        chan.send(b'\r\n')
+        output_list = "  ".join(candidates)
+        chan.send(output_list)
+        chan.send(b'\r\n')
+        
+        # Redraw prompt and buffer
+        chan.send(prompt)
+        chan.send(command_buffer)
+        return command_buffer
+    
+    return command_buffer
 
 def cleanup_loop(db_instance):
     """Background thread to clean up old uploads"""

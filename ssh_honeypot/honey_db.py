@@ -94,6 +94,8 @@ class HoneyDB(DatabaseBackend):
                 metadata TEXT,
                 content TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_accessed DATETIME,
+                is_deleted BOOLEAN DEFAULT 0,
                 PRIMARY KEY (ip, username, path)
             )
         ''')
@@ -152,6 +154,10 @@ class HoneyDB(DatabaseBackend):
 
         try:
             c.execute("ALTER TABLE user_filesystem ADD COLUMN last_accessed DATETIME")
+        except sqlite3.OperationalError: pass
+
+        try:
+            c.execute("ALTER TABLE user_filesystem ADD COLUMN is_deleted BOOLEAN DEFAULT 0")
         except sqlite3.OperationalError: pass
 
         # Requested URLs Log (Network Intelligence)
@@ -342,8 +348,8 @@ class HoneyDB(DatabaseBackend):
             
         try:
             conn.execute("""
-                INSERT OR REPLACE INTO user_filesystem (ip, username, path, parent_path, type, metadata, content)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO user_filesystem (ip, username, path, parent_path, type, metadata, content, is_deleted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
             """, (ip, username, path, parent_path, type, json.dumps(metadata) if isinstance(metadata, dict) else metadata, content))
             conn.commit()
             
@@ -372,6 +378,10 @@ class HoneyDB(DatabaseBackend):
         conn.close()
         
         if result:
+            # Check for Tombstone
+            if result.get('is_deleted'):
+                return None
+
             # Touch access time for aggressive cleanup tracking
             self.touch_user_file(ip, username, path)
             return result
@@ -391,16 +401,34 @@ class HoneyDB(DatabaseBackend):
             if resolved_path == path:
                  # Found in skeleton! Return ephemeral node.
                  # We need to construct a node dict similar to DB row
+                 meta = item.get('metadata', {}).copy()
+                 if 'owner' not in meta: meta['owner'] = username
+                 if 'group' not in meta: meta['group'] = username
+                 
                  return {
                      'ip': ip,
                      'username': username,
                      'path': resolved_path,
                      'type': item['type'],
-                     'metadata': json.dumps(item.get('metadata', {})),
+                     'metadata': json.dumps(meta),
                      'content': item.get('content'),
                      'created_at': datetime.datetime.now().isoformat() # Fake TS
                  }
                  
+        # 3. Check Global DB (Slowest, Persistence for large static files) 
+        try:
+            conn = self._get_conn()
+            c = conn.cursor()
+            c.execute("SELECT * FROM global_filesystem WHERE path = ?", (path,))
+            row = c.fetchone()
+            if row:
+                columns = [col[0] for col in c.description]
+                return dict(zip(columns, row))
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
         return None
 
     def list_user_dir(self, ip, username, parent_path):
@@ -424,30 +452,88 @@ class HoneyDB(DatabaseBackend):
         
         for item in self.skeleton_cache:
             skel_path = item['path']
-            
-            # Resolve Dynamic Path
             if skel_path.startswith('~'):
                 resolved_path = skel_path.replace('~', home_dir, 1)
             else:
                 resolved_path = skel_path
-                
-            # Check Parent Match
-            # We strictly check if the PARENT of the resolved path matches the requested parent_path
-            item_parent = os.path.dirname(resolved_path)
             
+            item_parent = os.path.dirname(resolved_path)
             if item_parent == parent_path:
                 filename = os.path.basename(resolved_path)
                 if filename not in known_names:
-                     # Add simulated node
+                     meta = item.get('metadata', {}).copy()
+                     if 'owner' not in meta: meta['owner'] = username
+                     if 'group' not in meta: meta['group'] = username
+                     
                      db_items.append({
                          'ip': ip,
                          'username': username,
                          'path': resolved_path,
                          'type': item['type'],
-                         'metadata': json.dumps(item.get('metadata', {})),
+                         'metadata': json.dumps(meta),
                          'content': item.get('content'),
                          'created_at': datetime.datetime.now().isoformat()
                      })
+                     known_names.add(filename) # Update known names for subsequent layers
+
+        # 3. Merge Global DB items (Layer 3)
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT * FROM global_filesystem WHERE parent_path = ?", (parent_path,))
+            rows = c.fetchall()
+            columns = [col[0] for col in c.description]
+            for r in rows:
+                g_item = dict(zip(columns, r))
+                filename = os.path.basename(g_item['path'])
+                if filename not in known_names:
+                    # Adapt global item to user node format
+                    db_items.append({
+                         'ip': ip,
+                         'username': username,
+                         'path': g_item['path'],
+                         'type': g_item['type'],
+                         'metadata': g_item['metadata'],
+                         'content': g_item['content'],
+                         'created_at': g_item['created_at']
+                    })
+                    known_names.add(filename)
+        except Exception as e:
+            log.error(f"Error merging global FS in list_user_dir: {e}")
+        finally:
+             conn.close()
+                     
+        # Final filter: remove any items where we found a tombstone (is_deleted=1) in DB items
+        # Currently list_user_dir fetches ALL from DB.
+        # We need to filter out the ones that are is_deleted=1 from the final list.
+        # But wait, db_items contains them! 
+        
+        final_list = []
+        deleted_paths = set()
+        
+        for item in db_items:
+             if item.get('is_deleted'):
+                 deleted_paths.add(item['path'])
+             else:
+                 final_list.append(item)
+                 
+        # Now check skeleton items
+        # Currently skeleton logic simply appends if filename not in known_names.
+        # known_names should INCLUDE deleted items so we don't re-add skeleton version of a deleted file.
+        
+        # Re-calc known names from ALL db items (including deleted)
+        known_names = set(os.path.basename(i['path']) for i in db_items)
+        
+        # Wait, if I deleted 'foo', it is in db_items with is_deleted=1.
+        # So 'foo' is in known_names.
+        # The loop below: if filename not in known_names -> skips 'foo'.
+        # This is CORRECT! The deleted record "shadows" the skeleton record.
+        # And we filtered 'foo' (deleted) out of final_list above.
+        # So 'foo' will not appear.
+        
+        # We just need to replace db_items with final_list + valid skeleton items
+        
+        db_items = final_list 
                      
         return db_items
 
@@ -462,7 +548,7 @@ class HoneyDB(DatabaseBackend):
     def get_ip_upload_usage(self, ip):
         conn = self._get_conn()
         c = conn.cursor()
-        c.execute("SELECT metadata FROM user_filesystem WHERE ip = ?", (ip,))
+        c.execute("SELECT metadata FROM user_filesystem WHERE ip = ? AND is_deleted = 0", (ip,))
         rows = c.fetchall()
         conn.close()
         
@@ -483,10 +569,11 @@ class HoneyDB(DatabaseBackend):
         
         # Use COALESCE to fallback to created_at if last_accessed is NULL (never read)
         # This implements: "Assume NULL means it was last accessed at create time"
-        c.execute("SELECT ip, username, path FROM user_filesystem WHERE COALESCE(last_accessed, created_at) < ?", (cutoff_time,))
+        # AND is_deleted = 0: Do NOT prune tombstones (which would cause ghost files to reappear from skeleton)
+        c.execute("SELECT ip, username, path FROM user_filesystem WHERE COALESCE(last_accessed, created_at) < ? AND is_deleted = 0", (cutoff_time,))
         to_delete = c.fetchall()
         
-        c.execute("DELETE FROM user_filesystem WHERE COALESCE(last_accessed, created_at) < ?", (cutoff_time,))
+        c.execute("DELETE FROM user_filesystem WHERE COALESCE(last_accessed, created_at) < ? AND is_deleted = 0", (cutoff_time,))
         conn.commit()
         conn.close()
         
@@ -509,10 +596,45 @@ class HoneyDB(DatabaseBackend):
             log.error(f"[DB] Failed to touch user file {path}: {e}")
 
     def delete_user_file(self, ip, username, path):
+         # Tombstone deletion: Mark as deleted instead of removing row
+         # This ensures we shadow any skeleton file with the same path
          conn = self._get_conn()
-         conn.execute("DELETE FROM user_filesystem WHERE ip=? AND username=? AND path=?", (ip, username, path))
-         conn.commit()
-         conn.close()
+         try:
+             # We need parent path? It's not strictly needed for deletion lookup (PK is ip, user, path)
+             # But if it's a new insert (shadowing skeleton), we might need it for completeness?
+             # For now, let's just insert with is_deleted=1.
+             # We might need to fetch parent_path from skeleton if it doesn't exist?
+             # Or just insert minimal info.
+             
+             # If we just allow NULLs for others? schema allows?
+             # user_filesystem has no NOT NULL except PK?
+             # PK is ip, username, path.
+             
+             parent_path = os.path.dirname(path)
+             conn.execute("""
+                INSERT OR REPLACE INTO user_filesystem (ip, username, path, parent_path, is_deleted)
+                VALUES (?, ?, ?, ?, 1)
+             """, (ip, username, path, parent_path))
+             conn.commit()
+         except Exception as e:
+             log.error(f"[DB] Error deleting user file (tombstone) {path}: {e}")
+         finally:
+             conn.close()
+
+    def is_path_deleted(self, ip, username, path):
+        """Checks if a path has a tombstone (is_deleted=1) in the User DB."""
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT is_deleted FROM user_filesystem WHERE ip=? AND username=? AND path=?", (ip, username, path))
+            row = c.fetchone()
+            if row and row[0]:
+                return True
+        except Exception:
+            pass
+        finally:
+            conn.close()
+        return False
 
     def _ensure_parent_dirs(self, conn, ip, username, path):
         """

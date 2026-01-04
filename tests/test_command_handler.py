@@ -81,41 +81,36 @@ class TestCommandHandler:
         context = {'cwd': '/root'}
         
         # 1. Test Fallback to LLM if cache empty
-        self.mock_db.list_fs_dir.return_value = []
-        self.mock_db.list_user_dir.return_value = [] # Default empty
+        # list_user_dir returns unified view. If empty, fallback.
+        self.mock_db.list_user_dir.return_value = [] 
         self.mock_db.get_user_node.return_value = None
-        self.mock_db.get_fs_node.return_value = None
         
         self.mock_llm.generate_response.return_value = '{"output": "file.txt", "generated_files": [{"name": "file.txt", "type": "file"}]}'
         
         resp, updates = handler.handle_ls("ls", context)
         assert "file.txt" in resp
         
-        # 2. Test Cache Hit
-        self.mock_db.list_fs_dir.return_value = [
-            {'path': '/root/old_file.txt', 'metadata': json.dumps({'size': 100})}
+        # 2. Test Cache Hit (Unified)
+        # Verify handle_ls returns files found in list_user_dir without calling LLM
+        self.mock_db.list_user_dir.return_value = [
+            {'path': '/root/old_file.txt', 'metadata': json.dumps({'size': 100}), 'type': 'file'}
         ]
         
         resp_cache, _ = handler.handle_ls("ls", context)
         assert "old_file.txt" in resp_cache
-        # LLM should NOT be called again if cache hit (technically logic is: check DB -> if files -> return)
-        # However, we called it once in step 1.
 
 
     def test_handle_ls_user_uploads(self, handler):
-        """Verify ls merges global files and user uploads"""
+        """Verify ls merges global files and user uploads (Unified in list_user_dir)"""
         context = {'cwd': '/home/user', 'client_ip': '1.2.3.4', 'user': 'user'}
         
-        # Global Files
-        self.mock_db.list_fs_dir.return_value = [
-            {'path': '/home/user/global.txt', 'type': 'file', 'metadata': json.dumps({'size': 10, 'permissions': '-rw-r--r--'})},
-            {'path': '/home/user/conflict.txt', 'type': 'file', 'metadata': json.dumps({'size': 10, 'owner': 'root'})}
-        ]
-        
-        # User Files (Uploads)
+        # We simulate HoneyDB.list_user_dir returning the ALREADY MERGED list
         self.mock_db.list_user_dir.return_value = [
+             # Global File (Merged in by HoneyDB)
+            {'path': '/home/user/global.txt', 'type': 'file', 'metadata': json.dumps({'size': 10, 'permissions': '-rw-r--r--'})},
+             # User File
             {'path': '/home/user/uploaded.txt', 'type': 'file', 'metadata': json.dumps({'size': 20, 'permissions': '-rw-r--r--'})},
-            # This should override global conflict.txt
+             # Conflict (User overrides global) - HoneyDB returns the single correct one
             {'path': '/home/user/conflict.txt', 'type': 'file', 'metadata': json.dumps({'size': 999, 'owner': 'user'})} 
         ]
         
@@ -143,8 +138,58 @@ class TestCommandHandler:
         resp, _ = handler.handle_ls("ls -l /root/secret.txt", context)
         assert "secret.txt" in resp
         assert "123" in resp
+
+    def test_handle_ls_vfs_tombstone(self, handler):
+        """Verify ls hides VFS files if they are tombstoned in DB (Session ghost fix)"""
+        context = {'cwd': '/home/user', 'client_ip': '1.2.3.4', 'user': 'user'}
+        
+        # 1. Setup VFS with "ghost.txt"
+        context['vfs'] = {'/home/user': ['ghost.txt', 'active.txt']}
+        
+        # 2. Mock DB to report ghost.txt as DELETED
+        def mock_is_deleted(ip, user, path):
+            return path.endswith("ghost.txt")
+        self.mock_db.is_path_deleted.side_effect = mock_is_deleted
+        
+        # Mock actual listing (Must include 'active.txt' for it to survive self-healing)
+        self.mock_db.list_user_dir.return_value = [
+            {'path': '/home/user/active.txt', 'type': 'file', 'metadata': json.dumps({'size': 0})}
+        ]
+        
+        # 3. Handle LS
+        resp, _ = handler.handle_ls("ls", context)
+        
+        # 4. Assert
+        assert "active.txt" in resp
+        assert "ghost.txt" not in resp
         # Should not call list logic
         self.mock_db.list_fs_dir.assert_not_called()
+
+    def test_handle_ls_self_healing(self, handler):
+        """Verify ls REMOVES VFS orphans not verified by DB (Self-Healing)."""
+        context = {'cwd': '/home/user', 'client_ip': '1.2.3.4', 'user': 'user'}
+        
+        # 1. Setup VFS with "orphan.txt" (Not in DB)
+        vfs_dict = {'/home/user': ['orphan.txt', 'valid.txt']}
+        context['vfs'] = vfs_dict
+        
+        # 2. Mock DB to have ONLY "valid.txt"
+        # list_user_dir returns verified items
+        self.mock_db.list_user_dir.return_value = [
+            {'path': '/home/user/valid.txt', 'type': 'file', 'metadata': json.dumps({'size': 10})}
+        ]
+        self.mock_db.is_path_deleted.return_value = False # Not tombstoned
+        
+        # 3. Handle LS
+        resp, _ = handler.handle_ls("ls", context)
+        
+        # 4. Assert Output
+        assert "valid.txt" in resp
+        assert "orphan.txt" not in resp
+        
+        # 5. Assert Side Effect (VFS Flushed)
+        assert "orphan.txt" not in vfs_dict['/home/user']
+        assert "valid.txt" in vfs_dict['/home/user']
 
 
     def test_handle_cat_user_upload(self, handler):
@@ -476,3 +521,87 @@ Other		: Something
         # Split logic in handler is cmd.split()[1:]
         expected_args = ['-c', '2', 'localhost']
         handler.network_handlers.handle_ping.assert_called_with(expected_args)
+
+    def test_chaining_semicolon_local(self, handler):
+        """Verify A ; B works locally"""
+        # Mock handlers (need to attach to instance)
+        # We need to ensure getattr(handler, 'handle_echo') returns the mock.
+        # Since handler is the CUT, we can just set attributes if it doesn't conflict.
+        # But wait, handler instance methods are bound.
+        # Better to mock them.
+        handler.handle_echo = MagicMock(return_value=("ECHO_HIT\n", {}, {'source': 'local'}))
+        handler.handle_uname = MagicMock(return_value=("UNAME_HIT\n", {}, {'source': 'local'}))
+        
+        context = {'cwd': '/'}
+        cmd = "echo hi ; uname"
+        
+        resp, _, meta = handler.process_command(cmd, context)
+        
+        assert "ECHO_HIT" in resp
+        assert "UNAME_HIT" in resp
+        assert meta['source'] == 'chain'
+        handler.handle_echo.assert_called()
+        handler.handle_uname.assert_called()
+
+    def test_chaining_and_local_success(self, handler):
+        """Verify A && B works locally when A succeeds"""
+        handler.handle_echo = MagicMock(return_value=("ECHO_HIT\n", {}, {'source': 'local'}))
+        handler.handle_uname = MagicMock(return_value=("UNAME_HIT\n", {}, {'source': 'local'}))
+        
+        context = {'cwd': '/'}
+        cmd = "echo hi && uname"
+        
+        resp, _, meta = handler.process_command(cmd, context)
+        
+        assert "ECHO_HIT" in resp
+        assert "UNAME_HIT" in resp
+        assert meta['source'] == 'chain'
+        handler.handle_echo.assert_called()
+        handler.handle_uname.assert_called()
+
+    def test_chaining_and_local_fail(self, handler):
+        """Verify A && B stops if A fails"""
+        # Mock A to fail
+        # The heuristic in command_handler checks for "bash:" or "command not found"
+        # We need to mock a handler that exists, or allow generic logic?
+        # Let's mock 'grep' as failing?
+        handler.handle_grep = MagicMock(return_value=("bash: grep: command not found", {}, {'source': 'local'}))
+        handler.handle_uname = MagicMock(return_value=("UNAME_HIT\n", {}, {'source': 'local'}))
+        
+        context = {'cwd': '/'}
+        cmd = "grep xyz && uname"
+        
+        resp, _, meta = handler.process_command(cmd, context)
+        
+        assert "command not found" in resp
+        assert "UNAME_HIT" not in resp # B should NOT run
+        assert meta['source'] == 'chain_abort'
+        handler.handle_grep.assert_called()
+        handler.handle_uname.assert_not_called()
+
+    def test_handle_rm_vfs_only(self, handler):
+        """Verify rm deletes files that exist only in VFS (LLM created)"""
+        cwd = "/home/test"
+        filename = "ghost.txt"
+        
+        # Simulate file ONLY in VFS
+        context = {
+            'cwd': cwd,
+            'client_ip': '1.2.3.4',
+            'user': 'test',
+            'vfs': {
+                cwd: [filename] 
+            }
+        }
+        
+        # Mock DB to return nothing (it's a ghost!)
+        handler.db.get_user_node.return_value = None
+        handler.db.get_fs_node.return_value = None
+        
+        # Run rm
+        resp, _ = handler.handle_rm(f"rm {filename}", context)
+        
+        # Assert success (empty output, no error)
+        assert resp == ""
+        # Assert removed from VFS
+        assert filename not in context['vfs'][cwd]
