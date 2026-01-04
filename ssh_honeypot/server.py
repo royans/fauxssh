@@ -21,6 +21,7 @@ try:
     from .alert_manager import AlertManager
     from . import fs_seeder
     from .utils import random_response_delay
+    from .session_logger import SessionLogger
     # Initialize Logging
     from .logger import log
 except ImportError:
@@ -32,6 +33,7 @@ except ImportError:
     from config_manager import config, get_data_dir
     from sftp_handler import HoneySFTPServer
     from alert_manager import AlertManager
+    from session_logger import SessionLogger
     import fs_seeder
     # Logger Fallback
     from logger import log
@@ -364,6 +366,7 @@ def _handle_connection_logic(client, addr):
         log.error(f"[!] Error loading host key: {e}")
         return
 
+    logger = None # Initialize early for finally block
     try:
         transport.add_server_key(host_key)
         
@@ -568,22 +571,54 @@ def _handle_connection_logic(client, addr):
             chan.close()
         except OSError:
             pass # Client disconnected early
+        finally:
+            if logger:
+                logger.close()
         return
 
     prompt = f"\r\n{user}@{hostname}:{cwd}$ "
     chan.send(f"Linux {hostname} 3.16.0-6-amd64 #1 SMP Debian 3.16.56-1+deb8u1 (2018-04-23) x86_64\r\n")
+    if logger: logger.log_event('o', f"Linux {hostname} 3.16.0-6-amd64 #1 SMP Debian 3.16.56-1+deb8u1 (2018-04-23) x86_64\r\n")
+    
     chan.send(f"The programs included with the Debian GNU/Linux system are free software.\r\n")
+    if logger: logger.log_event('o', f"The programs included with the Debian GNU/Linux system are free software.\r\n")
+    
     chan.send(f"Last login: {time.ctime()} from 10.0.0.5\r\n")
+    if logger: logger.log_event('o', f"Last login: {time.ctime()} from 10.0.0.5\r\n")
+    
     chan.send(prompt)
+    if logger: logger.log_event('o', prompt)
     
     command_buffer = ""
     env = {} # persistent environment variables
 
 
 
+
+    # Initialize Session Logger
+    logger = None
+    try:
+        # Check Config
+        if config.get('logging', 'enable_session_replay'):
+            # Get terminal size from pty request if available (defaults to 80x24)
+            term_width = 80
+            term_height = 24
+            # Note: Paramiko doesn't easily expose PTY size in simple server interface without callback override
+            # We'll use defaults for now.
+            
+            logger = SessionLogger(session_id, user, ip, width=term_width, height=term_height)
+            log.info(f"Session recording started: {session_id}.cast")
+    except Exception as e:
+        log.error(f"Failed to start session logger: {e}")
+
     try:
         while True:
             char = chan.recv(1)
+            
+            # Log Input (if logger active)
+            if logger and char:
+                logger.log_event('i', char)
+                
             # ... (Existing loop logic) ...
             if not char:
                 break
@@ -592,9 +627,11 @@ def _handle_connection_logic(client, addr):
             elif char == b'\x03':
                 # Clear buffer, echo ^C, new line
                 chan.send(b'^C\r\n')
+                if logger: logger.log_event('o', '^C\r\n')
                 command_buffer = ""
                 history_cursor = len(history)
                 chan.send(prompt)
+                if logger: logger.log_event('o', prompt)
                 
             # Handle Enter
             elif char == b'\r' or char == b'\n':
@@ -603,6 +640,7 @@ def _handle_connection_logic(client, addr):
                      continue
 
                 chan.send(b'\r\n') # Echo newline
+                if logger: logger.log_event('o', '\r\n')
                 cmd = command_buffer.strip()
                 command_buffer = ""
                 history_cursor = len(history)
@@ -614,7 +652,9 @@ def _handle_connection_logic(client, addr):
                         break
                     if cmd == 'clear':
                         chan.send(b'\033[2J\033[H') # ANSI Clear
+                        if logger: logger.log_event('o', '\033[2J\033[H')
                         chan.send(prompt)
+                        if logger: logger.log_event('o', prompt)
                         continue
                     
                     # --- COMMAND PROCESSING VIA HANDLER ---
@@ -687,8 +727,11 @@ def _handle_connection_logic(client, addr):
                     # Display Output
                     fmt_resp = resp_text.replace('\n', '\r\n')
                     chan.send(fmt_resp)
+                    if logger: logger.log_event('o', fmt_resp)
+                    
                     if fmt_resp and not fmt_resp.endswith('\r\n'):
                         chan.send(b'\r\n')
+                        if logger: logger.log_event('o', '\r\n')
                         
                     # Log Interaction
                     db.log_interaction(
@@ -715,6 +758,7 @@ def _handle_connection_logic(client, addr):
                 # Update prompt with potentially new CWD or User
                 prompt = f"{user}@{hostname}:{cwd}$ "
                 chan.send(prompt)
+                if logger: logger.log_event('o', prompt)
                 history_cursor = len(history) # Reset history cursor
             
             # Handle Backspace (Del or Backspace char)
@@ -771,7 +815,7 @@ def _handle_connection_logic(client, addr):
 
             # Handle Tab (Autocompletion)
             elif char == b'\t':
-                command_buffer = handle_tab_completion(chan, command_buffer, vfs, cwd, prompt)
+                command_buffer = handle_tab_completion(chan, command_buffer, vfs, cwd, prompt, logger)
 
             # Normal Char
             else:
@@ -791,7 +835,7 @@ def _handle_connection_logic(client, addr):
         transport.close()
 
 
-def handle_tab_completion(chan, command_buffer, vfs, cwd, prompt):
+def handle_tab_completion(chan, command_buffer, vfs, cwd, prompt, logger):
     """
     Handles Tab key press for autocompletion.
     Returns the updated command_buffer.
@@ -819,19 +863,25 @@ def handle_tab_completion(chan, command_buffer, vfs, cwd, prompt):
         remainder = match[len(prefix):]
         command_buffer += remainder
         chan.send(remainder)
+        if logger: logger.log_event('o', remainder)
         return command_buffer
         
     elif len(candidates) > 1:
         # Multiple matches
         # Output list on new line
         chan.send(b'\r\n')
+        if logger: logger.log_event('o', '\r\n')
         output_list = "  ".join(candidates)
-        chan.send(output_list)
+        chan.send(output_list.encode('utf-8'))
+        if logger: logger.log_event('o', output_list)
         chan.send(b'\r\n')
+        if logger: logger.log_event('o', '\r\n')
         
         # Redraw prompt and buffer
         chan.send(prompt)
-        chan.send(command_buffer)
+        if logger: logger.log_event('o', prompt)
+        chan.send(command_buffer.encode('utf-8'))
+        if logger: logger.log_event('o', command_buffer)
         return command_buffer
     
     return command_buffer

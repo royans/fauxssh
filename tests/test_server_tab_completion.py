@@ -19,7 +19,7 @@ class TestTabCompletion(unittest.TestCase):
         prompt = "$ "
         
         # Action
-        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt)
+        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
         
         # Assert: No change, no sends
         self.assertEqual(new_buffer, "testfile")
@@ -34,7 +34,7 @@ class TestTabCompletion(unittest.TestCase):
         prompt = "$ "
         
         # Action
-        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt)
+        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
         
         # Assert: Completed to "system.log"
         self.assertEqual(new_buffer, "system.log")
@@ -50,7 +50,7 @@ class TestTabCompletion(unittest.TestCase):
         prompt = "$ "
         
         # Action
-        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt)
+        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
         
         # Assert: Completed last word
         self.assertEqual(new_buffer, "ls system.log")
@@ -65,7 +65,7 @@ class TestTabCompletion(unittest.TestCase):
         prompt = "$ "
         
         # Action
-        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt)
+        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
         
         # Assert: Buffer unchanged
         self.assertEqual(new_buffer, "te")
@@ -74,9 +74,9 @@ class TestTabCompletion(unittest.TestCase):
         # We expect \r\n, list, \r\n, prompt, buffer
         calls = [c[0][0] for c in chan.send.call_args_list]
         self.assertIn(b'\r\n', calls)
-        self.assertIn("test1  test2", calls) # Joined by double space
-        self.assertIn(prompt, calls)
-        self.assertIn(buffer, calls)
+        self.assertIn(b"test1  test2", calls) # Joined by double space
+        self.assertIn("$ ", calls) # prompt (passed as string)
+        self.assertIn(b"te", calls) # buffer (encoded)
 
     def test_empty_buffer(self):
          # If buffer empty, we decided to handle it gracefully (maybe list all? current logic: prefix="")
@@ -87,11 +87,11 @@ class TestTabCompletion(unittest.TestCase):
          cwd = '/'
          prompt = "$ "
          
-         handle_tab_completion(chan, buffer, vfs, cwd, prompt)
+         handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
          
          # Expect listing of 'a  b'
          calls = [c[0][0] for c in chan.send.call_args_list]
-         self.assertIn("a  b", calls)
+         self.assertIn(b"a  b", calls)
 
 if __name__ == '__main__':
     unittest.main()

@@ -12,6 +12,7 @@ FauxSSH deceptively emulates a realistic Linux server, engaging attackers in lon
 
 - **🧠 LLM-Powered Realism**: Uses Google Gemini to dynamically generate file contents (`cat`, `ls`), command responses (`ps aux`, `docker ps`), and error messages.
 - **🕵️‍♂️ Behavioral Analysis**: Automatically analyzes attacker commands for risk, intent, and TTPs (Tactics, Techniques, and Procedures).
+- **📼 Session Replay**: Record full TTY sessions (input/output) in [asciinema](https://asciinema.org) format for playback.
 - **🔒 Safe & Isolated**: All uploaded files are sandboxed. The "filesystem" is virtual and strictly isolated from the host.
 - **🚨 Real-Time Alerting**: Stream high-risk sessions live to Discord or Slack.
 - **📊 Built-in Analytics**: CLI tools to visualize sessions, inspect malware, and correlate threat actors.

@@ -1,8 +1,14 @@
 # Changelog
 
 ## Jan 4th 2026
-- **Analytics Upgrade**: Added "Unique%" column (rarity score), removed command truncation, and implemented advanced sorting (`--sort Risk:Desc`).
-- **IPv6 Support**: Improved analytics filtering to seamlessly handle IPv4-mapped IPv6 addresses.
+- **📼 Session Replay**: Implemented full TTY session recording in `asciinema` v2 format (optional, default off).
+- **🛠️ Advanced Shell Features**:
+    - **Variable Persistence**: Fixed environment variables (`VAR=val`) persisting across commands.
+    - **Complex Assignments**: Support for recursive command execution in assignments (`cpus=$(...)`).
+    - **New Tools**: Native implementation of `cut`, `tr`, `head`, `tail`.
+- **📊 Analytics Upgrade**: Added "Unique%" score, removed truncation, and implemented advanced sorting (`--sort Risk:Desc`).
+- **IPv6 Support**: Improved analytics filtering for IPv4-mapped addresses.
+- **Security**: Hardened internal debug commands (`debug_env`).
 - **Maintenance**: Added automatic cleanup of legacy artifact files (filenames starting with `-`) on startup.
 - **Security Audit**: Verified codebase against SQL injection vulnerabilities (Clean).
 

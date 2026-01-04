@@ -109,7 +109,8 @@ DEFAULT_CONFIG = {
         "timeout": 60
     },
     "logging": {
-        "json_log_file": "data/honeypot.json.log"
+        "json_log_file": "data/honeypot.json.log",
+        "enable_session_replay": False
     },
     "upload": {
         "max_file_size": 1048576, # 1MB
