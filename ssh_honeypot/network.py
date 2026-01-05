@@ -1,3 +1,4 @@
+from .config_manager import config
 import random
 
 class NetworkPersona:
@@ -6,20 +7,39 @@ class NetworkPersona:
     Defines Interfaces, IPs, MACs, and Routing tables.
     """
     def __init__(self):
-        # Configuration - Could be moved to config.yaml later
-        self.hostname = "h100-AI-cluster-01"
-        self.domain = "internal"
+        # Load from Persona Config
+        net_conf = config.get('persona', 'network') or {}
+        sys_conf = config.get('persona', 'system') or {}
         
-        # Consistent Random MACs
-        self.mac_eth0 = f"02:00:17:{random.randint(10,99)}:{random.randint(10,99)}:{random.randint(10,99)}"
-        self.mac_lo = "00:00:00:00:00:00"
+        self.hostname = sys_conf.get('hostname', "h100-AI-cluster-01")
+        self.domain = "internal" # Could be part of hostname extraction
         
         # IP Configuration
-        self.ip_eth0 = "172.16.20.5"
-        self.mask_eth0 = "24"
-        self.cidr_eth0 = "172.16.20.5/24"
-        self.bcast_eth0 = "172.16.20.255"
-        self.gateway = "172.16.20.1"
+        interfaces = net_conf.get('interfaces', {})
+        self.ip_eth0 = interfaces.get('eth0', "172.16.20.5")
+        
+        # Simple/Naive Netmask derivation (Class C default)
+        self.mask_eth0 = "255.255.255.0"
+        self.cidr_suffix = "24"
+        self.cidr_eth0 = f"{self.ip_eth0}/{self.cidr_suffix}"
+        
+        # Broadcast (Naive: assume .255)
+        ip_parts = self.ip_eth0.split('.')
+        if len(ip_parts) == 4:
+            self.bcast_eth0 = f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.255"
+        else:
+            self.bcast_eth0 = "192.168.1.255"
+
+        routes = net_conf.get('routes', {})
+        self.gateway = routes.get('default', "172.16.20.1")
+        
+        # Consistent Random MACs
+        # We ideally want these persistent per persona, but random per session is okay for now?
+        # Actually, if we restart server, they change. 
+        # Ideally we hash the hostname or something to get consistent MACs?
+        # For now, keep random but maybe seeded?
+        self.mac_eth0 = f"02:00:17:{random.randint(10,99)}:{random.randint(10,99)}:{random.randint(10,99)}"
+        self.mac_lo = "00:00:00:00:00:00"
         
         # Stats (increment for realism)
         self.rx_bytes = 1024 * 1024 * random.randint(100, 500)

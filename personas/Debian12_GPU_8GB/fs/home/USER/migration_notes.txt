@@ -1,0 +1,23 @@
+Migration Notes - v3 to v4
+==========================
+
+Date: 2025-12-01
+Status: IN PROGRESS
+
+1. Database Schema
+   - Users table needs index on email column.
+   - [DONE] Convert all MyISAM tables to InnoDB.
+   - Pending: Split the 'logs' table? It's getting too big (40GB).
+
+2. Auth System
+   - Moving from JWT to OAuth2 provider.
+   - Need to update the mobile app keys.
+   
+3. Infrastructure
+   - Current server (Debian 11) is EOL soon? 
+   - Need to upgrade to Debian 12 (Bookworm).
+   - Check if GPU drivers are stable on 12.
+
+TODO:
+- Test restore from S3 backup.
+- Rotate AWS keys (last rotated 2024).

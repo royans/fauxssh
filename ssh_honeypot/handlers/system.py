@@ -31,41 +31,33 @@ class SystemHandler(BaseHandler):
         d_pretty = config.get('persona', 'distro_pretty_name') or "Debian GNU/Linux 11 (bullseye)"
         d_version_text = config.get('persona', 'distro_version') or "11 (bullseye)"
 
-        self.STATIC_FILES = {
-            '/etc/issue': f"Debian GNU/Linux {d_ver} \\n \\l\n\n",
-            '/etc/debian_version': f"{d_ver}.7\n",
-            '/proc/version': f"Linux version {k_rel} (debian-kernel@lists.debian.org) (gcc-10 (Debian 10.2.1-6) 10.2.1 20210110) {k_ver}\n",
-            '/etc/os-release': f"""PRETTY_NAME="{d_pretty}"
-NAME="Debian GNU/Linux"
-VERSION_ID="{d_ver}"
-VERSION="{d_version_text}"
-ID=debian
-HOME_URL="https://www.debian.org/"
-SUPPORT_URL="https://www.debian.org/support"
-BUG_REPORT_URL="https://bugs.debian.org/"
-"""
-        }
+        self.STATIC_FILES = {}
         
         self.DYNAMIC_FILES = {
             '/proc/uptime': self.generate_proc_uptime
         }
 
+    def _get_uptime_seconds(self):
+        # Base uptime: ~14 days (1209600s) + jitter
+        # We use a deterministic base + time of day to simulated a continuously running server
+        # without effective reboots unless we want to reset.
+        # But for 'uptime' command consistency, we just need it to be consistent within a short window?
+        # Simpler: Just make it look like it's been up 14 days + however many hours/seconds since start of day
+        
+        base_days = 14
+        base_seconds = 1209600
+        
+        now = datetime.datetime.now()
+        # Add seconds since midnight + jitter
+        seconds_today = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
+        
+        total_uptime = base_seconds + seconds_today
+        idle_time = total_uptime * 0.98 # Mostly idle
+        
+        return total_uptime, idle_time
+
     def generate_proc_uptime(self):
-        # Match handle_uptime's "14 days, 3:12" roughly.
-        # 14 days = 1209600s
-        # 3h 12m = 11520s
-        # Total ~ 1.22 million seconds
-        # We add some randomness to simulated "now" vs boot
-        base_uptime = 1221120.0 
-        idle_time = base_uptime * 0.98 # Mostly idle
-        
-        # Add small jitter based on time of day (minutes)
-        now_min = datetime.datetime.now().minute
-        jitter = now_min * 60
-        
-        up = base_uptime + jitter
-        idle = idle_time + jitter
-        
+        up, idle = self._get_uptime_seconds()
         return f"{up:.2f} {idle:.2f}\n"
 
     def get_dynamic_file(self, path):
@@ -138,14 +130,24 @@ BUG_REPORT_URL="https://bugs.debian.org/"
         return " ".join(out) + "\n", {}
 
     def handle_uptime(self, cmd, context):
-        now = datetime.datetime.now().strftime("%H:%M:%S")
+        now_dt = datetime.datetime.now()
+        now_str = now_dt.strftime("%H:%M:%S")
+        
+        # Calculate human friendly uptime from our consistent source
+        total_seconds, _ = self._get_uptime_seconds()
+        
+        days = int(total_seconds // 86400)
+        rem = total_seconds % 86400
+        hours = int(rem // 3600)
+        minutes = int((rem % 3600) // 60)
         
         # Randomize load slightly to look alive
         l1 = round(random.uniform(0.01, 0.20), 2)
         l5 = round(random.uniform(0.01, 0.15), 2)
         l15 = round(random.uniform(0.00, 0.10), 2)
         
-        return f" {now} up 14 days,  3:12,  2 users,  load average: {l1:.2f}, {l5:.2f}, {l15:.2f}\n", {}
+        # Format: 17:05:01 up 14 days,  7:22,  2 users,  load average: 0.12, 0.08, 0.02
+        return f" {now_str} up {days} days, {hours}:{minutes:02d},  1 user,  load average: {l1:.2f}, {l5:.2f}, {l15:.2f}\n", {}
 
     def handle_ifconfig(self, cmd, context):
         hp_ip = context.get('honeypot_ip', '192.168.1.55')

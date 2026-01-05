@@ -79,7 +79,14 @@ class LLMInterface:
 
         # Fill Template
         try:
-            prompt = self.prompt_template.format(
+            # 1. Try Persona Prompt
+            template = config.get('persona', 'prompts', 'system_prompt')
+            
+            # 2. Fallback to File
+            if not template:
+                 template = self.prompt_template
+
+            prompt = template.format(
                 hostname=config.get('server', 'hostname') or 'npc-main-server-01',
                 user="alabaster", # TODO: pass user from context
                 honeypot_ip=honeypot_ip,
@@ -96,6 +103,25 @@ class LLMInterface:
 
         
         return self._call_api(prompt)
+
+    def generate_content(self, command, url, persona_summary):
+        """
+        Generates dynamic content (HTML/JSON) for wget/curl emulation.
+        """
+        try:
+            template = config.get('persona', 'prompts', 'generate_content')
+            if not template:
+                return "Error: Content generation not configured."
+            
+            prompt = template.format(
+                command=command,
+                url=url,
+                persona_summary=persona_summary
+            )
+            return self._call_api(prompt)
+        except Exception as e:
+            log.error(f"[!] Content Generation Error: {e}")
+            return "Error: Content generation failed."
 
     def _call_api(self, prompt):
         headers = {'Content-Type': 'application/json'}
@@ -147,9 +173,15 @@ class LLMInterface:
         Returns dict: {type, stage, risk, explanation}
         """
         try:
-            prompt_path = os.path.join(os.path.dirname(__file__), 'prompts', 'analysis_prompt.txt')
-            with open(prompt_path, 'r') as f:
-                template = f.read()
+            # 1. Try Persona Prompt
+            template = config.get('persona', 'prompts', 'analysis')
+            
+            # 2. Fallback
+            if not template:
+                prompt_path = os.path.join(os.path.dirname(__file__), 'prompts', 'analysis_prompt.txt')
+                with open(prompt_path, 'r') as f:
+                    template = f.read()
+
         except:
              # Fallback prompt if file missing
              template = """

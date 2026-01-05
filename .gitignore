@@ -6,6 +6,9 @@ __pycache__/
 # C extensions
 *.so
 
+nohup.out
+*.sqlite
+
 # Distribution / packaging
 .Python
 build/
@@ -212,3 +215,5 @@ ssh_honeypot/.env
 # Runtime Data
 data/*
 !data/.gitkeep
+!data/personas/
+

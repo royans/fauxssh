@@ -60,6 +60,18 @@ class ParamikoFilter(logging.Filter):
 logging.getLogger("paramiko.transport").addFilter(ParamikoFilter())
 # -----------------------------------------
 
+# Argument Parsing
+import argparse
+parser = argparse.ArgumentParser(description="SSR - Safe SSH Replay Honeypot")
+parser.add_argument("--persona", type=str, help="Name (in data/personas) or Path to persona directory")
+args, unknown = parser.parse_known_args()
+
+# Reload Persona if Argument Provided
+if args.persona:
+    config.load_persona(args.persona)
+
+
+
 try:
     PORT = int(os.getenv('SSHPOT_PORT', config.get('server', 'port') or 2222))
 except ValueError:
@@ -212,13 +224,14 @@ class HoneypotServer(paramiko.ServerInterface):
 
                     count = len(unique_users)
                     
-                    if count >= 5:
+                    max_auth = config.get('persona', 'access_control', 'max_auth_tries_per_ip') or 5
+                    if count >= max_auth:
                         # Hard Block: Too many unique successful logins
                         log.warning(f"[!] Anti-Harvesting: Blocking {self.client_ip} for user '{username}' (Limit Reached: {count})")
                         return paramiko.AUTH_FAILED
                     
                     # Probability Rejection: 1->20%, 2->40%, 3->60%, 4->80%
-                    prob = count / 5.0
+                    prob = count / float(max_auth)
                     if random.random() < prob:
                          log.warning(f"[!] Anti-Harvesting: Randomly blocking {self.client_ip} for user '{username}' (Prob: {prob:.2f})")
                          return paramiko.AUTH_FAILED
@@ -226,7 +239,14 @@ class HoneypotServer(paramiko.ServerInterface):
             except Exception as e:
                 log.error(f"[!] Error in Anti-Harvesting check: {e}")
 
-        success = (username != 'root')
+        # Check Root Policy
+        allow_root = config.get('persona', 'access_control', 'allow_root')
+        if allow_root is None: allow_root = False # Default strict
+        
+        if username == 'root' and not allow_root:
+             success = False
+        else:
+             success = True
         
         client_version = "unknown"
         if self.transport_ref:

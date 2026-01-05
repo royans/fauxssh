@@ -2201,8 +2201,8 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 response_pre += f"Saving to: '{output_file}'\n\n"
         
         # Ask LLM for content
-        prompt = f"Generate the likely source code (HTML/Shell Script) for the URL: {url}. user-agent: {user_agent}. Return ONLY the file content, no markdown."
-        content = self.llm.generate_response(cmd, context.get('cwd'), override_prompt=prompt)
+        persona_sum = config.get('persona', 'description') or "Generic Linux Server"
+        content = self.llm.generate_content(cmd, url, persona_sum)
         
         # Post-Processing
         if output_file:
@@ -2294,11 +2294,12 @@ Sector size (logical/physical): 512 bytes / 512 bytes
              return content + "\n", {}
 
         # Hybrid LLM
-        prompt = f"Generate the likely source code for URL: {url}. Return ONLY the file content."
+        persona_sum = config.get('persona', 'description') or "Generic Linux Server"
+        # Append "HEAD request" hint to persona if needed, or rely on cmd in prompt
         if is_head:
-             prompt = f"Generate HTTP Headers for URL: {url}. Return ONLY the headers."
+             persona_sum += " (User requested HTTP HEADERS only)"
              
-        content = self.llm.generate_response(cmd, context.get('cwd'), override_prompt=prompt)
+        content = self.llm.generate_content(cmd, url, persona_sum)
         
         if output_file and not is_head:
              abs_path = self._resolve_path(context.get('cwd'), output_file)

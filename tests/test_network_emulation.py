@@ -18,21 +18,21 @@ class TestNetworkEmulation(unittest.TestCase):
         """Verify ip addr format"""
         output = network_persona.get_ip_addr_output()
         self.assertIn("eth0", output)
-        self.assertIn("172.16.20.5/24", output)
+        self.assertIn("192.168.1.5/24", output)
         self.assertIn("UP,LOWER_UP", output)
         self.assertIn("link/ether", output)
 
     def test_ip_route_output(self):
         """Verify ip route format"""
         output = network_persona.get_ip_route_output()
-        self.assertIn("default via 172.16.20.1", output)
-        self.assertIn("172.16.20.5", output)
+        self.assertIn("default via 192.168.1.1", output)
+        self.assertIn("192.168.1.5", output)
 
     def test_ifconfig_output(self):
         """Verify ifconfig format"""
         output = network_persona.get_ifconfig_output()
         self.assertIn("eth0: flags", output)
-        self.assertIn("inet 172.16.20.5", output)
+        self.assertIn("inet 192.168.1.5", output)
         self.assertIn("netmask 255.255.255.0", output)
         self.assertIn("MiB", output)
         
