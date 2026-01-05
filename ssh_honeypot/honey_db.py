@@ -464,14 +464,25 @@ class HoneyDB(DatabaseBackend):
         
         home_dir = "/root" if username == "root" else f"/home/{username}"
         
+        home_dir = "/root" if username == "root" else f"/home/{username}"
+        
+        # DEBUG: Trace list_user_dir for startup issues
+        log.info(f"[DB trace] list_user_dir {parent_path}. Cache: {len(self.skeleton_cache)}")
+        
         for item in self.skeleton_cache:
             skel_path = item['path']
+            # log.debug(f"[DB trace] Item: {skel_path}")
             if skel_path.startswith('~'):
                 resolved_path = skel_path.replace('~', home_dir, 1)
             else:
                 resolved_path = skel_path
             
             item_parent = os.path.dirname(resolved_path)
+            
+            # DEBUG TRACE
+            if "aws_keys.txt" in skel_path:
+               print(f"[DB DEBUG] Checking skel item: {skel_path} -> {resolved_path} (Parent: {item_parent} vs Requested: {parent_path})")
+
             if item_parent == parent_path:
                 filename = os.path.basename(resolved_path)
                 if filename not in known_names:

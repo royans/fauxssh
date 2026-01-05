@@ -13,6 +13,7 @@ import logging
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
 
 from ssh_honeypot.config_manager import config
+from ssh_honeypot.persona_validator import validate_active_persona
 
 def validate_persona(name_or_path):
     print(f"[*] Validating Persona: {name_or_path}")
@@ -27,27 +28,9 @@ def validate_persona(name_or_path):
         
     print(f"[*] Loaded Persona: {persona.get('name', 'Unknown')}")
     
-    errors = []
+    is_valid, errors = validate_active_persona(config)
     
-    # 1. Structural Checks
-    required_sections = ['system', 'network', 'prompts', 'access_control']
-    for sec in required_sections:
-        if sec not in persona:
-            errors.append(f"Missing section: '{sec}'")
-            
-    # 2. Field Checks
-    if 'system' in persona:
-        if not persona['system'].get('hostname'): errors.append("Missing system.hostname")
-        
-    if 'prompts' in persona:
-        if not persona['prompts'].get('system_prompt'): errors.append("Missing prompts.system_prompt")
-        
-    # 3. Access Control checks
-    if 'access_control' in persona:
-        ac = persona['access_control']
-        if 'allow_root' not in ac: errors.append("Missing access_control.allow_root")
-        
-    if errors:
+    if not is_valid:
         print("[!] Validation Failed:")
         for e in errors:
             print(f"  - {e}")

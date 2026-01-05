@@ -267,6 +267,13 @@ class ConfigManager:
              with open(debug_log, "a") as df:
                  df.write(f"        Resolved Path: {fpath} (Exists: {os.path.exists(fpath)})\n")
         except: pass
+        
+        # Explicit Console Debugging (Requested by User)
+        print(f"[DEBUG] Validating Persona Path: {fpath}")
+        if not os.path.exists(fpath):
+            print(f"[DEBUG] FAILED: Path does not exist!")
+            print(f"[DEBUG] Current CWD: {os.getcwd()}")
+            print(f"[DEBUG] personas_dir: {personas_dir}")
 
         if os.path.exists(fpath):
             try:

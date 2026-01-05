@@ -36,9 +36,15 @@ def get_skeleton_data(json_path=None):
 
     # 3. Load Filesystem Overlay from Persona
     fs_path = config.get('persona', '_fs_path')
+    
+    print(f"[DEBUG] FS Seeder: _fs_path from config is '{fs_path}'")
+    
     if fs_path and os.path.exists(fs_path):
         # logging.info(f"Loading filesytem overlay from {fs_path}")
         overlay_nodes = load_overlay_nodes(fs_path)
+        print(f"[DEBUG] FS Seeder: Loaded {len(overlay_nodes)} overlay nodes.")
+    else:
+        print(f"[DEBUG] FS Seeder: Skipping overlay! Path invalid or missing.")
         
         # Merge Strategy: Overwrite existing paths with new nodes
         # Create map for quick lookup
@@ -52,6 +58,10 @@ def get_skeleton_data(json_path=None):
             else:
                 nodes.append(new_node)
                 node_map[path] = len(nodes) - 1
+        
+        # User requested explicit logging validation
+        user_files_count = sum(1 for n in overlay_nodes if n['path'].startswith('~'))
+        logging.info(f"Persona Overlay: Fully loaded {len(overlay_nodes)} files, including {user_files_count} in users directory.")
 
     return nodes
 

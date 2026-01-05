@@ -24,6 +24,7 @@ try:
     from .session_logger import SessionLogger
     # Initialize Logging
     from .logger import log
+    from .persona_validator import validate_active_persona
 except ImportError:
     # Fallback for direct execution
     from honey_db import HoneyDB
@@ -37,6 +38,7 @@ except ImportError:
     import fs_seeder
     # Logger Fallback
     from logger import log
+    from persona_validator import validate_active_persona
 
 
 # Settings
@@ -69,6 +71,20 @@ args, unknown = parser.parse_known_args()
 # Reload Persona if Argument Provided
 if args.persona:
     config.load_persona(args.persona)
+
+# --- Persona Validation ---
+is_valid_persona, p_errors = validate_active_persona(config)
+p_name = config.get('persona', 'name') or "Unknown"
+
+if is_valid_persona:
+    log.info(f"Persona '{p_name}' loaded and validated successfully.")
+else:
+    log.critical(f"Persona '{p_name}' validation FAILED:")
+    for e in p_errors:
+        log.critical(f"  - {e}")
+    log.critical("Exiting due to invalid configuration.")
+    exit(1)
+# ---------------------------
 
 
 
