@@ -36,7 +36,7 @@ class LLMInterface:
             self.prompt_template = "Error: Prompt template missing."
 
 
-    def generate_response(self, command, cwd, history_context=[], file_list=[], known_paths=[], client_ip="Unknown", honeypot_ip="192.168.1.55", override_prompt=None):
+    def generate_response(self, command, cwd, user="root", history_context=[], file_list=[], known_paths=[], client_ip="Unknown", honeypot_ip="192.168.1.55", override_prompt=None):
         """
         Generates a terminal response for the given command.
         history_context: List of tuples (cmd, response) for context.
@@ -85,10 +85,13 @@ class LLMInterface:
             # 2. Fallback to File
             if not template:
                  template = self.prompt_template
+            
+            # Ensure user is valid (fallback to root if somehow None)
+            current_user = user if user else "root"
 
             prompt = template.format(
                 hostname=config.get('server', 'hostname') or 'npc-main-server-01',
-                user="alabaster", # TODO: pass user from context
+                user=current_user,
                 honeypot_ip=honeypot_ip,
                 client_ip=client_ip,
                 cwd=cwd,

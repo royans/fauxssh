@@ -468,19 +468,12 @@ def _handle_connection_logic(client, addr):
     # COW REFACTOR: Removed ensure_user_home. 
     # HoneyDB now handles default file visibility via Skeleton layer.
     
+    # Virtual Filesystem State (Simple Dict: Path -> List of Filenames)
+    # Refactored: We now rely on HoneyDB as the source of truth.
+    # 'vfs' dict here is only for quick session info or legacy support if needed,
+    # but actual directory listing for LLM should come from DB.
+    
     vfs = {
-        cwd: [
-            "blogofy_db_dump_2021.sql",
-            "access_log.old.gz",
-            "migration_notes.txt",
-            "deploy_v3.sh",
-            "docker-compose.yml.bak",
-            "aws_keys.txt",
-            "id_rsa_backup",
-            "wallet.dat",
-            ".bash_history",
-            ".profile"
-        ],
         "/tmp": [],
         "/var/www/html": ["index.php", "config.php", "assets", "uploads"]
     }
@@ -527,8 +520,11 @@ def _handle_connection_logic(client, addr):
             'honeypot_ip': "192.168.1.55",
             'session_id': session_id,
             'llm_call_count': llm_call_count,
-            'file_list': vfs.get(cwd, []),
-            'known_paths': list(vfs.keys())
+            'honeypot_ip': "192.168.1.55",
+            'session_id': session_id,
+            'llm_call_count': llm_call_count,
+            'file_list': [os.path.basename(x['path']) for x in db.list_user_dir(ip, user, cwd)],
+            'known_paths': list(vfs.keys()) # Generic known paths, less critical
         }
         
         # Intercept SCP Interactive
@@ -705,7 +701,9 @@ def _handle_connection_logic(client, addr):
                         'client_ip': ip,
                         'honeypot_ip': "192.168.1.55",
                         'llm_call_count': llm_call_count,
-                        'file_list': vfs.get(cwd, []),
+                        'honeypot_ip': "192.168.1.55",
+                        'llm_call_count': llm_call_count,
+                        'file_list': [os.path.basename(x['path']) for x in db.list_user_dir(ip, user, cwd)],
                         'known_paths': list(vfs.keys())
                     }
                     

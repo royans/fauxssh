@@ -2,11 +2,15 @@ import json
 import re
 import os
 import datetime
+from .filesystem_utils import resolve_path, expand_wildcards
+from .command.command_handler_ls import LSCommand
 import time
 import hashlib
-import json
 import logging
 import fnmatch
+import shlex
+
+log = logging.getLogger("sshpot")
 try:
     from .utils import random_response_delay
 except ImportError:
@@ -29,6 +33,8 @@ class CommandHandler:
     def __init__(self, llm_interface, db):
         self.llm = llm_interface
         self.db = db
+        self.ls_handler = LSCommand(db)
+
         self.honey_db = db # Alias for newer handlers
 
 
@@ -189,6 +195,17 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 """
         return output, {}, {'source': 'local', 'cached': False}
 
+
+    def handle_ls(self, cmd, context):
+        return self.ls_handler.handle(cmd, context)
+
+    def old_handle_ls_removed(self, cmd, context):
+        """
+        Legacy code removed. logic moved to ssh_honeypot.command.command_handler_ls
+        """
+        pass
+
+
     def handle_history(self, cmd, context):
         """
         Lists or clears history.
@@ -284,44 +301,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         return "\n".join(output)
 
 
-    def _expand_wildcards(self, pattern, context):
-        """
-        Expands a glob pattern (e.g. *.txt, /tmp/*.log) into a list of matching filenames/paths.
-        Returns sorted list of matches.
-        """
-        if '*' not in pattern and '?' not in pattern and '[' not in pattern:
-            return []
-
-        cwd = context.get('cwd', '/')
-        client_ip = context.get('client_ip')
-        user = context.get('user')
-        
-        dirname = os.path.dirname(pattern)
-        basename_pattern = os.path.basename(pattern)
-        
-        # Resolve the directory to search in
-        if dirname:
-            search_path = self._resolve_path(cwd, dirname)
-            prefix = dirname
-        else:
-            search_path = cwd
-            prefix = ""
-            
-        # Get files
-        items = self.db.list_user_dir(client_ip, user, search_path)
-        filenames = [os.path.basename(i['path']) for i in items]
-        
-        # Filter
-        matches = fnmatch.filter(filenames, basename_pattern)
-        
-        if not matches:
-            return []
-            
-        # Reconstruct paths
-        if prefix:
-             return sorted([os.path.join(prefix, m) for m in matches])
-        
-        return sorted(matches)
+    # _resolve_path and _expand_wildcards moved to filesystem_utils.py
 
     def process_command(self, cmd, context):
         """
@@ -432,6 +412,72 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                      f"----------------------------------\n"
                  )
                  return debug_out, {}, {'source': 'debug', 'cached': False}
+
+        # 0.4 Admin Debug Utilities (Restricted)
+        if cmd.startswith('debug_'):
+             client_ip = context.get('client_ip')
+             ignored_ips = get_ignored_ips()
+             
+             # Strict Authentication
+             if client_ip not in ignored_ips:
+                # Stealth: Do not reveal that this command exists to unauthorized IPs.
+                # Fall through to standard processing (LLM or "command not found").
+                pass
+             else:
+                 parts = cmd.split()
+                 op = parts[0]
+                 
+                 if op == 'debug_vfs':
+                     # Usage: debug_vfs [path] (file ordir)
+                     path = parts[1] if len(parts) > 1 else context.get('cwd', '/')
+                     
+                     # Resolve path
+                     abs_path = resolve_path(context.get('cwd', '/'), path)
+                     
+                     # Determine if it's a directory check or path check
+                     # Heuristic: If it looks like a dir or is CWD
+                     
+                     # Let's try inspect_path first.
+                     # Actually, inspect_dir is richer for "ls -la" style debugging.
+                     # inspect_path is "stat" style.
+                     
+                     # If no arg provided -> inspect_dir(CWD)
+                     if len(parts) == 1:
+                          report = self.db.inspect_dir(client_ip, context.get('user'), abs_path)
+                          return report + "\n", {}, {'source': 'debug', 'cached': False}
+                     
+                     # If arg provided, check what it is via DB?
+                     # Or just run both?
+                     # Let's run inspect_path.
+                     report = self.db.inspect_path(client_ip, context.get('user'), abs_path)
+                     
+                     # If inspect_path says "ACTIVE directory", maybe show dir listing too?
+                     # For now simple path inspection is fine.
+                     return report + "\n", {}, {'source': 'debug', 'cached': False}
+    
+                 elif op == 'debug_vfs_ls':
+                     # Explicit Dir List
+                     path = parts[1] if len(parts) > 1 else context.get('cwd', '/')
+                     # Resolving path similar to debug_vfs, but simpler call to debug inspect
+                     abs_path = resolve_path(context.get('cwd', '/'), path)
+                     report = self.db.inspect_dir(client_ip, context.get('user'), abs_path)
+                     return report + "\n", {}, {'source': 'debug', 'cached': False}
+
+                 elif op == 'debug_context':
+                     # Inspect current context passed to handlers
+                     file_list = context.get('file_list', [])
+                     output = f"--- Debug Context ---\n"
+                     output += f"CWD: {context.get('cwd')}\n"
+                     output += f"User: {context.get('user')}\n"
+                     output += f"Client IP: {context.get('client_ip')}\n"
+                     output += f"File List ({len(file_list)} items): {file_list}\n"
+                     return output, {}, {'source': 'debug', 'cached': False}
+
+                 elif op == 'debug_env':
+                     return f"DEBUG ENV: {context.get('env')}\n", {}, {'source': 'debug', 'cached': False}
+
+                 else:
+                     return f"Debug command '{op}' not recognized.\nAvailable: debug_vfs [path], debug_vfs_ls [dir], debug_context, debug_env\n", {}, {'source': 'debug', 'cached': False}
 
         # 0. Special Recon Script Interception (Botnet optimization)
         recon_resp = self._handle_known_recon(cmd, context)
@@ -625,7 +671,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                  right_file = right_file[1:-1]
                  
             # Resolve path
-            abs_path = self._resolve_path(cwd, right_file)
+            abs_path = resolve_path(cwd, right_file)
             
             if not self._is_modification_allowed(abs_path):
                  return f"bash: {right_file}: Permission denied\n", {}, {'source': 'local', 'cached': False}
@@ -667,7 +713,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
              # We stick to standard: only check if it resolves to absolute path AND (is absolute OR starts with ./)
              pass 
         
-        abs_path = self._resolve_path(cwd, potential_path)
+        abs_path = resolve_path(cwd, potential_path)
         
         # Only check DB if it looks like a path execution (contains /) OR if we want to be generous
         if '/' in potential_path: 
@@ -969,111 +1015,6 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                  
         return out, up, {'source': 'llm', 'cached': False}
 
-    def handle_ls(self, cmd, context):
-        # 1. Parse Args
-        parts = cmd.split()
-        flags = set()
-        raw_targets = []
-        
-        for p in parts[1:]:
-            if p.startswith('-'):
-                for char in p[1:]:
-                     flags.add(char)
-            else:
-                raw_targets.append(p)
-        
-        # 2. Expand Wildcards
-        targets = []
-        if not raw_targets:
-            targets.append(context.get('cwd')) # Default to CWD if no targets
-        else:
-            for t in raw_targets:
-                if '*' in t or '?' in t or '[' in t:
-                    matches = self._expand_wildcards(t, context)
-                    if matches:
-                        targets.extend(matches)
-                    else:
-                        # LS behavior: if glob fails, pass literal.
-                        # It will likely fail "No such file".
-                        targets.append(t)
-                else:
-                    targets.append(t)
-                    
-        # 3. Process each target
-        # If multiple targets, ls prints filename: ... or just lists them? 
-        # Standard ls: lists files directly, lists dir contents with header if multiple dirs.
-        # For simplification, we'll just merge all outputs.
-        
-        all_nodes = []
-        
-        # Helper to fetch nodes for a path
-        def fetch_nodes_for_path(target_path):
-            abs_path = self._resolve_path(context.get('cwd'), target_path)
-            client_ip = context.get('client_ip')
-            user = context.get('user')
-            
-            # A. Check Specific File (User -> Global)
-            user_node = self.db.get_user_node(client_ip, user, abs_path)
-            if user_node:
-                 if 'd' in flags or user_node.get('type') == 'file':
-                     return [user_node]
-            
-            # B. It's a directory (or treated as one)
-            # HoneyDB.list_user_dir now handles merging (User > Skeleton > Global) 
-            # and respects Tombstones.
-            user_files = self.db.list_user_dir(client_ip, user, abs_path)
-            
-            # Map for VFS merging
-            file_map = {f['path'].split('/')[-1]: f for f in user_files}
-                
-            # Merge Session VFS
-            vfs_data = context.get('vfs', {})
-            if abs_path in vfs_data:
-                 # Self-Healing: Iterate copy to flush orphans
-                 for fname in list(vfs_data[abs_path]):
-                     full_vfs_path = os.path.join(abs_path, fname)
-                     
-                     # 1. Check Tombstone (Explicitly deleted)
-                     if self.db.is_path_deleted(context.get('client_ip'), user, full_vfs_path):
-                         vfs_data[abs_path].remove(fname)
-                         continue
-
-                     # 2. Check Persistence (Must exist in DB/Skeleton/Global)
-                     # If not in file_map, it's a VFS-only ghost/artifact -> Flush it.
-                     if fname not in file_map:
-                         vfs_data[abs_path].remove(fname)
-                         continue
-            
-            return list(file_map.values())
-
-        # If we have multiple targets, we might need to separate output?
-        # Simpler: just collect ALL nodes. 
-        # But wait, ls /tmp /home -> lists /tmp contents AND /home contents.
-        # Our _format_ls_output takes a flat list.
-        # If we list multiple dirs, it will mash them together.
-        # Ideally, we should iterate and print?
-        # But _format_ls_output handles column formatting for the whole set.
-        
-        # Let's iterate and collect ALL nodes.
-        for t in targets:
-            nodes = fetch_nodes_for_path(t)
-            # If nodes is empty and we expected something?
-            # fetch_nodes_for_path returns empty list if dir empty OR path invalid.
-            # We don't distinguish "No such file" here cleanly.
-            # Ideally we check existence first.
-            if not nodes:
-                 # Check if path existed? 
-                 # For now, just continue (empty dir or invalid path logic needs refinement but good enough for MVP)
-                 pass
-            all_nodes.extend(nodes)
-            
-        if not all_nodes:
-            # Fallback to LLM if we found nothing locally (Unknown dir or empty)
-            # Must return 2 values to match handle_ls contract expected by tests
-            resp, ups, _ = self.handle_generic(cmd, context)
-            return resp, ups
-
-        return self._format_ls_output(all_nodes, flags), {}
 
         # 3. Check Global FS Cache (Treat as Directory)
         cached_files = self.db.list_fs_dir(abs_path)
@@ -1232,7 +1173,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         
         # Resolve target path relative to CWD
         cwd = context.get('cwd', '/')
-        abs_path = self._resolve_path(cwd, target_path)
+        abs_path = resolve_path(cwd, target_path)
         
         # Check integrity
         # Check User FS first (override)
@@ -1347,7 +1288,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         cwd = context.get('cwd')
         
         # 0. Check DB (User FS overrides Global FS)
-        abs_path = self._resolve_path(cwd, target_path)
+        abs_path = resolve_path(cwd, target_path)
         client_ip = context.get('client_ip')
         user = context.get('user')
         
@@ -1815,7 +1756,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             
         target_path = parts[-1] # Simplistic arg parsing
         cwd = context.get('cwd', '/')
-        abs_path = self._resolve_path(cwd, target_path)
+        abs_path = resolve_path(cwd, target_path)
         
         # 1. Check Real Persisted File (Uploads)
         # We need access to UPLOAD_DIR or ask DB where it is?
@@ -1934,7 +1875,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if len(parts) < 2: return "touch: missing file operand\n", {}
         
         target_path = parts[1]
-        abs_path = self._resolve_path(context.get('cwd'), target_path)
+        abs_path = resolve_path(context.get('cwd'), target_path)
         
         if not self._is_modification_allowed(abs_path):
              return f"touch: cannot touch '{target_path}': Permission denied\n", {}
@@ -1960,7 +1901,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if len(parts) < 2: return "mkdir: missing operand\n", {}
         
         target_path = parts[1]
-        abs_path = self._resolve_path(context.get('cwd'), target_path)
+        abs_path = resolve_path(context.get('cwd'), target_path)
         
         if not self._is_modification_allowed(abs_path):
              return f"mkdir: cannot create directory '{target_path}': Permission denied\n", {}
@@ -1981,7 +1922,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         parts = cmd.split()
         if len(parts) < 2: return "rmdir: missing operand\n", {}
         target_path = parts[1]
-        abs_path = self._resolve_path(context.get('cwd'), target_path)
+        abs_path = resolve_path(context.get('cwd'), target_path)
         
         if not self._is_modification_allowed(abs_path):
              return f"rmdir: failed to remove '{target_path}': Permission denied\n", {}
@@ -2020,7 +1961,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         expanded_targets = []
         for t in targets:
             if '*' in t or '?' in t or '[' in t:
-                matches = self._expand_wildcards(t, context)
+                matches = expand_wildcards(self.db, t, context)
                 if matches:
                     expanded_targets.extend(matches)
                 else:
@@ -2034,7 +1975,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             # _expand_wildcards returns paths relative to CWD if pattern was relative?
             # My impl returns joined paths.
             # _resolve_path handles both absolute and relative 
-            abs_path = self._resolve_path(context.get('cwd'), t)
+            abs_path = resolve_path(context.get('cwd'), t)
             
             if not self._is_modification_allowed(abs_path):
                  output += f"rm: cannot remove '{t}': Permission denied\n"
@@ -2067,7 +2008,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 
             self.db.delete_user_file(client_ip, user, abs_path)
             
-        mods = [{'action': 'delete', 'path': self._resolve_path(context.get('cwd'), t)} for t in targets]
+        mods = [{'action': 'delete', 'path': resolve_path(context.get('cwd'), t)} for t in targets]
         return output, {'file_modifications': mods}
 
     def handle_cp(self, cmd, context):
@@ -2080,8 +2021,8 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         src = args[0]
         dest = args[1]
         
-        abs_src = self._resolve_path(context.get('cwd'), src)
-        abs_dest = self._resolve_path(context.get('cwd'), dest)
+        abs_src = resolve_path(context.get('cwd'), src)
+        abs_dest = resolve_path(context.get('cwd'), dest)
         
         if not self._is_modification_allowed(abs_dest):
              return f"cp: cannot create regular file '{dest}': Permission denied\n", {}
@@ -2123,7 +2064,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         # If dest not allowed, cp fails. If src not allowed, rm fails.
         # Let's do explicit check for clarity.
         
-        abs_dest = self._resolve_path(context.get('cwd'), dest)
+        abs_dest = resolve_path(context.get('cwd'), dest)
         if not self._is_modification_allowed(abs_dest):
              return f"mv: cannot move '{src}' to '{dest}': Permission denied\n", {}
         
@@ -2188,7 +2129,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             content = "<html><body><h1>It Works!</h1><p>Apache/2.4.56 (Debian)</p></body></html>"
             if output_file:
                 # Save to VFS
-                abs_path = self._resolve_path(context.get('cwd'), output_file)
+                abs_path = resolve_path(context.get('cwd'), output_file)
                 self.honey_db.update_user_file(context.get('ip'), context.get('user'), abs_path, os.path.dirname(abs_path), 'file', {'size': len(content)}, content)
                 return "" if is_quiet else f"--{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}--  {url}\nResolving {domain}... 127.0.0.1\nConnecting to {domain}|127.0.0.1|:80... connected.\nHTTP request sent, awaiting response... 200 OK\nLength: {len(content)} [text/html]\nSaving to: '{output_file}'\n\n     0K .......... .......... .......... .......... ..........  100% 93.1M 0s\n\n{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ({len(content)} B/s) - '{output_file}' saved [{len(content)}/{len(content)}]\n", {}
             return content + "\n", {}
@@ -2207,7 +2148,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         # Post-Processing
         if output_file:
              # Save to VFS
-             abs_path = self._resolve_path(context.get('cwd'), output_file)
+             abs_path = resolve_path(context.get('cwd'), output_file)
              self.honey_db.update_user_file(context.get('ip'), context.get('user'), abs_path, os.path.dirname(abs_path), 'file', {'size': len(content)}, content)
              
              if not is_quiet:
@@ -2302,7 +2243,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         content = self.llm.generate_content(cmd, url, persona_sum)
         
         if output_file and not is_head:
-             abs_path = self._resolve_path(context.get('cwd'), output_file)
+             abs_path = resolve_path(context.get('cwd'), output_file)
              self.honey_db.update_user_file(context.get('ip'), context.get('user'), abs_path, os.path.dirname(abs_path), 'file', {'size': len(content)}, content)
              if not is_quiet:
                  # Curl progress meter
@@ -2772,7 +2713,7 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
                     target_arg = cmd.split('-t')[-1].strip()
                     if not target_arg or target_arg == '.': target_arg = cwd
                     
-                    abs_target = self._resolve_path(cwd, target_arg)
+                    abs_target = resolve_path(cwd, target_arg)
                     
                     # Join directory logic
                     # Check global fs OR user fs for directory?
@@ -3011,7 +2952,7 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
                  mode = parts[2]
                  target = parts[3]
         
-        abs_path = self._resolve_path(context.get('cwd'), target)
+        abs_path = resolve_path(context.get('cwd'), target)
         client_ip = context.get('client_ip')
         user = context.get('user')
         

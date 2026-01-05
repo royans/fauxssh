@@ -46,21 +46,5 @@ class TestWildcardExpansion:
         assert "test2.sql" not in filenames
         assert "other.txt" in filenames # Should NOT be deleted
         
-    def test_ls_wildcard(self, handler, db):
-        ip = "1.2.3.4"
-        user = "tester"
-        cwd = "/home/tester"
-        
-        # 1. Create files
-        db.update_user_file(ip, user, f"{cwd}/doc1.txt", cwd, 'file', {}, "content")
-        db.update_user_file(ip, user, f"{cwd}/doc2.txt", cwd, 'file', {}, "content")
-        db.update_user_file(ip, user, f"{cwd}/img1.png", cwd, 'file', {}, "content")
-        
-        # 2. Run ls *.txt
-        context = {'cwd': cwd, 'user': user, 'client_ip': ip}
-        resp, _, _ = handler.process_command("ls *.txt", context)
-        
-        # 3. Verify output
-        assert "doc1.txt" in resp
-        assert "doc2.txt" in resp
-        assert "img1.png" not in resp
+    # test_ls_wildcard moved to tests/test_command_handler_ls.py
+

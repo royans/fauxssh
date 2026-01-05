@@ -269,11 +269,12 @@ class ConfigManager:
         except: pass
         
         # Explicit Console Debugging (Requested by User)
-        print(f"[DEBUG] Validating Persona Path: {fpath}")
+        import sys
+        sys.stderr.write(f"[DEBUG] Validating Persona Path: {fpath}\n")
         if not os.path.exists(fpath):
-            print(f"[DEBUG] FAILED: Path does not exist!")
-            print(f"[DEBUG] Current CWD: {os.getcwd()}")
-            print(f"[DEBUG] personas_dir: {personas_dir}")
+            sys.stderr.write(f"[DEBUG] FAILED: Path does not exist!\n")
+            sys.stderr.write(f"[DEBUG] Current CWD: {os.getcwd()}\n")
+            sys.stderr.write(f"[DEBUG] personas_dir: {personas_dir}\n")
 
         if os.path.exists(fpath):
             try:

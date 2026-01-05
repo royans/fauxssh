@@ -446,62 +446,16 @@ class HoneyDB(DatabaseBackend):
         return None
 
     def list_user_dir(self, ip, username, parent_path):
-        # 1. Fetch DB items
-        conn = self._get_conn()
-        c = conn.cursor()
-        db_items = []
-        try:
-            c.execute("SELECT * FROM user_filesystem WHERE ip = ? AND username = ? AND parent_path = ?", (ip, username, parent_path))
-            rows = c.fetchall()
-            columns = [col[0] for col in c.description]
-            db_items = [dict(zip(columns, r)) for r in rows]
-        finally:
-            conn.close()
-            
-        # 2. Merge Skeleton items
-        # To avoid duplicates if user modified them (and they exist in DB), track known names
-        known_names = set(os.path.basename(i['path']) for i in db_items)
+        """
+        Lists directory contents by composing layers:
+        1. Global (Base)
+        2. Skeleton (Overlay)
+        3. User (Modifications)
+        Tombstones in User layer hide files from lower layers.
+        """
+        items_map = {} # path -> item_dict
         
-        home_dir = "/root" if username == "root" else f"/home/{username}"
-        
-        home_dir = "/root" if username == "root" else f"/home/{username}"
-        
-        # DEBUG: Trace list_user_dir for startup issues
-        log.info(f"[DB trace] list_user_dir {parent_path}. Cache: {len(self.skeleton_cache)}")
-        
-        for item in self.skeleton_cache:
-            skel_path = item['path']
-            # log.debug(f"[DB trace] Item: {skel_path}")
-            if skel_path.startswith('~'):
-                resolved_path = skel_path.replace('~', home_dir, 1)
-            else:
-                resolved_path = skel_path
-            
-            item_parent = os.path.dirname(resolved_path)
-            
-            # DEBUG TRACE
-            if "aws_keys.txt" in skel_path:
-               print(f"[DB DEBUG] Checking skel item: {skel_path} -> {resolved_path} (Parent: {item_parent} vs Requested: {parent_path})")
-
-            if item_parent == parent_path:
-                filename = os.path.basename(resolved_path)
-                if filename not in known_names:
-                     meta = item.get('metadata', {}).copy()
-                     if 'owner' not in meta: meta['owner'] = username
-                     if 'group' not in meta: meta['group'] = username
-                     
-                     db_items.append({
-                         'ip': ip,
-                         'username': username,
-                         'path': resolved_path,
-                         'type': item['type'],
-                         'metadata': json.dumps(meta),
-                         'content': item.get('content'),
-                         'created_at': datetime.datetime.now().isoformat()
-                     })
-                     known_names.add(filename) # Update known names for subsequent layers
-
-        # 3. Merge Global DB items (Layer 3)
+        # 1. Layer 1: Global Filesystem
         conn = self._get_conn()
         try:
             c = conn.cursor()
@@ -510,57 +464,129 @@ class HoneyDB(DatabaseBackend):
             columns = [col[0] for col in c.description]
             for r in rows:
                 g_item = dict(zip(columns, r))
-                filename = os.path.basename(g_item['path'])
-                if filename not in known_names:
-                    # Adapt global item to user node format
-                    db_items.append({
-                         'ip': ip,
-                         'username': username,
-                         'path': g_item['path'],
-                         'type': g_item['type'],
-                         'metadata': g_item['metadata'],
-                         'content': g_item['content'],
-                         'created_at': g_item['created_at']
-                    })
-                    known_names.add(filename)
+                items_map[g_item['path']] = {
+                     'ip': ip,
+                     'username': username,
+                     'path': g_item['path'],
+                     'type': g_item['type'],
+                     'metadata': g_item['metadata'],
+                     'content': g_item['content'],
+                     'created_at': g_item['created_at'],
+                     'source_layer': 'global'
+                }
         except Exception as e:
-            log.error(f"Error merging global FS in list_user_dir: {e}")
+            log.error(f"Error listing global FS: {e}")
+        finally:
+            conn.close()
+
+        # 2. Layer 2: Skeleton Cache
+        home_dir = "/root" if username == "root" else f"/home/{username}"
+        
+        for item in self.skeleton_cache:
+            skel_path = item['path']
+            if skel_path.startswith('~'):
+                resolved_path = skel_path.replace('~', home_dir, 1)
+            else:
+                resolved_path = skel_path
+            
+            # Check parenthood
+            # Debugging visibility issue
+            if parent_path == '/home/royans' or parent_path == '/home/royans/':
+               dir_name = os.path.dirname(resolved_path)
+               if 'bashrc' in resolved_path:
+                   print(f"DEBUG SKEL: {skel_path} -> {resolved_path} Dir='{dir_name}' Req='{parent_path}' Match={dir_name == parent_path}")
+            
+            if os.path.dirname(resolved_path) == parent_path:
+                 meta = item.get('metadata', {}).copy()
+                 if 'owner' not in meta: meta['owner'] = username
+                 if 'group' not in meta: meta['group'] = username
+                 
+                 # Overwrite Global
+                 items_map[resolved_path] = {
+                      'ip': ip,
+                      'username': username,
+                      'path': resolved_path,
+                      'type': item['type'],
+                      'metadata': json.dumps(meta),
+                      'content': item.get('content'),
+                      'created_at': datetime.datetime.now().isoformat(), # Mock time for skeleton
+                      'source_layer': 'skeleton'
+                 }
+                 
+        # 3. Layer 3: User Filesystem
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT * FROM user_filesystem WHERE ip = ? AND username = ? AND parent_path = ?", (ip, username, parent_path))
+            rows = c.fetchall()
+            columns = [col[0] for col in c.description]
+            for r in rows:
+                u_item = dict(zip(columns, r))
+                path = u_item['path']
+                
+                # Check for Tombstone
+                if u_item.get('is_deleted'):
+                    # Explicit deletion -> Remove from map if exists
+                    if path in items_map:
+                        del items_map[path]
+                else:
+                    # Overwrite Lower Layers
+                    u_item['source_layer'] = 'user'
+                    items_map[path] = u_item
+        except Exception as e:
+            log.error(f"Error listing user FS: {e}")
         finally:
              conn.close()
-                     
-        # Final filter: remove any items where we found a tombstone (is_deleted=1) in DB items
-        # Currently list_user_dir fetches ALL from DB.
-        # We need to filter out the ones that are is_deleted=1 from the final list.
-        # But wait, db_items contains them! 
+             
+        # Return values
+        return list(items_map.values())
+
+    def is_managed_directory(self, ip, username, path):
+        """
+        Returns True if the directory is 'managed' (i.e. we know it exists in DB, Skeleton, or Global).
+        This helps command handlers decide whether to use local ls or fallback to LLM.
+        """
+        # 1. Check User Home (Always managed)
+        home_dir = "/root" if username == "root" else f"/home/{username}"
         
-        final_list = []
-        deleted_paths = set()
+        # DEBUG TRACE
+        print(f"[DB MANAGED CHECK] User: {username}, Path: '{path}', Home: '{home_dir}'")
         
-        for item in db_items:
-             if item.get('is_deleted'):
-                 deleted_paths.add(item['path'])
-             else:
-                 final_list.append(item)
-                 
-        # Now check skeleton items
-        # Currently skeleton logic simply appends if filename not in known_names.
-        # known_names should INCLUDE deleted items so we don't re-add skeleton version of a deleted file.
+        if path == home_dir or path.startswith(home_dir + "/"):
+            print("[DB MANAGED] Matched Home Dir")
+            return True
+
+        # 2. Check User DB for exact path existence (as a directory or parent of items)
+        conn = self._get_conn()
+        try:
+             c = conn.cursor()
+             # Check if it exists as a directory itself
+             c.execute("SELECT 1 FROM user_filesystem WHERE ip=? AND username=? AND path=? AND type='directory' AND is_deleted=0", (ip, username, path))
+             if c.fetchone(): return True
+             
+             # Check if it has children (implicit directory)
+             c.execute("SELECT 1 FROM user_filesystem WHERE ip=? AND username=? AND parent_path=? AND is_deleted=0", (ip, username, path))
+             if c.fetchone(): return True
+        finally:
+             conn.close()
+             
+        # 3. Check Skeleton Cache
+        for item in self.skeleton_cache:
+            skel_path = item['path']
+            if skel_path.startswith('~'):
+                skel_path = skel_path.replace('~', home_dir, 1)
+            
+            # If path matches a skeleton item (which is a dir)
+            if skel_path == path and item['type'] == 'directory':
+                return True
+            # If path is a parent of a skeleton item
+            if os.path.dirname(skel_path) == path:
+                return True
+
+        # 4. Check Global DB
+        # TODO: Add global DB check if needed. For now Global is static /etc mostly.
         
-        # Re-calc known names from ALL db items (including deleted)
-        known_names = set(os.path.basename(i['path']) for i in db_items)
-        
-        # Wait, if I deleted 'foo', it is in db_items with is_deleted=1.
-        # So 'foo' is in known_names.
-        # The loop below: if filename not in known_names -> skips 'foo'.
-        # This is CORRECT! The deleted record "shadows" the skeleton record.
-        # And we filtered 'foo' (deleted) out of final_list above.
-        # So 'foo' will not appear.
-        
-        # We just need to replace db_items with final_list + valid skeleton items
-        
-        db_items = final_list 
-                     
-        return db_items
+        return False
 
     def cache_response(self, command, cwd, response):
         h = hashlib.sha256(f"{cwd}:{command}".encode()).hexdigest()
@@ -851,3 +877,129 @@ class HoneyDB(DatabaseBackend):
                 'analyzed_at': row[6]
             }
         return None
+
+    def inspect_path(self, ip, username, path):
+        """
+        Debug method to inspect filesystem layers for a path across all layers.
+        Returns a detailed string report.
+        """
+        report = []
+        report.append(f"--- VFS Inspection Report for '{path}' ---")
+        report.append(f"Context: IP={ip}, User={username}")
+        
+        # 1. User DB (Modifications)
+        conn = self._get_conn()
+        c = conn.cursor()
+        c.execute("SELECT * FROM user_filesystem WHERE ip=? AND username=? AND path=?", (ip, username, path))
+        row = c.fetchone()
+        conn.close()
+        
+        if row:
+             # is_deleted index 9 (based on schema)
+             is_deleted = row[9] if len(row) > 9 else 0
+             status = "DELETED (Tombstone)" if is_deleted else "ACTIVE"
+             report.append(f"[LAYER 1 - User DB] FOUND: {status}")
+             report.append(f"  Type: {row[4]}")
+             report.append(f"  Metadata: {row[5]}")
+             report.append(f"  Content Len: {len(row[6]) if row[6] else 0}")
+        else:
+             report.append("[LAYER 1 - User DB] NOT FOUND")
+
+        # 2. Skeleton
+        home_dir = "/root" if username == "root" else f"/home/{username}"
+        found_skel = False
+        for item in self.skeleton_cache:
+            skel_path = item['path']
+            if skel_path.startswith('~'):
+                resolved_path = skel_path.replace('~', home_dir, 1)
+            else:
+                resolved_path = skel_path
+            
+            if resolved_path == path:
+                 report.append(f"[LAYER 2 - Skeleton] FOUND: ACTIVE (COW Base)")
+                 report.append(f"  Original Path: {skel_path}")
+                 report.append(f"  Type: {item['type']}")
+                 found_skel = True
+                 break
+        if not found_skel:
+             report.append("[LAYER 2 - Skeleton] NOT FOUND")
+             
+        # 3. Global DB
+        node = self.get_fs_node(path)
+        if node:
+             report.append(f"[LAYER 3 - Global DB] FOUND: ACTIVE")
+             report.append(f"  Type: {node['type']}")
+        else:
+             report.append("[LAYER 3 - Global DB] NOT FOUND")
+             
+        # Conclusion
+        final = self.get_user_node(ip, username, path)
+        if final:
+             report.append(f"==> RESOLVED: VISIBLE (Type: {final['type']})")
+        else:
+             report.append("==> RESOLVED: NOT VISIBLE")
+             
+        return "\n".join(report)
+
+    def inspect_dir(self, ip, username, directory):
+        """
+        Debug method to list all potential files in a directory from all layers.
+        """
+        report = []
+        report.append(f"--- VFS Directory Inspection for '{directory}' ---")
+        
+        # 1. User Local Files
+        conn = self._get_conn()
+        c = conn.cursor()
+        c.execute("SELECT path, is_deleted FROM user_filesystem WHERE ip=? AND username=? AND parent_path=?", (ip, username, directory))
+        user_files = {os.path.basename(r[0]): r[1] for r in c.fetchall()}
+        conn.close()
+        
+        # 2. Skeleton Files
+        skel_files = set()
+        home_dir = "/root" if username == "root" else f"/home/{username}"
+        for item in self.skeleton_cache:
+             skel_path = item['path']
+             if skel_path.startswith('~'):
+                resolved_path = skel_path.replace('~', home_dir, 1)
+             else:
+                resolved_path = skel_path
+            
+             if os.path.dirname(resolved_path) == directory:
+                 skel_files.add(os.path.basename(resolved_path))
+                 
+        # 3. Global Files
+        global_files = set()
+        g_list = self.list_fs_dir(directory)
+        for g in g_list:
+             global_files.add(os.path.basename(g['path']))
+             
+        # Merge Keys
+        all_names = set(user_files.keys()) | skel_files | global_files
+        
+        if not all_names:
+            report.append("(Empty Directory)")
+            return "\n".join(report)
+            
+        report.append(f"{'Filename':<30} | {'Global':<10} | {'Skeleton':<10} | {'UserDB':<10} | {'Result':<10}")
+        report.append("-" * 85)
+        
+        for name in sorted(all_names):
+            user_status = "---"
+            if name in user_files:
+                user_status = "DELETED" if user_files[name] else "ACTIVE"
+                
+            skel_status = "YES" if name in skel_files else "---"
+            global_status = "YES" if name in global_files else "---"
+            
+            # Logic
+            result = "VISIBLE"
+            if user_status == "DELETED":
+                result = "HIDDEN"
+            elif user_status == "---" and skel_status == "---" and global_status == "---":
+                # Should not happen as name came from one of them
+                result = "ERROR"
+            
+            report.append(f"{name:<30} | {global_status:<10} | {skel_status:<10} | {user_status:<10} | {result:<10}")
+            
+        return "\n".join(report)
