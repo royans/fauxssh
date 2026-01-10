@@ -42,12 +42,22 @@ class TestAuthRestrictions(unittest.TestCase):
         cls.original_get_creds = ssh_honeypot.services.ssh.server.db.get_unique_creds_last_24h
         ssh_honeypot.services.ssh.server.db.get_unique_creds_last_24h = MagicMock(return_value=set())
         
+        # Disable Telnet to prevent port conflicts
+        os.environ['SSHPOT_ENABLE_TELNET'] = 'false'
+        
         if not is_server_running(TEST_PORT):
             os.environ['SSHPOT_PORT'] = str(TEST_PORT)
             cls.server_thread = threading.Thread(target=server_main, args=([],))
             cls.server_thread.daemon = True
             cls.server_thread.start()
-            time.sleep(2)
+            
+            # Wait for startup (Robust Polling)
+            start = time.time()
+            while time.time() - start < 30:
+                if is_server_running(TEST_PORT): break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError("Server failed to start in test setup")
             
     @classmethod
     def tearDownClass(cls):

@@ -37,10 +37,54 @@ class AlertManager:
         self.monitored_ips = set()
         self.monitored_sessions = set()
         
+        # Rate Limiting (Discord)
+        self.msg_history_1h = [] # List of timestamps
+        self.limit_min = 20
+        self.limit_hour = 50
+        
         if webhook_url:
             log.info(f"[AlertManager] Initialized. URL: ...{webhook_url[-5:]}, Levels: [N:{self.notify_threshold}, S:{self.session_threshold}, I:{self.ip_threshold}]")
         else:
             log.info("[AlertManager] Initialized (Disabled: No URL).")
+
+    def _check_rate_limit(self):
+        """Returns True if message can be sent, False otherwise."""
+        import time
+        now = time.time()
+        
+        # Prune old
+        self.msg_history_1h = [t for t in self.msg_history_1h if now - t < 3600]
+        
+        # Check Hour Limit
+        if len(self.msg_history_1h) >= self.limit_hour:
+            return False
+            
+        # Check Minute Limit
+        msgs_last_min = [t for t in self.msg_history_1h if now - t < 60]
+        if len(msgs_last_min) >= self.limit_min:
+            return False
+            
+        return True
+
+    def _record_sent(self):
+        import time
+        self.msg_history_1h.append(time.time())
+
+    def send_ban_alert(self, ip, duration, reason):
+        if not self.notifier.webhook_url: return
+        if not self._check_rate_limit():
+            log.warning(f"[AlertManager] Rate Limit Exceeded. Suppressing Ban Alert for {ip}")
+            return
+            
+        self._record_sent()
+        msg = f"**🚫 DoS BAN TRIGGERED**\n**IP:** `{ip}`\n**Duration:** {duration}s\n**Reason:** {reason}"
+        # We assume WebhookNotifier has a generic send method or we reuse send_alert
+        # WebhookNotifier.send_alert takes (session, ip, explanation, risk).
+        # We might need to extend WebhookNotifier or abuse send_alert.
+        # Let's inspect WebhookNotifier. Assuming send_alert(session_id, ip, explanation, risk)
+        # We can pass "SYSTEM" as session_id.
+        self.notifier.send_alert("SYSTEM", ip, f"DoS Ban: {reason} ({duration}s)", 10)
+
 
     def reload_config(self):
         """Reloads config from manager (useful if .env changes dynamically, though unlikely)"""
@@ -52,7 +96,11 @@ class AlertManager:
 
         # Tier 1: Notify
         if score >= self.notify_threshold:
-            self.notifier.send_alert(session_id, ip, explanation, score)
+            if self._check_rate_limit():
+                self.notifier.send_alert(session_id, ip, explanation, score)
+                self._record_sent()
+            else:
+                log.warning(f"[AlertManager] Rate Limit Exceeded. Suppressing Risk Alert for {session_id}")
             
         # Tier 2: Monitor Session
         if score >= self.session_threshold:
@@ -74,7 +122,11 @@ class AlertManager:
         for keyword in self.keywords:
             if keyword.lower() in cmd.lower():
                 log.warning(f"[AlertManager] Keyword Trigger: '{keyword}' in session {session_id}")
-                self.notifier.send_alert(session_id, ip, f"Keyword Trigger: {keyword}", 10)
+                if self._check_rate_limit():
+                    self.notifier.send_alert(session_id, ip, f"Keyword Trigger: {keyword}", 10)
+                    self._record_sent()
+                else:
+                    log.warning(f"[AlertManager] Rate Limit Exceeded. Suppressing Keyword Alert.")
                 # Auto-monitor this session
                 self.monitored_sessions.add(session_id)
                 break

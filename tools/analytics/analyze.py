@@ -11,9 +11,11 @@ from datetime import datetime
 from dateutil import tz
 
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.table import Table
 from rich import box
+from rich.text import Text
+from rich.rule import Rule
 
 console = Console()
 
@@ -269,7 +271,7 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None, sort_para
     console.print(table)
 
 
-def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_path=None, sort_param=None, protocol_filter=None):
+def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_path=None, sort_param=None, protocol_filter=None, show_output=False):
     conn = get_db_connection(db_path)
     c = conn.cursor()
     
@@ -286,6 +288,7 @@ def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_
             s.remote_ip,
             s.username,
             i.command,
+            i.response,
             i.source,
             i.request_md5,
             i.response_size,
@@ -362,7 +365,7 @@ def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_
     table.add_column("Src", style="yellow")
     table.add_column("Unique%", justify="right", style="bold blue")
     table.add_column("Risk", justify="right")
-    table.add_column("Analysis", style="italic cyan")
+    table.add_column("Analysis", style="italic cyan", overflow="fold", max_width=60)
 
     for r in rows:
         ts = to_local_time(r['timestamp'])
@@ -387,16 +390,139 @@ def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_
         risk_str = f"{risk_val}" if risk_val is not None else "-"
         risk_style = get_risk_style(risk_val)
         
-        cmd = r['command'] or ""
-        # Removed truncation as per user request to see full command
-             
-        explanation = r['explanation'] or ""
-        if len(explanation) > 100:
-             explanation = textwrap.shorten(explanation, width=100, placeholder="...")
+        cmd_cell = Text(r['command'] or "")
+        
+        # Append Output Snippet if requested
+        if show_output:
+            resp = r['response'] or ""
+            if resp:
+                 # Truncate response
+                 snippet = textwrap.shorten(resp, width=300, placeholder="...")
+                 
+                 # Use Group + Rule for perfect width handling
+                 cmd_cell = Group(
+                     cmd_cell,
+                     Rule(style="dim"),
+                     Text(snippet, style="italic grey50")
+                 )
 
-        table.add_row(ts, ip, user, cmd, size_str, src, unique_str, f"[{risk_style}]{risk_str}[/{risk_style}]", explanation)
+        explanation = r['explanation'] or ""
+        # Relaxed truncation to allow wrapping to show more context
+        if len(explanation) > 300:
+             explanation = textwrap.shorten(explanation, width=300, placeholder="...")
+
+        table.add_row(ts, ip, user, cmd_cell, size_str, src, unique_str, f"[{risk_style}]{risk_str}[/{risk_style}]", explanation)
         
     console.print(table)
+
+
+def list_top_ips(limit=50, anon=False, db_path=None):
+    conn = get_db_connection(db_path)
+    c = conn.cursor()
+    
+    # 1. Total Unique IPs
+    try:
+        c.execute("SELECT COUNT(DISTINCT remote_ip) FROM sessions")
+        total_unique_ips = c.fetchone()[0]
+    except: total_unique_ips = 0
+
+    query = """
+        SELECT 
+            s.remote_ip,
+            COUNT(DISTINCT s.session_id) as total_sessions,
+            MIN(s.start_time) as first_seen,
+            MAX(s.start_time) as last_seen,
+            
+            -- Total Commands
+            (SELECT COUNT(*) 
+             FROM interactions i 
+             JOIN sessions s2 ON i.session_id = s2.session_id 
+             WHERE s2.remote_ip = s.remote_ip) as total_cmds,
+             
+            -- Last 1 Hour Activity (Active Attackers)
+            (SELECT COUNT(*) 
+             FROM interactions i 
+             JOIN sessions s2 ON i.session_id = s2.session_id 
+             WHERE s2.remote_ip = s.remote_ip 
+             AND i.timestamp > datetime('now', '-1 hour')) as recent_cmds_1h,
+
+            -- Estimated Current RPM (Last 1 Minute) -> Proxy for Suspension Risk
+            (SELECT COUNT(*) 
+             FROM interactions i 
+             JOIN sessions s2 ON i.session_id = s2.session_id 
+             WHERE s2.remote_ip = s.remote_ip 
+             AND i.timestamp > datetime('now', '-1 minute')) as current_rpm
+
+        FROM sessions s
+        WHERE 1=1
+        GROUP BY s.remote_ip
+        ORDER BY current_rpm DESC, total_sessions DESC
+        LIMIT ?
+    """
+    
+    c.execute(query, (limit,))
+    rows = c.fetchall()
+    conn.close()
+
+    table = Table(title=f"Top Attacking IPs (Limit {limit}) - Total IPs: {total_unique_ips}", box=box.ROUNDED)
+    table.add_column("Rank", style="dim", justify="right")
+    table.add_column("IP", style="magenta")
+    table.add_column("Sessions", justify="right", style="green")
+    table.add_column("Total Cmds", justify="right")
+    table.add_column("1h Cmds", justify="right", style="yellow")
+    table.add_column("Current RPM", justify="right", style="bold")
+    table.add_column("Last Seen", style="dim")
+    table.add_column("Status", justify="center")
+
+    rank = 1
+    for r in rows:
+        ip = clean_ip(r['remote_ip'], anon=anon)
+        sessions = r['total_sessions']
+        cmds = r['total_cmds']
+        recent_1h = r['recent_cmds_1h']
+        rpm = r['current_rpm']
+        last_seen = to_local_time(r['last_seen'])
+        
+        # Determine Status/Risk
+        # RPM Limit is 1000
+        rpm_style = "white"
+        status = "Idle"
+        status_style = "dim"
+        
+        if rpm > 0:
+            status = "Active"
+            status_style = "green"
+            
+        if rpm >= 1000:
+            status = "SUSPENDED (Sim)" # Likely suspended by DoSProtector
+            status_style = "bold red reverse"
+            rpm_style = "bold red"
+        elif rpm >= 800:
+            status = "CRITICAL"
+            status_style = "bold red"
+            rpm_style = "red"
+        elif rpm >= 500:
+            status = "WARNING"
+            status_style = "yellow"
+            rpm_style = "yellow"
+        elif rpm > 100:
+            status = "High Traffic"
+            status_style = "bold blue"
+            
+        table.add_row(
+            str(rank),
+            ip,
+            str(sessions),
+            str(cmds),
+            str(recent_1h),
+            f"[{rpm_style}]{rpm}[/{rpm_style}]",
+            last_seen,
+            f"[{status_style}]{status}[/{status_style}]"
+        )
+        rank += 1
+        
+    console.print(table)
+    console.print("[dim]Note: 'Current RPM' is based on DB logs. Actual DoS suspension happens in-memory at 1000 RPM.[/dim]")
 
 
 def reset_failed_analysis(db_path=None):
@@ -426,6 +552,7 @@ def main():
     group.add_argument("--sessions", action="store_true", help="List recent sessions")
     group.add_argument("--commands", action="store_true", help="List recent commands")
     group.add_argument("--retry-failed", action="store_true", help="Reset failed analysis")
+    group.add_argument("--top-ips", action="store_true", help="Show Top IPs and Frequency")
     
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--no-failed", action="store_true")
@@ -435,18 +562,21 @@ def main():
     parser.add_argument("--db", help="Path to SQLite database file")
     parser.add_argument("--sort", help="Sort order (e.g. Risk:Desc,Cmds:Desc)")
     parser.add_argument("--protocol", help="Filter by protocol (ssh, telnet, redis, mcp)")
+    parser.add_argument("--output", action="store_true", help="Show command output snippets")
     
     args = parser.parse_args()
     
     if args.sessions:
         list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon, db_path=args.db, sort_param=args.sort, ip_filter=args.ip, protocol_filter=args.protocol)
     elif args.commands:
-        list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon, db_path=args.db, sort_param=args.sort, protocol_filter=args.protocol)
+        list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon, db_path=args.db, sort_param=args.sort, protocol_filter=args.protocol, show_output=args.output)
     elif args.retry_failed:
         reset_failed_analysis(db_path=args.db)
+    elif args.top_ips:
+        list_top_ips(limit=args.limit, anon=args.anon, db_path=args.db)
     else:
         if args.ip or args.session_id:
-            list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon, db_path=args.db, sort_param=args.sort, protocol_filter=args.protocol)
+            list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon, db_path=args.db, sort_param=args.sort, protocol_filter=args.protocol, show_output=args.output)
         else:
             list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon, db_path=args.db, sort_param=args.sort, ip_filter=args.ip, protocol_filter=args.protocol)
 

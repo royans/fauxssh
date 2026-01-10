@@ -442,9 +442,23 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         cmd = re.sub(r'2>&1', ' ', cmd)
         cmd = re.sub(r'\s+', ' ', cmd).strip()
         
+        # 0.1 Busybox Dispatch
+        # Global: Strip 'busybox' prefix to support "busybox <cmd>" or "/bin/busybox <cmd>"
+        parts = cmd.split()
+        if parts and parts[0] in ['busybox', '/bin/busybox']:
+             if len(parts) > 1:
+                 # Shift command: "busybox echo hi" -> "echo hi"
+                 cmd = " ".join(parts[1:])
+                 parts = cmd.split()
+                 # We updated 'cmd', subsequent logic will use this new 'cmd'
+             else:
+                 return "BusyBox v1.30.1 multi-call binary.\nUsage: busybox [function] [arguments]...\n", {}, {'source': 'local', 'cached': False}
+        
         # --- PERSONA DISPATCH ---
         persona = context.get('persona_config', {})
-        if persona and persona.get('system', {}).get('handler_type') == 'cisco_ios':
+        jailbroken = context.get('env', {}).get('cisco_jailbreak', False)
+
+        if not jailbroken and persona and persona.get('system', {}).get('handler_type') == 'cisco_ios':
              if cisco_handlers:
                  parts = cmd.split()
                  if not parts: return "", {}, {'source': 'cisco', 'cached': False}
@@ -479,6 +493,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                  elif base == 'where': handler_func = cisco_handlers.handle_cisco_where
                  elif base == 'terminal': handler_func = cisco_handlers.handle_cisco_terminal
                  elif base == 'hostname': handler_func = cisco_handlers.handle_cisco_hostname
+                 
+                 # Jailbreak Handlers
+                 elif base == 'shell': handler_func = cisco_handlers.handle_cisco_shell
+                 elif base == 'system': handler_func = cisco_handlers.handle_cisco_system
+                 elif base == 'linuxshell': handler_func = cisco_handlers.handle_cisco_linuxshell
                  
                  # Aliases & Anti-Error_func:
                  if handler_func:
@@ -555,7 +574,8 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                              if k == 'new_cwd': final_updates[k] = v 
                              elif k == 'file_modifications':
                                  if 'file_modifications' not in final_updates: final_updates['file_modifications'] = []
-                                 final_updates['file_modifications'].extend(v)
+                                 if v: # Check if v is not None/Empty
+                                    final_updates['file_modifications'].extend(v)
                              elif k == 'env':
                                  current_context['env'] = v
                                  final_updates['env'] = v
@@ -579,7 +599,8 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                              if k == 'new_cwd': final_updates[k] = v 
                              elif k == 'file_modifications':
                                  if 'file_modifications' not in final_updates: final_updates['file_modifications'] = []
-                                 final_updates['file_modifications'].extend(v)
+                                 if v: # Check if v is not None/Empty
+                                    final_updates['file_modifications'].extend(v)
                              elif k == 'env':
                                  current_context['env'] = v
                                  final_updates['env'] = v

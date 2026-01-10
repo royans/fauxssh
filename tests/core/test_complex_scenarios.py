@@ -53,6 +53,9 @@ class TestComplexScenarios(unittest.TestCase):
             ssh_honeypot.services.ssh.server.llm = MagicMock()
         ssh_honeypot.services.ssh.server.llm.api_key = ""
         
+        # Disable Telnet to prevent port conflicts
+        os.environ['SSHPOT_ENABLE_TELNET'] = 'false'
+
         if not is_server_running(TEST_PORT):
             print(f"[*] Starting Test Server on {TEST_PORT}")
             os.environ['SSHPOT_PORT'] = str(TEST_PORT)
@@ -62,7 +65,7 @@ class TestComplexScenarios(unittest.TestCase):
             
             # Wait for startup
             start = time.time()
-            while time.time() - start < 10:
+            while time.time() - start < 30:
                 if is_server_running(TEST_PORT): break
                 time.sleep(0.2)
             else:

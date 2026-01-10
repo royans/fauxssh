@@ -70,5 +70,16 @@ class TestCiscoEnableRobustness(unittest.TestCase):
             # This assertion SHOULD FAIL if sanitization is missing
             self.assertEqual(meta.get('source'), 'test', "Failed to match enable with Null byte")
 
+    def test_handler_failure_failsafe(self):
+        """Test that missing cisco_handlers degrades gracefully instead of crashing."""
+        cmd = "enable"
+        # Simulate cisco_handlers being None (ImportError) or missing attribute
+        with patch('ssh_honeypot.core.command_handler.cisco_handlers', None):
+            resp, updates, meta = self.handler.process_command(cmd, self.context)
+            
+            # Should return error message, not crash
+            self.assertIn("% Error", resp)
+            self.assertEqual(meta['source'], 'error')
+
 if __name__ == '__main__':
     unittest.main()

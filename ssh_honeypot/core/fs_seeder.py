@@ -13,11 +13,26 @@ def get_skeleton_data(json_path=None):
     Combines static_fs_seed.json and dynamic defaults.
     """
     # Default Base Dir calculation
+    # Default Base Dir calculation
+    # __file__ = .../ssh_honeypot/core/fs_seeder.py
+    # dirname 1 = .../ssh_honeypot/core
+    # dirname 2 = .../ssh_honeypot
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    project_root = os.path.dirname(base_dir)
 
     if not json_path:
-        # Default: ProjectRoot/data/personas/base_fs.json
-        json_path = os.path.join(base_dir, 'data', 'personas', 'base_fs.json')
+        # Default: ProjectRoot/personas/base_fs.json
+        # Also try data/personas/base_fs.json for backwards compat or structure variations
+        p1 = os.path.join(project_root, 'personas', 'base_fs.json')
+        p2 = os.path.join(project_root, 'data', 'personas', 'base_fs.json')
+        
+        if os.path.exists(p1):
+             json_path = p1
+        elif os.path.exists(p2):
+             json_path = p2
+        else:
+             # Fallback to legacy or let it fail gracefully
+             json_path = p1
 
     nodes = []
     
@@ -39,7 +54,7 @@ def get_skeleton_data(json_path=None):
     # 2.5 Load Common FS Overlay (Honeytokens)
     # Fix: fs_seeder is in ssh_honeypot/core/
     # base_dir (ssh_honeypot) -> parent is project root
-    project_root = os.path.dirname(base_dir) 
+    # project_root defined above
     common_fs_path = os.path.join(project_root, 'personas', 'common_fs')
     
     if os.path.exists(common_fs_path):
@@ -235,6 +250,37 @@ def load_overlay_nodes(fs_root):
     return overlay
     
 def seed_filesystem(db, json_path=None):
-    """Deprecated: Skeleton Layer now handles this dynamically."""
-    pass
+    """
+    Populates the global_filesystem table with skeleton data.
+    """
+    nodes = get_skeleton_data(json_path)
+    count = 0
+    
+    # Use direct connection for bulk operation
+    conn = db._get_conn()
+    try:
+        for node in nodes:
+            # Replicate update_fs_node logic but with shared connection
+            path = node['path']
+            parent_path = node.get('parent_path')
+            type_Str = node['type']
+            metadata = node['metadata'] 
+            content = node.get('content')
+            
+            # Ensure content is string
+            if isinstance(content, (dict, list)):
+                content = str(content)
+                
+            conn.execute("""
+                INSERT OR REPLACE INTO global_filesystem (path, parent_path, type, metadata, content)
+                VALUES (?, ?, ?, ?, ?)
+            """, (path, parent_path, type_Str, json.dumps(metadata) if isinstance(metadata, dict) else metadata, content))
+            count += 1
+        conn.commit()
+    except Exception as e:
+        logging.error(f"FS Seeder: Failed in bulk seed: {e}")
+    finally:
+        conn.close()
+        
+    logging.info(f"FS Seeder: Seeded {count} items into global_filesystem.")
 

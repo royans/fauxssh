@@ -345,3 +345,21 @@ def handle_cisco_hostname(cmd, context):
         updates['env']['cisco_running_config'] = new_config
     
     return "", updates, {'source': 'cisco_local', 'cached': False}
+
+
+def handle_cisco_shell(cmd, context):
+    """
+    Simulates a 'jailbreak' into a system shell.
+    Switches the session's effective handler type to Unix via env flag.
+    """
+    updates = {
+        'env': {'cisco_jailbreak': True}
+    }
+    # Realistic-ish output for a router dropping to shell
+    return "\nEntering sensitive shell mode... Type 'exit' to return.\n# ", updates, {'source': 'cisco_local', 'cached': False}
+
+def handle_cisco_system(cmd, context):
+    return handle_cisco_shell(cmd, context)
+
+def handle_cisco_linuxshell(cmd, context):
+    return handle_cisco_shell(cmd, context)

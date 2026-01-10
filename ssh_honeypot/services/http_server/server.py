@@ -4,6 +4,7 @@ import threading
 import time
 from ssh_honeypot.core.logging_setup import log
 from ssh_honeypot.core.config import config
+from ssh_honeypot.core.dos_protection import dos_protector
 
 class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
     def version_string(self):
@@ -29,7 +30,25 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
     def do_DELETE(self):
          self.handle_honey_request("DELETE")
 
+    def do_CONNECT(self):
+         self.handle_honey_request("CONNECT")
+
+    def do_OPTIONS(self):
+         self.handle_honey_request("OPTIONS")
+
+    def do_TRACE(self):
+         self.handle_honey_request("TRACE")
+         
+    def do_PATCH(self):
+         self.handle_honey_request("PATCH")
+
     def handle_honey_request(self, method):
+        # 0. DoS Protection (Silent Drop)
+        if not dos_protector.is_allowed(self.client_address[0], 'HTTP'):
+            self.close_connection = True
+            return
+
+        # 1. Caching Key
         # 1. Caching Key
         # We treat "HTTP <METHOD> <PATH>" as the unique command key
         # Cwd is constant "HTTP_ROOT" to share cache globally for the site

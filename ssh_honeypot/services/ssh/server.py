@@ -268,10 +268,19 @@ def handle_tab_completion(chan, command_buffer, vfs, cwd, prompt, logger):
     
     return command_buffer
 
+from ssh_honeypot.core.dos_protection import dos_protector
+
 # Connection Handler
 def handle_connection(client, addr, db_inst, llm_inst):
     global active_sessions
     ip = addr[0]
+    
+    # 0. DoS Protection (Silent Drop)
+    if not dos_protector.is_allowed(ip, 'SSH'):
+        # Log is handled inside is_allowed for ban event. 
+        # If banned, we strictly silent drop (close without sending anything)
+        client.close()
+        return
     
     with active_sessions_lock:
         if active_sessions >= MAX_CONCURRENT_SESSIONS:
@@ -437,11 +446,13 @@ def _handle_connection_logic(client, addr, db, llm):
         db.log_interaction(session_id, cwd, cmd, resp_text, source=str(metadata.get('source', 'unknown')), 
                            was_cached=metadata.get('cached', False), duration_ms=duration_ms, request_md5=str(cmd_hash))
 
-        try:
-            if resp_text: chan.send(resp_text)
-            chan.send_exit_status(0)
-            chan.close()
-        except OSError: pass
+        if resp_text:
+            chan.send(resp_text)
+            if not resp_text.endswith('\n'):
+                chan.send('\n')
+                
+        chan.send_exit_status(0)
+        chan.close()
         return
 
     # Shell Mode

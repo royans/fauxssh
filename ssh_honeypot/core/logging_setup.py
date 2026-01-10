@@ -28,6 +28,32 @@ def setup_logger(name="ssh_honeypot"):
 
     logger.addHandler(ch)
 
+    # File Handler (Rotating)
+    try:
+        from logging.handlers import TimedRotatingFileHandler
+        import os
+        # Avoid circular import with config by using utils directly if possible, or try import
+        # ssh_honeypot.core.utils should be safe
+        from ssh_honeypot.core.utils import get_data_dir
+        
+        log_dir = get_data_dir()
+        if log_dir and os.path.exists(log_dir):
+            log_file = os.path.join(log_dir, "server.log")
+            
+            # Rotate at midnight, keep 7 days
+            fh = TimedRotatingFileHandler(log_file, when="midnight", interval=1, backupCount=7)
+            fh.setLevel(logging.DEBUG)
+            fh.setFormatter(formatter)
+            logger.addHandler(fh)
+            
+            # SUCCESS: Disable Console Handler to prevent duplication in server_startup.log
+            # We only want startup errors or python crashes in stdout now.
+            logger.removeHandler(ch)
+            
+    except Exception as e:
+        # Fallback to console only if file setup fails
+        print(f"[!] Logging File Setup Failed: {e}")
+
     return logger
 
 def configure_paramiko_noise():
@@ -45,6 +71,25 @@ def configure_paramiko_noise():
             # Also suppress "EOFError" which happens on disconn often
             if "EOFError" in msg:
                 return False
+            return True
+            
+    class IncompatiblePeerFilter(logging.Filter):
+        def filter(self, record):
+            msg = record.getMessage()
+            if "Incompatible ssh peer" in msg or "no acceptable host key" in msg:
+                return False
+            # Suppress EOFError (Disconnects)
+            if "EOFError" in msg:
+                return False
+            # Suppress Banner Check Timouts/Errors (Scanner Noise)
+            if "_check_banner" in str(record.funcName) or "check_banner" in msg:
+                return False
+            if record.exc_info:
+                exc_type, exc_value, _ = record.exc_info
+                if "SSHException" in str(exc_type) or "timeout" in str(exc_type) or "TimeoutError" in str(exc_type):
+                     if "_check_banner" in str(record.funcName):
+                         return False
+            
             return True
             
     p_log.addFilter(IncompatiblePeerFilter())
