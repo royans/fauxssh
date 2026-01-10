@@ -116,7 +116,17 @@ fi
 # 3. Virtual Environment
 if [ ! -d "venv" ]; then
     log_info "Creating virtual environment..."
-    python3 -m venv venv
+    if ! python3 -m venv venv; then
+        log_err "Failed to create virtual environment."
+        echo ""
+        echo -e "${YELLOW}Common Fix for Debian/Ubuntu:${NC}"
+        echo "  The 'venv' module requires the python3-venv package."
+        echo "  Please run:"
+        echo -e "    ${GREEN}sudo apt-get install python3-venv${NC}"
+        echo ""
+        echo "  (If using a specific python version, e.g. 3.11, install python3.11-venv)"
+        exit 1
+    fi
 fi
 
 # 4. Dependencies
