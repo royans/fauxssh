@@ -1,41 +1,46 @@
 # Changelog
 
-## Jan 4th 2026
-- **📼 Session Replay**: Implemented full TTY session recording in `asciinema` v2 format (optional, default off).
-- **🛠️ Advanced Shell Features**:
+## Weekly Changelog: Jan 10th 2026
+
+### New Features
+- **🌐 HTTP Honeypot**: Added a new service (Port 8080) mimicking Apache/Nginx with LLM-generated content and caching.
+- **🔌 Telnet Support**: Added full Telnet protocol support (optional listener), sharing the same high-interaction persona and intelligence engine as the SSH service.
+- **📼 Session Replay**: Implemented full TTY session recording in `asciinema` v2 format.
+- **IPv6 Support**: Improved analytics filtering for IPv4-mapped addresses.
+
+### Enhancements
+- **Advanced Shell Features**:
     - **Variable Persistence**: Fixed environment variables (`VAR=val`) persisting across commands.
     - **Complex Assignments**: Support for recursive command execution in assignments (`cpus=$(...)`).
     - **New Tools**: Native implementation of `cut`, `tr`, `head`, `tail`.
-- **📊 Analytics Upgrade**: Added "Unique%" score, removed truncation, and implemented advanced sorting (`--sort Risk:Desc`).
-- **IPv6 Support**: Improved analytics filtering for IPv4-mapped addresses.
-- **Security**: Hardened internal debug commands (`debug_env`).
-- **Maintenance**: Added automatic cleanup of legacy artifact files (filenames starting with `-`) on startup.
-- **Security Audit**: Verified codebase against SQL injection vulnerabilities (Clean).
+- **📊 Analytics Upgrade**: Added "Unique%" score, removed truncation, and implemented advanced sorting.
+- **Robust Telnet**: Rewrote `TelnetHelper` to handle fragmentation and "Enter key hangs".
+- **Log Clarity**: Improved attribution in error logs (`[SSH]`, `[Telnet]`, `(Protocol: ...)`).
 
-## Jan 3rd 2026
-- **Access Tracking**: Files system now tracks `last_accessed` timestamps to identify abandoned vs. active files.
-- **Aggressive Cleanup**: Auto-pruning now safely deletes old files that haven't been accessed, reducing database bloat.
-- **Forensics Tooling**: Enhanced `fs_inspector.py` with `--delete`, `--file`, and access time visibility for managing attacker uploads.
-- **Copy-On-Write**: Refactored filesystem to use a Copy-On-Write (COW) architecture, significantly reducing database size for new sessions.
-- **Improved UX**: Fixed `cd` (no args) behavior to reliably default to user home, and added support for local `&&` command chaining .
+### Reliability
+- **Rate Limiting**: Implemented HTTP LLM Rate Limiting (RPM/RPD) backed by SQLite persistence.
+- **Silence**: Silenced noisy "Unique constraint failed" errors for valid HTTP session updates.
 
-## Jan 2nd 2026
-- **Keyword Alerts**: Support for immediate Discord alerts based on configured keywords or regex patterns.
-- **Webhook Integration**: Real-time session streaming and alerting via Discord webhooks.
-- **Startup Script**: Enhanced `startup.sh` with `--cron` mode and parent directory `.env` discovery.
-- **Bug Fixes**: Resolved critical runtime errors in analysis loop and webhook payload formatting.
+### Security & Maintenance
+- **Error Suppression**: Added log filtering to automatically silence "Incompatible ssh peer" and other Paramiko scanner noise.
+- **Anti-Harvesting**: Confirmed and tested IP-based isolation for anti-harvesting rules.
+- **Security**: Hardened internal debug commands (`debug_env`) and verified codebase against SQL injection.
+- **Maintenance**: Added automatic cleanup of legacy artifact files on startup.
 
-## Jan 1st 2026
-- **Hardware Emulation**: Added handlers for `dmidecode`, `lspci`, and `lscpu` to simulate a dual NVIDIA H100 server.
-- **Enhanced Realism**: Implemented Recon Script Interception and smarter "Alabaster" persona aliases.
-- **Security Scaling**: Increased input processing limit to 50,000 characters to support analyzing large malware payloads.
+## Weekly Changelog: Jan 3rd 2026
 
-## Dec 31st 2025
-- **Native SCP Protocol**: Full support for `scp` file uploads (quarantined locally) and downloads.
-- **Malware Persistence**: Uploaded files can now be "executed" (simulated via LLM) to observe behavioral analysis.
-- **Prompt Injection Hardening**: New framework to detect and neutralize adversarial LLM prompts.
+### New Features
+- **🔔 Real-time Alerting**: Implemented Webhook integration and Keyword-based Discord alerts.
+- **📁 Native SCP & Forensic Tooling**: Full SCP upload/download support, "Access Tracking" for files, and enhanced `fs_inspector` for managing malware.
+- **🦠 Malware Analysis**: Uploaded files are quarantined but can be "executed" (simulated) for behavioral study.
+- **🖥️ Hardware Emulation**: Handlers for `dmidecode`/`lspci` simulating High-Performance Computing (H100) hardware.
 
-## Dec 30th 2025
-- **Network Tarpitting**: Implemented "sticky" connections and honeytokens to slow down automated scanners.
-- **Advanced Chaining**: Support for complex command chains (`|`, `&&`, `;`) and redirections (`>`).
-- **Local IO Handlers**: Added fast, deterministic handlers for `disk` operations (`df`, `free`, `mount`, `wc`).
+### Enhancements
+- **Performance**: Refactored to Copy-On-Write (COW) filesystem and implemented aggressive auto-pruning.
+- **Deception**: Added "Sticky" network tarpitting and Recon Script Interception.
+- **Shell Features**: Support for complex chains (`|`, `&&`, `;`, `>`) and local IO handlers (`df`, `free`, `mount`).
+- **Security**: Prompt Injection Hardening and increased input processing limits (50k chars).
+
+### Reliability
+- **Startup**: Enhanced `startup.sh` with cron support.
+- **UX**: Fixed `cd` behavior and session chaining.

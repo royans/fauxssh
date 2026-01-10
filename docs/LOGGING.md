@@ -23,7 +23,7 @@ A structured log file ideal for ingestion into ELK/Splunk/Graylog.
   "user": "root",
   "command": "uname -a",
   "response_len": 45,
-  "source": "llm",
+  "source": "llm",   // or "local", "http"
   "risk_score": 3
 }
 ```

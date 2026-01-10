@@ -8,7 +8,7 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), "../../"))
 
 try:
-    from ssh_honeypot.honey_db import HoneyDB
+    from ssh_honeypot.core.database import HoneyDB
 except ImportError:
     print("Error: Could not import HoneyDB. Make sure you run this from the project root or install the package.")
     sys.exit(1)
@@ -78,7 +78,7 @@ def cleanup(db_path, dry_run=True):
 if __name__ == "__main__":
     # Robust Setup for Environment
     try:
-        from ssh_honeypot.config_manager import get_data_dir
+        from ssh_honeypot.core.config import get_data_dir
         # This will use FAUXSSH_DATA_DIR from .env if loaded by config_manager
         auto_path = os.path.join(get_data_dir(), "honeypot.sqlite")
     except ImportError:

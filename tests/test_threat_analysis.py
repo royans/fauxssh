@@ -3,8 +3,8 @@ import sqlite3
 import os
 import json
 from unittest.mock import MagicMock, patch
-from ssh_honeypot.honey_db import HoneyDB
-from ssh_honeypot.llm_interface import LLMInterface
+from ssh_honeypot.core.database import HoneyDB
+from ssh_honeypot.core.llm import LLMInterface
 
 # --- HoneyDB Tests ---
 
@@ -71,7 +71,7 @@ def test_get_unanalyzed_commands(test_db):
 def llm():
     return LLMInterface(api_key="fake_key_for_test")
 
-@patch('ssh_honeypot.llm_interface.requests.post')
+@patch('ssh_honeypot.core.llm.requests.post')
 def test_analyze_command(mock_post, llm):
     # Mock Response
     mock_resp = MagicMock()
@@ -93,7 +93,7 @@ def test_analyze_command(mock_post, llm):
     assert result['risk'] == 2
     assert result['explanation'] == "Simple list"
 
-@patch('ssh_honeypot.llm_interface.requests.post')
+@patch('ssh_honeypot.core.llm.requests.post')
 def test_analyze_command_failure(mock_post, llm):
     # Mock Failure
     mock_resp = MagicMock()

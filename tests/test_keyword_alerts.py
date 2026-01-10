@@ -4,8 +4,8 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ssh_honeypot.alert_manager import AlertManager
-from ssh_honeypot.config_manager import config
+from ssh_honeypot.core.alert_manager import AlertManager
+from ssh_honeypot.core.config import config
 
 class TestKeywordAlerts(unittest.TestCase):
     def setUp(self):

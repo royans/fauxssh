@@ -6,7 +6,7 @@ import os
 # Add project root to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from ssh_honeypot.command_handler import CommandHandler
+from ssh_honeypot.core.command_handler import CommandHandler
 
 class TestPermissions(unittest.TestCase):
     def setUp(self):

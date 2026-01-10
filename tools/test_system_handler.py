@@ -5,7 +5,7 @@ import os
 # Path hack
 sys.path.append(os.getcwd())
 
-from ssh_honeypot.handlers.system import SystemHandler
+from ssh_honeypot.handlers.unix.cmd_system import SystemHandler
 
 class MockDB:
     pass

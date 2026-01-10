@@ -1,6 +1,18 @@
 server:
   hostname: "web.blogofy.com"
   port: 2222
+  banner_default: "SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u1"
+
+realism:
+  latency:
+    enabled: true
+    min_ms: 20
+    max_ms: 300
 
 llm:
-  model_name: "gemma-3-27b-it" 
+  model_name: "gemma-3-27b-it"
+
+security:
+  max_input_length: 50000     # Per-Request: Max raw characters (prevent huge buffers)
+  max_input_tokens: 4000      # Per-Request: Max approximate tokens (len/4) to protect Context Window
+  max_rpm: 60                 # Rate Limit: Requests Per Minute (per IP)

@@ -5,8 +5,8 @@ import shutil
 import sqlite3
 import json
 from unittest.mock import MagicMock
-from ssh_honeypot.command_handler import CommandHandler
-from ssh_honeypot.honey_db import HoneyDB
+from ssh_honeypot.core.command_handler import CommandHandler
+from ssh_honeypot.core.database import HoneyDB
 
 class TestNetworkIntelligence(unittest.TestCase):
     def setUp(self):

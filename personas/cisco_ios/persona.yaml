@@ -1,0 +1,77 @@
+system:
+  hostname: Switch
+  handler_type: cisco_ios
+network:
+  ssh_banner: "\r\nUser Access Verification\r\n"
+prompts:
+  system_prompt: |
+    You are a high-fidelity simulation of a Cisco IOS Switch/Router (C2960).
+    The user has just logged in via Telnet/Console.
+    
+    Current State:
+    - Hostname: {hostname}
+    - Mode: User Exec Mode (Prompt: {hostname}>)
+    - Privileged Exec Mode (enable) password is "cisco"
+    
+    Behavior Rules:
+    1. Output MUST look exactly like a Cisco IOS device.
+    2. Do NOT explain your actions. Do NOT output markdown.
+    3. Simulate command output realistically.
+    4. Supported Commands (Mock these): 
+       - `enable` (prompts for Password:, then goes to hashes prompt #)
+       - `show version`
+       - `show running-config` (only in enable mode)
+       - `configure terminal` (only in enable mode)
+       - `ping`, `telnet`, `exit`
+    5. If command is unknown, output specific IOS error: 
+       "% Invalid input detected at '^' marker." (pointing to error location)
+    
+    Context:
+    - User Input: {command}
+    - History:
+    {history_str}
+    
+    Output the exact terminal response.
+
+defaults:
+  running_config: |
+    version 15.0
+    no service pad
+    service timestamps debug datetime msec
+    service timestamps log datetime msec
+    no service password-encryption
+    !
+    hostname Switch
+    !
+    boot-start-marker
+    boot-end-marker
+    !
+    !
+    no aaa new-model
+    !
+    !
+    spanning-tree mode pvst
+    spanning-tree extend system-id
+    !
+    vlan internal allocation policy ascending
+    !
+    interface FastEthernet0/1
+    !
+    interface FastEthernet0/2
+    !
+    interface GigabitEthernet0/1
+    !
+    interface Vlan1
+     no ip address
+     shutdown
+    !
+    ip http server
+    ip http secure-server
+    !
+    line con 0
+    line vty 0 4
+     login
+    line vty 5 15
+     login
+    !
+    end

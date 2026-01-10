@@ -13,6 +13,24 @@ GOOGLE_API_KEY=your_key_here
 # Optional: Data Directory Override
 FAUXSSH_DATA_DIR=/absolute/path/to/data
 
+# Optional: Telnet Support (Default: On)
+SSHPOT_ENABLE_TELNET=true
+SSHPOT_TELNET_PORT=2323
+
+# Optional: Redis Support (Default: On)
+SSHPOT_ENABLE_REDIS=true
+SSHPOT_REDIS_PORT=6379
+
+# Optional: MCP Control Plane (Default: On)
+SSHPOT_ENABLE_MCP=true
+SSHPOT_MCP_PORT=8000
+SSHPOT_MCP_MAX_LLM_CALLS=20      # Limit LLM calls per session
+SSHPOT_MCP_THROTTLE_DELAY=2.0    # Delay (sec) for throttling
+
+# Optional: HTTP Honeypot (Default: On, Port 8080)
+SSHPOT_ENABLE_HTTP=true
+SSHPOT_HTTP_PORT=8080
+
 # Optional: Analytics Privacy
 ANALYTICS_IGNORE_IPS=127.0.0.1,192.168.1.5,10.0.0.1
 ```
@@ -27,6 +45,13 @@ server:
   bind_ip: "0.0.0.0"
   hostname: "web.blogofy.com"   # Fake hostname shown in prompt
   host_key_file: "data/host.key"
+  banner_default: "SSH-2.0-OpenSSH_..." # Fallback banner if persona undefined
+
+realism:
+  latency:
+    enabled: true
+    min_ms: 20
+    max_ms: 300                 # Randomize output delay (Anti-Fingerprint)
 
 llm:
   model_name: "gemma-3-27b-it"  # Google Gemini model

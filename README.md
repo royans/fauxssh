@@ -11,11 +11,21 @@ FauxSSH deceptively emulates a realistic Linux server, engaging attackers in lon
 ## Key Features
 
 - **🧠 LLM-Powered Realism**: Uses Google Gemini to dynamically generate file contents (`cat`, `ls`), command responses (`ps aux`, `docker ps`), and error messages.
-- **🕵️‍♂️ Behavioral Analysis**: Automatically analyzes attacker commands for risk, intent, and TTPs (Tactics, Techniques, and Procedures).
+- **✨ Researcher Intel Suite**: Includes **Common FS** (global honeytokens), **Smart Session Summary** (LLM-generated narratives & Risk Scores), and **MITRE ATT&CK** T-Code tagging.
+- **🛡️ Defcon-Grade Deception**: Features **Latency Jitter** (randomized network delays) and **Dynamic SSH Banners** (persona-specific strings) to evade scanner fingerprinting.
+- **🔌 Telnet Support**: Optional Telnet listener to capture attacks on legacy protocols, sharing the same persona and intelligence engine.
+- **🌐 HTTP Honeypot**: A realistic web server (Port 8080) that dynamically generates HTML, logins, and error pages using the LLM.
+- **🟥 High-Interaction Redis**: A realistic Redis honeypot that supports standard commands (`PING`, `INFO`) and uses LLM hallucination for data store queries (`GET`, `SET`).
+- **🤖 MCP "Control Plane"**: Exposes a Model Context Protocol service (Port 8000) mimicking an internal DevOps control plane with fake diagnostic tools.
 - **📼 Session Replay**: Record full TTY sessions (input/output) in [asciinema](https://asciinema.org) format for playback.
 - **🔒 Safe & Isolated**: All uploaded files are sandboxed. The "filesystem" is virtual and strictly isolated from the host.
 - **🚨 Real-Time Alerting**: Stream high-risk sessions live to Discord or Slack.
 - **📊 Built-in Analytics**: CLI tools to visualize sessions, inspect malware, and correlate threat actors.
+
+## Recent Improvements (Jan 9)
+- **Robust Telnet Input**: Completely rewrote Telnet input handling (`TelnetHelper`) to fix "Enter key hangs" and support byte-by-byte typing/fragmentation.
+- **Scanning Noise Suppression**: Added intelligent log filtering to automatically suppress "Incompatible ssh peer" and other Paramiko tracebacks from mass scanners.
+- **Anti-Harvesting Isolation**: Verified strict IP-based isolation for anti-harvesting rules (one abusive IP won't lock out others).
 
 ## Quick Start
 
@@ -33,7 +43,7 @@ cp .env.example .env
 nano .env # Add your GOOGLE_API_KEY
 
 # 3. Run
-python3 -m ssh_honeypot.server
+python3 -m ssh_honeypot.main
 ```
 
 ### 2. Production Startup
@@ -48,7 +58,6 @@ Use the included script for robust background execution and logging.
 FauxSSH includes powerful CLI tools to visualize captured data. See [Logging & Analytics](docs/LOGGING.md) for details.
 
 ### Recent Sessions
-### Recent Sessions
 `python3 tools/analytics/analyze.py --sessions --anon --sort Risk:Desc`
 ![Recent Sessions](docs/images/report_sessions.png)
 
@@ -57,9 +66,10 @@ FauxSSH includes powerful CLI tools to visualize captured data. See [Logging & A
 ![Command History](docs/images/report_commands.png)
 
 ### Advanced Filtering
-Filter by IP (supports IPv4 and mapped IPv6) or Session ID:
+Filter by IP (supports IPv4 and mapped IPv6), Session ID, or Protocol:
 `python3 tools/analytics/analyze.py --ip 111.222.333.444`
 `python3 tools/analytics/analyze.py --commands --session-id 49b8ac`
+`python3 tools/analytics/analyze.py --sessions --protocol mcp`
 
 ### Filesystem Forensics
 Inspect and manage attacker uploads in real-time.

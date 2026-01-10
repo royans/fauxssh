@@ -9,8 +9,8 @@ def run_python_import(import_stmt):
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     
     # We verify that we can act like "python3 ssh_honeypot/server.py" by just importing the file logic
-    # But effectively, we just want to ensure 'import ssh_honeypot.server' works from root
-    # AND 'import ssh_honeypot.handlers.network_handlers' works.
+    # But effectively, we just want to ensure 'import ssh_honeypot.services.ssh.server' works from root
+    # AND 'import ssh_honeypot.handlers.unix.cmd_network' works.
     
     cmd = [sys.executable, "-c", import_stmt]
     
@@ -25,18 +25,18 @@ def run_python_import(import_stmt):
     return result
 
 def test_import_server_module():
-    """Test that ssh_honeypot.server can be imported without crashing."""
-    res = run_python_import("import ssh_honeypot.server")
+    """Test that ssh_honeypot.services.ssh.server can be imported without crashing."""
+    res = run_python_import("import ssh_honeypot.services.ssh.server")
     assert res.returncode == 0, f"Import server failed: {res.stderr}"
 
 def test_import_command_handler():
-    """Test that ssh_honeypot.command_handler can be imported."""
-    res = run_python_import("import ssh_honeypot.command_handler")
+    """Test that ssh_honeypot.core.command_handler can be imported."""
+    res = run_python_import("import ssh_honeypot.core.command_handler")
     assert res.returncode == 0, f"Import command_handler failed: {res.stderr}"
 
 def test_import_network_handlers_directly():
     """Test verification of the specific fix for network_handlers relative imports."""
-    res = run_python_import("import ssh_honeypot.handlers.network_handlers")
+    res = run_python_import("import ssh_honeypot.handlers.unix.cmd_network")
     assert res.returncode == 0, f"Import network_handlers failed: {res.stderr}"
 
 def test_server_startup_dry_run():

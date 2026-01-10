@@ -12,7 +12,7 @@ import logging
 # Add parent dir to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
 
-from ssh_honeypot.config_manager import config
+from ssh_honeypot.core.config import config
 from ssh_honeypot.persona_validator import validate_active_persona
 
 def validate_persona(name_or_path):

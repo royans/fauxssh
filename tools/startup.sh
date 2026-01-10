@@ -9,7 +9,7 @@ cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT"
 
 # Resolve Data Directory
-DATA_DIR=$(python3 -c "from ssh_honeypot.config_manager import get_data_dir; print(get_data_dir())" 2>/dev/null | tail -n 1)
+DATA_DIR=$(python3 "$PROJECT_ROOT/tools/internal/get_data_dir.py" 2>/dev/null | tail -n 1)
 
 if [ -z "$DATA_DIR" ]; then
     # Fallback if python fails (e.g. imports)
@@ -20,7 +20,7 @@ mkdir -p "$DATA_DIR"
 
 PID_FILE="$DATA_DIR/server.pid"
 LOG_FILE="$DATA_DIR/server_startup.log"
-SERVER_CMD="python3 -m ssh_honeypot.server"
+SERVER_CMD="python3 -m ssh_honeypot.main"
 
 # Check arguments
 RESTART=false

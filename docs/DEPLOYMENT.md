@@ -6,7 +6,7 @@ For long-running deployments, use the included startup script. It handles:
 - Background execution
 - PID management
 - Logging to `data/server_startup.log`
-- Auto-restart on crash or file changes
+- Safe usage with cron (idempotent)
 
 ```bash
 ./tools/startup.sh
@@ -14,7 +14,15 @@ For long-running deployments, use the included startup script. It handles:
 
 To run via cron (ensures it stays up after reboot):
 ```bash
-* * * * * /path/to/fauxssh/tools/startup.sh --cron
+* * * * * /path/to/fauxssh/tools/startup.sh
+```
+
+## Restarting the Server
+
+To force a restart (applying new code or config):
+
+```bash
+./tools/startup.sh --restart
 ```
 
 ## Port Forwarding (Running on Port 22)
@@ -23,6 +31,14 @@ By default, FauxSSH runs on port 2222 to avoid requiring root privileges. To exp
 
 ```bash
 sudo iptables -t nat -A PREROUTING -p tcp --dport 22 -j REDIRECT --to-port 2222
+```
+
+## Telnet Support (Running on Port 23)
+
+FauxSSH also includes a Telnet listener to capture legacy protocol attacks. To expose it on the standard Telnet port (23), assuming you have enabled it on port 2323:
+
+```bash
+sudo iptables -t nat -A PREROUTING -p tcp --dport 23 -j REDIRECT --to-port 2323
 ```
 
 > **Warning**: Ensure your real SSH server is moved to a different port or restricted by IP whitelist before doing this, otherwise you will lock yourself out!

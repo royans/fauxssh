@@ -6,8 +6,9 @@ from unittest.mock import patch, MagicMock
 # Add project root to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from ssh_honeypot.network import NetworkPersona, network_persona
-from ssh_honeypot.handlers import network_handlers
+from ssh_honeypot.core.network import NetworkPersona, network_persona
+from ssh_honeypot.handlers.unix import cmd_network as network_handlers
+from ssh_honeypot.core.config import config
 
 class TestNetworkEmulation(unittest.TestCase):
     def test_singleton(self):
@@ -17,22 +18,27 @@ class TestNetworkEmulation(unittest.TestCase):
     def test_ip_addr_output(self):
         """Verify ip addr format"""
         output = network_persona.get_ip_addr_output()
+        ip = config.get('persona', 'network', 'interfaces', 'eth0')
         self.assertIn("eth0", output)
-        self.assertIn("192.168.1.5/24", output)
+        self.assertIn(f"{ip}/24", output)
         self.assertIn("UP,LOWER_UP", output)
         self.assertIn("link/ether", output)
 
     def test_ip_route_output(self):
         """Verify ip route format"""
+        """Verify ip route format"""
         output = network_persona.get_ip_route_output()
-        self.assertIn("default via 192.168.1.1", output)
-        self.assertIn("192.168.1.5", output)
+        gw = config.get('persona', 'network', 'routes', 'default')
+        ip = config.get('persona', 'network', 'interfaces', 'eth0')
+        self.assertIn(f"default via {gw}", output)
+        self.assertIn(ip, output)
 
     def test_ifconfig_output(self):
         """Verify ifconfig format"""
         output = network_persona.get_ifconfig_output()
+        ip = config.get('persona', 'network', 'interfaces', 'eth0')
         self.assertIn("eth0: flags", output)
-        self.assertIn("inet 192.168.1.5", output)
+        self.assertIn(f"inet {ip}", output)
         self.assertIn("netmask 255.255.255.0", output)
         self.assertIn("MiB", output)
         

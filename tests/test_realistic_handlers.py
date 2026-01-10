@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import MagicMock
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from ssh_honeypot.command_handler import CommandHandler
+from ssh_honeypot.core.command_handler import CommandHandler
 
 class TestRealisticHandlers:
     

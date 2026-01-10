@@ -7,7 +7,7 @@ import sys
 # Add path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from ssh_honeypot.sftp_handler import HoneySFTPServer, HoneySFTPHandle
+from ssh_honeypot.services.ssh.sftp import HoneySFTPServer, HoneySFTPHandle
 from paramiko import SFTP_PERMISSION_DENIED
 
 # Mock Config
@@ -15,9 +15,9 @@ from paramiko import SFTP_PERMISSION_DENIED
 @pytest.fixture
 def mock_config():
     # Import the REAL config manager to patch it
-    from ssh_honeypot import config_manager
+    from ssh_honeypot.core.config import config
     # Patch the 'get' method of the 'config' INSTANCE
-    with patch.object(config_manager.config, 'get') as mock_get:
+    with patch.object(config, 'get') as mock_get:
         mock_get.side_effect = lambda *args: {
             ('upload', 'max_file_size'): 100,
             ('upload', 'max_quota_per_ip'): 200

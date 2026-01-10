@@ -4,7 +4,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from ssh_honeypot.command_handler import CommandHandler
+from ssh_honeypot.core.command_handler import CommandHandler
 
 class TestEchoRedirect(unittest.TestCase):
     def setUp(self):

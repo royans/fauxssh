@@ -1,0 +1,669 @@
+import socket
+import threading
+import paramiko
+import os
+import time
+import json
+import random
+import logging
+import struct
+import hashlib
+
+from ssh_honeypot.core.database import HoneyDB
+from ssh_honeypot.core.llm import LLMInterface
+from ssh_honeypot.core.command_handler import CommandHandler
+from ssh_honeypot.core.session_analyzer import analyze_session
+from ssh_honeypot.core.config import config, get_data_dir
+from ssh_honeypot.services.ssh.sftp import HoneySFTPServer
+from ssh_honeypot.core.alert_manager import AlertManager
+from ssh_honeypot.core.session_logger import SessionLogger
+from ssh_honeypot.core.logging_setup import log
+from ssh_honeypot.core.persona_validator import validate_active_persona
+
+# Settings
+# SERVER_BANNER is now dynamic
+HOST_KEY_FILE = os.path.join(get_data_dir(), 'host.key')
+
+# --- Logging Filter for Paramiko Noise ---
+class ParamikoFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        if "Error reading SSH protocol banner" in msg:
+            return False
+        if record.exc_info:
+            exc_type, exc_value, _ = record.exc_info
+            if "Error reading SSH protocol banner" in str(exc_value):
+                return False
+        return True
+
+logging.getLogger("paramiko.transport").addFilter(ParamikoFilter())
+# -----------------------------------------
+
+# Global Limits
+MAX_CONCURRENT_SESSIONS = 20
+MAX_SESSIONS_PER_IP = 3
+MAX_FILES_PER_SESSION = 50 
+
+active_sessions = 0
+active_sessions_lock = threading.Lock()
+ip_connection_counts = {} # collections.defaultdict(int) replacement for simplicity if needed, but import collections better
+
+import collections
+ip_connection_counts = collections.defaultdict(int)
+
+class HoneypotServer(paramiko.ServerInterface):
+    def __init__(self, client_ip):
+        self.event = threading.Event()
+        self.client_ip = client_ip
+        self.username = None
+        self.password = None
+        self.subsystem = None
+        self.transport_ref = None
+        
+        # We need DB access here. Assuming Global DB or passing it in.
+        # For thread safety and architecture, better to use the db instance passed to start_server
+        # But Paramiko instantiates this. We can use a class var or global db.
+        # Existing code uses global 'db'.
+        
+    def check_channel_request(self, kind, chanid):
+        if kind == 'session':
+            return paramiko.OPEN_SUCCEEDED
+        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+
+    def _parse_ssh_string(self, data, offset=0):
+        try:
+            if len(data) < offset + 4: return None, offset
+            length = struct.unpack('>I', data[offset:offset+4])[0]
+            offset += 4
+            if len(data) < offset + length: return None, offset
+            s = data[offset:offset+length]
+            return s.decode('utf-8', errors='ignore'), offset + length
+        except: return None, offset
+
+    def _compute_hassh(self, payload):
+        try:
+            # Skip MSG(1) + Cookie(16) = 17
+            offset = 17
+            
+            # 1. KEX
+            kex, offset = self._parse_ssh_string(payload, offset)
+            # 2. HostKey (Skip)
+            _, offset = self._parse_ssh_string(payload, offset)
+            # 3. Enc C2S
+            enc, offset = self._parse_ssh_string(payload, offset)
+            # 4. Enc S2C (Skip)
+            _, offset = self._parse_ssh_string(payload, offset)
+            # 5. Mac C2S
+            mac, offset = self._parse_ssh_string(payload, offset)
+            # 6. Mac S2C (Skip)
+            _, offset = self._parse_ssh_string(payload, offset)
+            # 7. Comp C2S
+            comp, offset = self._parse_ssh_string(payload, offset)
+            
+            if kex and enc and mac and comp:
+                raw_str = f"{kex};{enc};{mac};{comp}"
+                md5 = hashlib.md5(raw_str.encode()).hexdigest()
+                return md5, raw_str
+        except: pass
+        return None, None
+
+    def _extract_fingerprint(self):
+        if not self.transport_ref: return None
+        
+        fp = {}
+        try:
+            fp['cipher'] = getattr(self.transport_ref, 'remote_cipher', 'unknown')
+            fp['mac'] = getattr(self.transport_ref, 'remote_mac', 'unknown')
+            fp['compression'] = getattr(self.transport_ref, 'remote_compression', 'unknown')
+            fp['kex'] = getattr(self.transport_ref, 'kex_alg', 'unknown')
+            
+            if hasattr(self.transport_ref, '_latest_kex_init'):
+                 hassh, raw = self._compute_hassh(self.transport_ref._latest_kex_init)
+                 if hassh:
+                     fp['hassh'] = hassh
+                     fp['hassh_algorithms'] = raw
+            
+            return fp
+        except: return None
+
+    def check_auth_password(self, username, password):
+        self.username = username
+        self.password = password
+        
+        # Use globally bound db (will be set in start_ssh_server scope or truly global)
+        # Using global db
+        is_safe, reason = db.validate_anti_harvesting(self.client_ip, username, password)
+        if not is_safe:
+             log.warning(f"[SSH] [!] {reason}")
+             return paramiko.AUTH_FAILED
+
+        # Check Root Policy
+        allow_root = config.get('persona', 'access_control', 'allow_root')
+        if allow_root is None: allow_root = False 
+        
+        if username == 'root' and not allow_root:
+             success = False
+        else:
+             success = True
+        
+        client_version = "unknown"
+        if self.transport_ref:
+            client_version = self.transport_ref.remote_version
+            
+        fp = self._extract_fingerprint()
+        db.log_auth_event(self.client_ip, username, 'password', password, success, client_version, fingerprint=fp, protocol='ssh')
+
+        if not success:
+            return paramiko.AUTH_FAILED
+            
+        return paramiko.AUTH_SUCCESSFUL
+        
+    def check_auth_publickey(self, username, key):
+        self.username = username
+        client_version = "unknown"
+        if self.transport_ref:
+            client_version = self.transport_ref.remote_version
+            
+        key_type = key.get_name()
+        key_b64 = key.get_base64()
+        auth_data = f"{key_type} {key_b64}"
+        
+        home_dir = "/root" if username == "root" else f"/home/{username}"
+        auth_keys_path = f"{home_dir}/.ssh/authorized_keys"
+        
+        node = db.get_user_node(self.client_ip, username, auth_keys_path)
+        
+        authorized = False
+        if node and node.get('type') == 'file' and node.get('content'):
+            content = node['content']
+            for line in content.splitlines():
+                if not line.strip() or line.strip().startswith('#'): continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    if parts[0] == key_type and parts[1] == key_b64:
+                        authorized = True
+                        break
+        
+        fp = self._extract_fingerprint()
+        db.log_auth_event(self.client_ip, username, 'publickey', auth_data, authorized, client_version, fingerprint=fp, protocol='ssh')
+        
+        if authorized:
+            log.info(f"[Auth] Public Key Login SUCCESS for '{username}' from {self.client_ip}")
+            return paramiko.AUTH_SUCCESSFUL
+        else:
+            return paramiko.AUTH_FAILED
+
+    def get_allowed_auths(self, username):
+        return 'password,publickey'
+
+    def check_channel_shell_request(self, channel):
+        self.event.set()
+        return True
+
+    def check_channel_exec_request(self, channel, command):
+        self.command = command
+        self.event.set()
+        return True
+
+    def check_channel_subsystem_request(self, channel, name):
+        self.subsystem = name
+        self.event.set()
+        return True
+
+    def check_channel_pty_request(self, channel, term, width, height, pixelwidth, pixelheight, modes):
+        return True
+
+def latency_jitter():
+    """Injects random network latency if enabled."""
+    try:
+        conf = config.get('realism', 'latency')
+        if not conf or not conf.get('enabled', False):
+            return
+        
+        min_ms = conf.get('min_ms', 20)
+        max_ms = conf.get('max_ms', 300)
+        
+        delay = random.randint(min_ms, max_ms) / 1000.0
+        time.sleep(delay)
+    except: pass
+
+# Handlers needed for loop
+def handle_tab_completion(chan, command_buffer, vfs, cwd, prompt, logger):
+    parts = command_buffer.split()
+    if not parts and not command_buffer:
+            prefix = ""
+    elif command_buffer.endswith(' '):
+            prefix = ""
+    else:
+            prefix = parts[-1]
+    
+    candidates = []
+    current_files = vfs.get(cwd, [])
+    
+    for f in current_files:
+        if f.startswith(prefix):
+            candidates.append(f)
+            
+    if len(candidates) == 1:
+        match = candidates[0]
+        remainder = match[len(prefix):]
+        command_buffer += remainder
+        chan.send(remainder)
+        if logger: logger.log_event('o', remainder)
+        return command_buffer
+        
+    elif len(candidates) > 1:
+        chan.send(b'\r\n')
+        if logger: logger.log_event('o', '\r\n')
+        output_list = "  ".join(candidates)
+        chan.send(output_list.encode('utf-8'))
+        if logger: logger.log_event('o', output_list)
+        chan.send(b'\r\n')
+        if logger: logger.log_event('o', '\r\n')
+        chan.send(prompt)
+        if logger: logger.log_event('o', prompt)
+        chan.send(command_buffer.encode('utf-8'))
+        if logger: logger.log_event('o', command_buffer)
+        return command_buffer
+    
+    return command_buffer
+
+# Connection Handler
+def handle_connection(client, addr, db_inst, llm_inst):
+    global active_sessions
+    ip = addr[0]
+    
+    with active_sessions_lock:
+        if active_sessions >= MAX_CONCURRENT_SESSIONS:
+            log.warning(f"[!] Dropping connection from {ip}: Max sessions reached ({MAX_CONCURRENT_SESSIONS})")
+            client.close()
+            return
+        
+        if ip_connection_counts[ip] >= MAX_SESSIONS_PER_IP:
+            log.warning(f"[!] Dropping connection from {ip}: Max sessions per IP reached ({MAX_SESSIONS_PER_IP})")
+            client.close()
+            return
+            
+        active_sessions += 1
+        ip_connection_counts[ip] += 1
+        
+    try:
+        _handle_connection_logic(client, addr, db_inst, llm_inst)
+    finally:
+        with active_sessions_lock:
+            active_sessions -= 1
+            ip_connection_counts[ip] -= 1
+            if ip_connection_counts[ip] <= 0:
+                del ip_connection_counts[ip]
+
+def _handle_connection_logic(client, addr, db, llm):
+    ip = addr[0]
+    # Inject db into global scope for HoneypotServer to pick up?
+    # Or rely on HoneypotServer finding the global 'db' variable.
+    # To be safe, we rely on the file-level global `db` which we will set in `start_ssh_server`.
+    
+    transport = paramiko.Transport(client)
+    
+    # 1. Resolve Banner
+    # Priority: Persona > Config Default > Hardcoded
+    banner = config.get('persona', 'network', 'ssh_banner')
+    if not banner:
+        banner = config.get('server', 'banner_default')
+    if not banner:
+        banner = "SSH-2.0-OpenSSH_7.4p1 Debian-10+deb9u7"
+        
+    transport.local_version = banner
+    
+    try:
+        host_key = paramiko.RSAKey(filename=HOST_KEY_FILE)
+    except FileNotFoundError:
+        log.info("Generating new host key...")
+        host_key = paramiko.RSAKey.generate(2048)
+        host_key.write_private_key_file(HOST_KEY_FILE)
+    except Exception as e:
+        log.error(f"[!] Error loading host key: {e}")
+        return
+
+    logger = None
+    try:
+        transport.add_server_key(host_key)
+        server = HoneypotServer(ip)
+        server.transport_ref = transport
+        transport.start_server(server=server)
+    except paramiko.SSHException as e:
+        if "Error reading SSH protocol banner" in str(e):
+             # print(f"[!] Scanner disconnected without sending banner: {ip}")
+             pass
+        else:
+             print(f"[!] SSH Error with {ip}: {e}")
+        return
+    except Exception as e:
+        print(f"[!] Unexpected error during handshake with {ip}: {e}")
+        return
+
+    chan = transport.accept(20)
+    if chan is None: return
+
+    server.event.wait(10)
+    if not server.event.is_set():
+        transport.close()
+        return
+
+    session_id = os.urandom(8).hex()
+    
+    fingerprint = {}
+    try:
+        fingerprint = {
+            'cipher': getattr(transport, 'remote_cipher', 'unknown'),
+            'mac': getattr(transport, 'remote_mac', 'unknown'),
+            'compression': getattr(transport, 'remote_compression', 'unknown'),
+            'kex': getattr(transport, 'kex_alg', 'unknown')
+        }
+    except: pass
+    
+    try:
+        db.start_session(session_id, ip, server.username, server.password, transport.remote_version, fingerprint=json.dumps(fingerprint), protocol='ssh')
+        log.info(f"[*] New Session {session_id} from {ip} as {server.username} (SSH)")
+    except Exception as e:
+        log.error(f"[!] Critical Error starting session: {e}")
+
+    user = server.username if server.username else "alabaster"
+    if user == "root": cwd = "/root"
+    else: cwd = f"/home/{user}"
+        
+    hostname = config.get('server', 'hostname') or "npc-main-server-01"
+    
+    # Legacy VFS dict (list of filenames only, actual content in DB)
+    vfs = {
+        "/tmp": [],
+        "/var/www/html": ["index.php", "config.php", "assets", "uploads"]
+    }
+
+    server.vfs = vfs
+    server.cwd = cwd
+    server.session_id = session_id
+    server.db = db
+
+    if server.subsystem == 'sftp':
+        log.info(f"[*] Starting SFTP Handler for {session_id}")
+        try:
+            sftp = paramiko.SFTPServer(chan, session_id, server, HoneySFTPServer)
+            sftp.start()
+            while transport.is_active():
+                time.sleep(1)
+        except Exception as e:
+            log.error(f"[!] SFTP Error: {e}")
+        return
+
+    history = []
+    history_cursor = 0
+    llm_call_count = 0
+    
+    handler = CommandHandler(llm, db)
+    alert_manager = AlertManager()
+
+    # Single Command Execution
+    if hasattr(server, 'command') and server.command:
+        cmd_bytes = server.command
+        cmd = cmd_bytes.decode('utf-8', errors='ignore')
+        
+        context = {
+            'cwd': cwd, 'user': user, 'vfs': vfs, 'history': history,
+            'client_ip': ip, 'honeypot_ip': "192.168.1.55", 'session_id': session_id,
+            'llm_call_count': llm_call_count, 'env': {},
+            'file_list': [os.path.basename(x['path']) for x in db.list_user_dir(ip, user, cwd)],
+            'known_paths': list(vfs.keys())
+        }
+        
+        if cmd.strip().startswith('scp '):
+             log.info(f"[*] Starting SCP Handler for {session_id} (cmd: {cmd})")
+             try:
+                 handler.handle_scp_interactive(cmd, chan, context)
+                 chan.send_exit_status(0)
+                 chan.close()
+                 return
+             except Exception as e:
+                 log.error(f"[!] SCP Handler Error: {e}")
+                 return
+
+        start_time = time.time()
+        resp_text, modifications, metadata = handler.process_command(cmd, context)
+        duration_ms = round((time.time() - start_time) * 1000, 2)
+        
+        try: cmd_hash = hashlib.md5(cmd.encode('utf-8')).hexdigest()
+        except: cmd_hash = "unknown"
+            
+        log.debug(f"[DEBUG] Exec '{cmd}' -> Response Len: {len(resp_text)}")
+        db.log_interaction(session_id, cwd, cmd, resp_text, source=str(metadata.get('source', 'unknown')), 
+                           was_cached=metadata.get('cached', False), duration_ms=duration_ms, request_md5=str(cmd_hash))
+
+        try:
+            if resp_text: chan.send(resp_text)
+            chan.send_exit_status(0)
+            chan.close()
+        except OSError: pass
+        return
+
+    # Shell Mode
+    prompt = f"\r\n{user}@{hostname}:{cwd}$ "
+    chan.send(f"Linux {hostname} 3.16.0-6-amd64 #1 SMP Debian 3.16.56-1+deb8u1 (2018-04-23) x86_64\r\n")
+    chan.send(f"The programs included with the Debian GNU/Linux system are free software.\r\n")
+    chan.send(f"Last login: {time.ctime()} from 10.0.0.5\r\n")
+    chan.send(prompt)
+    
+    command_buffer = ""
+    env = {}
+
+    logger = None
+    try:
+        if config.get('logging', 'enable_session_replay'):
+            logger = SessionLogger(session_id, user, ip)
+            log.info(f"Session recording started: {session_id}.cast")
+    except Exception as e:
+        log.error(f"Failed to start session logger: {e}")
+
+    try:
+        while True:
+            char = chan.recv(1)
+            if logger and char: logger.log_event('i', char)
+            
+            if not char: break
+                
+            if char == b'\x03': # Ctrl+C
+                chan.send(b'^C\r\n')
+                if logger: logger.log_event('o', '^C\r\n')
+                command_buffer = ""
+                history_cursor = len(history)
+                chan.send(prompt)
+                if logger: logger.log_event('o', prompt)
+                
+            elif char == b'\r' or char == b'\n':
+                if char == b'\n' and command_buffer == "": continue
+                chan.send(b'\r\n')
+                if logger: logger.log_event('o', '\r\n')
+                cmd = command_buffer.strip()
+                command_buffer = ""
+                history_cursor = len(history)
+                
+                if cmd:
+                    if cmd == 'exit': break
+                    if cmd == 'clear':
+                        chan.send(b'\033[2J\033[H')
+                        chan.send(prompt)
+                        continue
+                    
+                    context = {
+                        'env': env, 'cwd': cwd, 'user': user, 'vfs': vfs, 'history': history,
+                        'client_ip': ip, 'honeypot_ip': "192.168.1.55", 'session_id': session_id,
+                        'llm_call_count': llm_call_count,
+                        'file_list': [os.path.basename(x['path']) for x in db.list_user_dir(ip, user, cwd)],
+                        'known_paths': list(vfs.keys()),
+                        'protocol': 'ssh'
+                    }
+                    
+                    start_time = time.time()
+                    resp_text, updates, metadata = handler.process_command(cmd, context)
+                    duration_ms = round((time.time() - start_time) * 1000, 2)
+                    try: cmd_hash = hashlib.md5(cmd.encode('utf-8')).hexdigest()
+                    except: cmd_hash = "unknown"
+                    
+                    llm_call_count += 1 
+
+                    if updates:
+                        if updates.get('new_cwd'):
+                            cwd = updates.get('new_cwd')
+                            if cwd not in vfs: vfs[cwd] = []
+                        if updates.get('env'): context['env'].update(updates['env'])
+                        if updates.get('file_modifications'):
+                             for mod in updates.get('file_modifications'):
+                                action = mod.get('action')
+                                path = mod.get('path')
+                                target_dir = cwd
+                                filename = path
+                                if '/' in path:
+                                    parts = path.rsplit('/', 1)
+                                    if path.startswith('/'): target_dir = parts[0] if len(parts) > 1 else '/'
+                                    filename = parts[1]
+                                
+                                if target_dir not in vfs: vfs[target_dir] = []
+                                if action == 'create':
+                                    if len(vfs.get(target_dir, [])) < MAX_FILES_PER_SESSION and filename not in vfs[target_dir]:
+                                        vfs[target_dir].append(filename)
+                                elif action == 'delete':
+                                    if filename in vfs[target_dir]: vfs[target_dir].remove(filename)
+
+                    fmt_resp = resp_text.replace('\n', '\r\n')
+                    
+                    # Inject Jitter before output
+                    latency_jitter()
+                    
+                    chan.send(fmt_resp)
+                    if logger: logger.log_event('o', fmt_resp)
+                    if fmt_resp and not fmt_resp.endswith('\r\n'):
+                        chan.send(b'\r\n')
+                        if logger: logger.log_event('o', '\r\n')
+                        
+                    db.log_interaction(session_id, cwd, cmd, resp_text, source=str(metadata.get('source', 'unknown')), 
+                                       was_cached=metadata.get('cached', False), duration_ms=duration_ms, request_md5=str(cmd_hash))
+
+                    try:
+                        alert_manager.handle_interaction(session_id, ip, cmd, resp_text)
+                    except Exception as e:
+                        log.error(f"[Alert] Stream Error: {e}")
+                    
+                    history.append((cmd, resp_text))
+
+                prompt = f"{user}@{hostname}:{cwd}$ "
+                chan.send(prompt)
+                if logger: logger.log_event('o', prompt)
+                history_cursor = len(history)
+            
+            elif char == b'\x08' or char == b'\x7f':
+                if len(command_buffer) > 0:
+                    command_buffer = command_buffer[:-1]
+                    chan.send(b'\x08 \x08')
+
+            elif char == b'\x1b':
+                # Simplified Arrow handling
+                try:
+                    seq = chan.recv(2)
+                    if seq == b'[A': # Up
+                        if history_cursor > 0 and history:
+                            history_cursor -= 1
+                            prev_cmd = history[history_cursor][0]
+                            backspaces = b'\x08' * len(command_buffer)
+                            spaces = b' ' * len(command_buffer)
+                            chan.send(backspaces + spaces + backspaces)
+                            command_buffer = prev_cmd
+                            chan.send(command_buffer)
+                    elif seq == b'[B': # Down
+                        if history_cursor < len(history):
+                            history_cursor += 1
+                            backspaces = b'\x08' * len(command_buffer)
+                            spaces = b' ' * len(command_buffer)
+                            chan.send(backspaces + spaces + backspaces)
+                            if history_cursor == len(history): command_buffer = ""
+                            else: command_buffer = history[history_cursor][0]
+                            chan.send(command_buffer)
+                except: pass
+
+            elif char == b'\t':
+                command_buffer = handle_tab_completion(chan, command_buffer, vfs, cwd, prompt, logger)
+
+            else:
+                try:
+                    c = char.decode('utf-8')
+                    if c.isprintable():
+                        command_buffer += c
+                        chan.send(char)
+                except: pass
+
+    except Exception as e:
+        log.error(f"Session Error: {e}")
+    finally:
+        # Trigger Session Analysis (Researcher Intel)
+        try:
+            status = analyze_session(session_id, db, llm)
+            log.info(f"Session Analysis: {status}")
+        except Exception as e:
+            log.error(f"Analysis Error: {e}")
+
+        db.end_session(session_id)
+        if logger: logger.close()
+        transport.close()
+
+
+# Global DB reference helper for the server instance which is instantiated by paramiko internal thread
+db = None
+llm = None
+
+def start_ssh_server(port, db_instance, llm_instance):
+    """
+    Start the SSH Honeypot Server.
+    Run this in a thread or separate process.
+    """
+    global db, llm
+    db = db_instance # Bind global for Paramiko instantiation callbacks
+    llm = llm_instance # Expose for tests
+    
+    # Generate Host Key if needed
+    if not os.path.exists(HOST_KEY_FILE):
+        print("[*] Generating Host Key...")
+        k = paramiko.RSAKey.generate(2048)
+        k.write_private_key_file(HOST_KEY_FILE)
+
+    BIND_IP = os.getenv('SSHPOT_BIND_IP') or config.get('server', 'bind_ip') or '0.0.0.0'
+    
+    # Create Socket
+    addr_family = socket.AF_INET
+    if ':' in BIND_IP or BIND_IP == '::':
+        addr_family = socket.AF_INET6
+    
+    sock = socket.socket(addr_family, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    
+    if addr_family == socket.AF_INET6:
+        try:
+             IPPROTO_IPV6 = getattr(socket, 'IPPROTO_IPV6', 41)
+             IPV6_V6ONLY = getattr(socket, 'IPV6_V6ONLY', 26)
+             sock.setsockopt(IPPROTO_IPV6, IPV6_V6ONLY, 0)
+        except Exception as e:
+             print(f"[!] Warning: Could not set IPV6_V6ONLY=0: {e}")
+
+    try:
+        sock.bind((BIND_IP, port))
+        sock.listen(100)
+        log.info(f"[*] SSH Honeypot listening on {BIND_IP}:{port}")
+    except Exception as e:
+        log.error(f"[!] Failed to bind SSH port {port}: {e}")
+        return
+
+    while True:
+        try:
+            client, addr = sock.accept()
+            # Launch thread handling connection, passing db and llm explicitly (globals to allow mocking)
+            t = threading.Thread(target=handle_connection, args=(client, addr, db, llm))
+            t.daemon = True
+            t.start()
+        except Exception as e:
+            log.error(f"[!] Accept Loop Error: {e}")

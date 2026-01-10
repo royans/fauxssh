@@ -20,16 +20,30 @@ console = Console()
 # ... (Previous imports unrelated to output formatting can stay, but we replace the output logic)
 # Add project root to sys.path to ensure we can find DB
 # Add project root to sys.path to ensure we can find config_manager
+# Add project root to sys.path to ensure we can find ssh_honeypot module
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# tools/analytics -> tools -> project_root
 PROJECT_ROOT = os.path.dirname(os.path.dirname(BASE_DIR))
-sys.path.append(os.path.join(PROJECT_ROOT, "ssh_honeypot"))
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
 
+# Explicitly load .env to match main app behavior
+try:
+    from dotenv import load_dotenv
+    env_path = os.path.join(PROJECT_ROOT, '.env')
+    if os.path.exists(env_path):
+        load_dotenv(env_path)
+except ImportError:
+    pass
 
 try:
-    from config_manager import get_data_dir, get_ignored_ips
-    DB_PATH = os.path.join(get_data_dir(), "honeypot.sqlite")
-except ImportError:
-    # Fallback if import fails (e.g. structure change)
+    from ssh_honeypot.core.utils import get_data_dir, get_ignored_ips
+    from ssh_honeypot.core.config import config
+    # Use the DB_PATH from core database to match app exactly
+    from ssh_honeypot.core.database import DB_PATH
+except ImportError as e:
+    console.print(f"[bold red][!] Import Error: {e}[/bold red]")
+    # Fallback/Debug
     DB_PATH = os.path.join(PROJECT_ROOT, "data", "honeypot.sqlite")
 
 
@@ -111,7 +125,7 @@ def parse_sort_param(sort_str, field_map):
             
     return ", ".join(clauses) if clauses else None
 
-def list_sessions(limit=50, no_failed=False, anon=False, db_path=None, sort_param=None, ip_filter=None):
+def list_sessions(limit=50, no_failed=False, anon=False, db_path=None, sort_param=None, ip_filter=None, protocol_filter=None):
     conn = get_db_connection(db_path)
     c = conn.cursor()
     
@@ -124,7 +138,9 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None, sort_para
             s.start_time, 
             s.end_time,
             s.client_version,
+            s.client_version,
             s.fingerprint,
+            s.protocol,
             (SELECT COUNT(*) FROM interactions i WHERE i.session_id = s.session_id) as cmd_count,
             (SELECT MIN(timestamp) FROM interactions i WHERE i.session_id = s.session_id) as first_cmd,
             (SELECT MAX(timestamp) FROM interactions i WHERE i.session_id = s.session_id) as last_cmd,
@@ -134,11 +150,17 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None, sort_para
                 JOIN command_analysis ca ON i.request_md5 = ca.command_hash 
                 WHERE i.session_id = s.session_id
             ) as avg_risk,
-            (SELECT group_concat(command, '|||') FROM interactions i WHERE i.session_id = s.session_id) as all_commands
+            (SELECT group_concat(command, '|||') FROM interactions i WHERE i.session_id = s.session_id) as all_commands,
+            s.summary,
+            s.risk_score
         FROM sessions s
         WHERE 1=1
     """
     params = []
+    
+    if protocol_filter:
+        query += " AND s.protocol = ?"
+        params.append(protocol_filter)
     
     # Filter Ignored IPs
     try:
@@ -161,13 +183,14 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None, sort_para
     # Sorting
     # Maps: User Field -> SQL Column
     sort_map = {
-        "risk": "avg_risk",
+        "risk": "s.risk_score",
         "cmds": "cmd_count",
         "time": "s.start_time",
         "ip": "s.remote_ip",
         "user": "s.username",
         "client": "s.client_version", 
-        "sessionid": "s.session_id"
+        "sessionid": "s.session_id",
+        "proto": "s.protocol"
     }
     
     order_clause = parse_sort_param(sort_param, sort_map)
@@ -186,66 +209,67 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None, sort_para
     table.add_column("Time", style="cyan", no_wrap=True)
     table.add_column("IP", style="magenta")
     table.add_column("User", style="green")
-    table.add_column("Password")
+    table.add_column("Passwd", style="dim")
+    table.add_column("Proto", style="cyan")
     table.add_column("Client", style="dim")
-    table.add_column("CmdHash", style="bold blue") # Replaced FP
     table.add_column("Cmds", justify="right")
     table.add_column("Dur", justify="right", style="yellow")
     table.add_column("Risk", justify="right")
+    table.add_column("Summary", style="italic white", overflow="fold")
     table.add_column("SessionID", style="dim", no_wrap=True)
 
     for r in rows:
         start = to_local_time(r['start_time'])
         ip = clean_ip(r['remote_ip'], anon=anon)
         user = r['username']
-        pwd = r['password'] or ""
-        ver = (r['client_version'] or "").replace("SSH-2.0-", "")[:15]
-        
-        # Calculate Command Hash
-        cmd_hash = "-"
-        if r['all_commands']:
-            try:
-                # MD5 of concatenated commands
-                cmd_data = r['all_commands'].encode('utf-8')
-                cmd_hash = hashlib.md5(cmd_data).hexdigest()[:8] # First 8 chars
-            except: pass
-        elif int(r['cmd_count']) == 0:
-             cmd_hash = "no_cmds"
+        proto = r['protocol'] or "ssh"
              
+        # Truncate Password
+        pwd = r['password'] or ""
+        if len(pwd) > 15: pwd = pwd[:12] + "..."
+        
+        # Truncate Client
+        ver = (r['client_version'] or "").replace("SSH-2.0-", "")
+        if len(ver) > 15: ver = ver[:12] + "..."
+        
         cmds = str(r['cmd_count'])
         
         # Calculate Duration
         duration_str = "-"
         if r['first_cmd'] and r['last_cmd'] and r['cmd_count'] > 1:
             try:
-                # Timestamps are likely strings in DB
                 t1 = datetime.strptime(r['first_cmd'], "%Y-%m-%d %H:%M:%S")
                 t2 = datetime.strptime(r['last_cmd'], "%Y-%m-%d %H:%M:%S")
                 delta = t2 - t1
-                # Format to concise string e.g. "1m 30s" or "5s"
                 total_seconds = int(delta.total_seconds())
                 if total_seconds < 60:
                     duration_str = f"{total_seconds}s"
                 else:
                     m, s = divmod(total_seconds, 60)
                     duration_str = f"{m}m {s}s"
-            except Exception as e:
-                # Fallback if parsing fails
-                duration_str = "?"
-
-        risk_val = r['avg_risk']
+            except: pass
+        
+        # Risk Priority: Session Risk > Avg Risk
+        risk_val = r['risk_score']
+        if risk_val is None:
+             risk_val = r['avg_risk']
+             
         risk_str = f"{risk_val:.1f}" if risk_val is not None else "-"
         risk_style = get_risk_style(risk_val)
+        
+        summary = r['summary'] or ""
+        if len(summary) > 60: # Reduced width to fit new columns
+             summary = summary[:57] + "..."
         
         # Full Session ID requested
         sid = r['session_id']
         
-        table.add_row(start, ip, user, pwd, ver, cmd_hash, cmds, duration_str, f"[{risk_style}]{risk_str}[/{risk_style}]", sid)
+        table.add_row(start, ip, user, pwd, proto, ver, cmds, duration_str, f"[{risk_style}]{risk_str}[/{risk_style}]", summary, sid)
 
     console.print(table)
 
 
-def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_path=None, sort_param=None):
+def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_path=None, sort_param=None, protocol_filter=None):
     conn = get_db_connection(db_path)
     c = conn.cursor()
     
@@ -301,6 +325,10 @@ def list_commands(limit=50, ip_filter=None, session_filter=None, anon=False, db_
     if session_filter:
         query += " AND i.session_id LIKE ?"
         params.append(f"{session_filter}%")
+    
+    if protocol_filter:
+        query += " AND s.protocol = ?"
+        params.append(protocol_filter)
     
     # Sorting
     sort_map = {
@@ -406,20 +434,21 @@ def main():
     parser.add_argument("--anon", action="store_true", help="Mask the last octet of IP addresses")
     parser.add_argument("--db", help="Path to SQLite database file")
     parser.add_argument("--sort", help="Sort order (e.g. Risk:Desc,Cmds:Desc)")
+    parser.add_argument("--protocol", help="Filter by protocol (ssh, telnet, redis, mcp)")
     
     args = parser.parse_args()
     
     if args.sessions:
-        list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon, db_path=args.db, sort_param=args.sort, ip_filter=args.ip)
+        list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon, db_path=args.db, sort_param=args.sort, ip_filter=args.ip, protocol_filter=args.protocol)
     elif args.commands:
-        list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon, db_path=args.db, sort_param=args.sort)
+        list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon, db_path=args.db, sort_param=args.sort, protocol_filter=args.protocol)
     elif args.retry_failed:
         reset_failed_analysis(db_path=args.db)
     else:
         if args.ip or args.session_id:
-            list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon, db_path=args.db, sort_param=args.sort)
+            list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon, db_path=args.db, sort_param=args.sort, protocol_filter=args.protocol)
         else:
-            list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon, db_path=args.db, sort_param=args.sort, ip_filter=args.ip)
+            list_sessions(limit=args.limit, no_failed=args.no_failed, anon=args.anon, db_path=args.db, sort_param=args.sort, ip_filter=args.ip, protocol_filter=args.protocol)
 
 if __name__ == "__main__":
     main()

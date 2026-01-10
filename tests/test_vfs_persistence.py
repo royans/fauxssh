@@ -6,14 +6,14 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from unittest.mock import MagicMock
-from ssh_honeypot.command_handler import CommandHandler
+from ssh_honeypot.core.command_handler import CommandHandler
 import os
 
 class TestVFSPopulation:
     @pytest.fixture
     def mock_db(self):
         # Use Real DB in memory for persistence check
-        from ssh_honeypot.honey_db import HoneyDB
+        from ssh_honeypot.core.database import HoneyDB
         import sqlite3
         
         # Shared connection for :memory: persistence

@@ -1,0 +1,8 @@
+Employee_ID,Last_Name,First_Name,Role,Dept,Salary,SSN
+E10293,Smith,John,Senior Analyst,Risk,145000,xxx-xx-9021
+E10294,Doe,Jane,VP Finance,Executive,210000,xxx-xx-1234
+E10300,Brown,Robert,Trader,Equities,185000,xxx-xx-5543
+E10301,Davis,Emily,HR Manager,HR,95000,xxx-xx-8821
+E10305,Wilson,Michael,Sysadmin,IT,85000,xxx-xx-0029
+E10310,Garcia,Maria,Compliance Officer,Legal,110000,xxx-xx-4492
+E10322,Miller,David,Intern,Risk,55000,xxx-xx-1102

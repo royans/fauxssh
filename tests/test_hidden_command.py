@@ -6,7 +6,7 @@ import os
 # Add project root
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from ssh_honeypot.command_handler import CommandHandler
+from ssh_honeypot.core.command_handler import CommandHandler
 
 class TestHiddenCommand:
     @pytest.fixture
@@ -24,7 +24,7 @@ class TestHiddenCommand:
         llm = MagicMock()
         return CommandHandler(llm, mock_db)
 
-    @patch('ssh_honeypot.command_handler.get_ignored_ips')
+    @patch('ssh_honeypot.core.command_handler.get_ignored_ips')
     def test_sys_status_untrusted(self, mock_get_ips, handler):
         """Verify untrusted IP gets NO output (pass-through)."""
         mock_get_ips.return_value = ['10.0.0.1']
@@ -40,7 +40,7 @@ class TestHiddenCommand:
         # If None, process_command continues. We can't easily check 'continue' without mocking further down.
         # But handle_sys_status returning None is the contract.
 
-    @patch('ssh_honeypot.command_handler.get_ignored_ips')
+    @patch('ssh_honeypot.core.command_handler.get_ignored_ips')
     def test_sys_status_trusted(self, mock_get_ips, handler):
         """Verify trusted IP gets Stats."""
         mock_get_ips.return_value = ['10.0.0.1', '1.2.3.4']

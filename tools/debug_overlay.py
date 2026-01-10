@@ -5,8 +5,8 @@ import sys
 # Add project root
 sys.path.append(os.getcwd())
 
-from ssh_honeypot.config_manager import config
-from ssh_honeypot.fs_seeder import get_skeleton_data
+from ssh_honeypot.core.config import config
+from ssh_honeypot.core.fs_seeder import get_skeleton_data
 
 def debug_seeder():
     print("--- Debugging Config ---")

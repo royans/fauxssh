@@ -6,7 +6,7 @@ import os
 # Add project root to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from ssh_honeypot.command_handler import CommandHandler
+from ssh_honeypot.core.command_handler import CommandHandler
 
 class TestFileModificationReturns(unittest.TestCase):
     def setUp(self):
@@ -43,15 +43,19 @@ class TestFileModificationReturns(unittest.TestCase):
         self.assertEqual(mods[0]['action'], 'create')
 
     def test_handle_rmdir_returns_dict_in_list(self):
-        # exists, is dir, empty
-        self.mock_db.get_user_node.return_value = {'type': 'dir'}
-        self.mock_db.list_user_dir.return_value = [] 
+        # Setup DB to allow rmdir
+        path = "/home/test/emptydir"
+        self.mock_db.get_user_node.return_value = {'type': 'dir', 'path': path}
+        self.mock_db.list_user_dir.return_value = []
         
-        output, meta = self.handler.handle_rmdir("rmdir olddir", self.context)
+        # New implementation returns 3 values (out, updates, meta)
+        resp, updates, _ = self.handler.handle_rmdir("rmdir emptydir", {'cwd': '/home/test', 'client_ip': '1.2.3.4', 'user': 'test', 'db': self.mock_db})
         
-        mods = meta.get('file_modifications')
-        self.assertIsInstance(mods[0], dict)
-        self.assertEqual(mods[0]['action'], 'delete')
+        assert updates is not None
+        assert 'file_modifications' in updates
+        mods = updates['file_modifications']
+        assert isinstance(mods, list)
+        assert mods[0]['action'] == 'delete'
 
     def test_handle_rm_returns_dict_in_list(self):
         # exists

@@ -5,8 +5,8 @@ import sys
 # Add project root
 sys.path.append(os.getcwd())
 
-from ssh_honeypot.honey_db import HoneyDB
-from ssh_honeypot.config_manager import config
+from ssh_honeypot.core.database import HoneyDB
+from ssh_honeypot.core.config import config
 
 def test_parity():
     # Load config/persona
