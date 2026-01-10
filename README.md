@@ -29,21 +29,30 @@ FauxSSH deceptively emulates a realistic Linux server, engaging attackers in lon
 
 ## Quick Start
 
-### 1. Manual Run (Developer Mode)
-Great for testing quickly without background services.
+### 1. One-Line Installation (Recommended)
+Fastest way to get started. Handles dependencies, virtualenv, and configuration automatically.
 
 ```bash
-# 1. Clone & Install
+env bash -c "$(curl -sL https://raw.githubusercontent.com/royans/fauxssh/main/install.sh)"
+```
+
+### 2. Manual Installation
+For developers who prefer full control.
+
+```bash
+# Clone & Install
 git clone https://github.com/royans/fauxssh.git
 cd fauxssh
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Configure
+# Configure
 cp .env.example .env
-nano .env # Add your GOOGLE_API_KEY
+# Edit .env to add GOOGLE_API_KEY
 
-# 3. Run
-python3 -m ssh_honeypot.main
+# Run
+./start.sh
 ```
 
 ### 2. Production Startup
