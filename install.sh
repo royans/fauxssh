@@ -33,30 +33,52 @@ log_ok() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_err() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-# 1. Prerequisites Check
-log_info "Checking prerequisites..."
+# 1. Prerequisites Report
+log_info "Running Pre-flight Checks..."
 
-command -v python3 >/dev/null 2>&1 || { log_err "Python3 is not installed."; exit 1; }
+BLOCKERS=0
+AUTOFIX=0
 
-# Check for venv module 
-if ! python3 -c "import venv" 2>/dev/null; then
-    log_err "Python3 venv module is missing."
-    echo "  Please run: sudo apt-get install python3-venv"
-    exit 1
+# Check Python3
+if command -v python3 >/dev/null 2>&1; then
+    echo -e "  [${GREEN}OK${NC}] Python 3 detected."
+else
+    echo -e "  [${RED}FAIL${NC}] Python 3 is missing. (Action Required)"
+    BLOCKERS=$((BLOCKERS+1))
 fi
 
-HAS_GIT=false
-if command -v git >/dev/null 2>&1; then
-    HAS_GIT=true
-else
-    log_warn "Git not found. Will attempt download via curl/wget."
-    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
-        log_err "Neither git, curl, nor wget found. Cannot proceed."
-        exit 1
+# Check Venv Capability (Try creating a temp one)
+if command -v python3 >/dev/null 2>&1; then
+    if python3 -m venv /tmp/test_fauxssh_venv >/dev/null 2>&1; then
+        echo -e "  [${GREEN}OK${NC}] Python Venv module (with pip) is working."
+        rm -rf /tmp/test_fauxssh_venv
+    else
+        echo -e "  [${RED}FAIL${NC}] Python Venv creation failed. (Action Required: likely 'sudo apt install python3-venv')"
+        BLOCKERS=$((BLOCKERS+1))
     fi
 fi
 
-log_ok "Prerequisites met."
+# Check Network Tools
+if command -v git >/dev/null 2>&1; then
+    echo -e "  [${GREEN}OK${NC}] Git detected."
+    HAS_GIT=true
+elif command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
+    echo -e "  [${YELLOW}WARN${NC}] Git missing. Will attempt auto-fix using curl/wget."
+    HAS_GIT=false
+    AUTOFIX=$((AUTOFIX+1))
+else
+    echo -e "  [${RED}FAIL${NC}] No download tools (git, curl, wget) found. (Action Required)"
+    BLOCKERS=$((BLOCKERS+1))
+fi
+
+echo ""
+if [ "$BLOCKERS" -gt 0 ]; then
+    log_err "$BLOCKERS Blocker(s) found. Please fix the items marked [FAIL] above and retry."
+    exit 1
+fi
+if [ "$AUTOFIX" -gt 0 ]; then
+    log_info "Proceeding with $AUTOFIX auto-correction(s)..."
+fi
 
 # 2. Setup Directory
 if [ -d "$INSTALL_DIR" ] && [ -d "$INSTALL_DIR/.git" ] && [ "$HAS_GIT" = true ]; then
@@ -131,8 +153,33 @@ fi
 
 # 4. Dependencies
 log_info "Installing Python dependencies (this may take a moment)..."
-./venv/bin/pip install --upgrade pip --quiet
-./venv/bin/pip install -r requirements.txt --quiet
+
+PIP_CMD="./venv/bin/pip"
+PIP_VALID=false
+
+# Check if pip exists and runs
+if [ -x "$PIP_CMD" ] && "$PIP_CMD" --version >/dev/null 2>&1; then
+    PIP_VALID=true
+elif [ -x "./venv/bin/pip3" ] && ./venv/bin/pip3 --version >/dev/null 2>&1; then
+    PIP_CMD="./venv/bin/pip3"
+    PIP_VALID=true
+fi
+
+if [ "$PIP_VALID" = false ]; then
+    log_err "pip is broken or missing in ./venv/bin/. The virtual environment is corrupted."
+    log_info "Removing broken virtual environment..."
+    rm -rf venv
+    log_info "Please run this installer again to re-create it correctly."
+    exit 1
+fi
+
+# Upgrade pip first
+"$PIP_CMD" install --upgrade pip >/dev/null 2>&1 || true
+
+if ! "$PIP_CMD" install -r requirements.txt --quiet; then
+    log_err "Failed to install dependencies."
+    exit 1
+fi
 log_ok "Dependencies installed."
 
 # 5. Configuration
