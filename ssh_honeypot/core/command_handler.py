@@ -20,6 +20,7 @@ from ssh_honeypot.handlers.unix.cmd_chattr import ChattrCommand
 from ssh_honeypot.handlers.unix.cmd_w import WCommand
 from ssh_honeypot.handlers.unix.cmd_last import LastCommand
 from ssh_honeypot.handlers.unix.cmd_rmdir import RmdirCommand
+from ssh_honeypot.handlers.unix.cmd_nohup import NohupCommand
 from ssh_honeypot.handlers.unix.cmd_cat import CatCommand
 from ssh_honeypot.handlers.unix.cmd_head import HeadCommand
 from ssh_honeypot.handlers.unix.cmd_tail import TailCommand
@@ -102,6 +103,7 @@ class CommandHandler:
         self.w_handler = WCommand(db, llm_interface)
         self.last_handler = LastCommand(db, llm_interface)
         self.rmdir_handler = RmdirCommand(db, llm_interface)
+        self.nohup_handler = NohupCommand(db, llm_interface)
 
         
         # Expanded whitelist maps commands to handler functions or generic
@@ -453,6 +455,10 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                  # We updated 'cmd', subsequent logic will use this new 'cmd'
              else:
                  return "BusyBox v1.30.1 multi-call binary.\nUsage: busybox [function] [arguments]...\n", {}, {'source': 'local', 'cached': False}
+        
+        # 0.1a Nohup Dispatch
+        if parts and parts[0] == 'nohup':
+             return self.nohup_handler.handle(cmd, context, self.process_command)
         
         # --- PERSONA DISPATCH ---
         persona = context.get('persona_config', {})

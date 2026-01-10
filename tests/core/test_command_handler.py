@@ -415,3 +415,27 @@ class TestCommandHandler:
         assert resp == ""
         # Assert removed from VFS
         assert filename not in context['vfs'][cwd]
+
+    def test_nohup_handling(self, handler):
+        # Mock handlers for recursion
+        handler.handle_echo = MagicMock(return_value=("ECHO_HIT\n", {}, {'source': 'local'}))
+        
+        context = {'cwd': '/'}
+        
+        # 1. Simple nohup
+        cmd = "nohup echo test"
+        resp, _, _ = handler.process_command(cmd, context)
+        assert "ECHO_HIT" in resp
+        handler.handle_echo.assert_called_with("echo test", context)
+        
+        # 2. Nohup with background &
+        cmd2 = "nohup echo test &"
+        resp2, _, _ = handler.process_command(cmd2, context)
+        assert "ECHO_HIT" in resp2
+        # MagicMock.assert_called_with checks the *last* call.
+        handler.handle_echo.assert_called_with("echo test", context) 
+        
+        # 3. Nohup missing operand
+        cmd3 = "nohup"
+        resp3, _, _ = handler.process_command(cmd3, context)
+        assert "missing operand" in resp3

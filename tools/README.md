@@ -58,21 +58,18 @@ Identifies potential recurring actors by correlating sessions that share:
 python3 tools/analytics/correlate_actors.py
 ```
 
-## 2. Public Tools (`tools/public/`)
+## 2. Deployment Tools (Root & `tools/`)
 
-### Startup Script (`startup.sh`)
-The recommended way to run FauxSSH in production. It handles logging, auto-restarts on crash, and file watching.
+### Main Scripts (Root)
+- **`install.sh`**: The One-Line Installer.
+- **`start.sh`**: The primary launcher (Foreground/Interactive).
 
-```bash
-./tools/public/startup.sh
-```
+### Utilities (`tools/`)
+- **`check_config.py`**: Validates environment (API Keys, Permissions).
+- **`setup_service.sh`**: Installs FauxSSH as a Systemd User Service.
+- **`validate_persona.py`**: Validator for persona YAML files.
 
-### Filesystem Seeder (`update_fs_seed.py`)
-This script helps you update the `static_fs_seed.json` file, which defines the initial state of the virtual filesystem.
-
-```bash
-# Scan a local directory and generate a seed JSON
-python3 tools/public/update_fs_seed.py --scan /path/to/template_dir --out ssh_honeypot/static_fs_seed.json
-```
+## 3. Internal Developer Tools (`tools/internal/`)
+Scripts for debugging, filesystem seeding, and legacy references (e.g., `legacy_startup.sh`) have been moved to `tools/internal/` to reduce clutter.
 
 

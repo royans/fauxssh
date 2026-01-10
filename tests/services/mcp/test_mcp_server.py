@@ -4,12 +4,18 @@ import json
 import time
 import sys
 
-# MOCK DEPENDENCIES BEFORE IMPORT
-# This allows tests to run in an environment where mcp/starlette/uvicorn are not installed
-# We must set pytest_plugins to None to avoid pytest trying to load them as plugins
+# Define Safe MagicMock class that propagates __code__ property
+class SafeMagicMock(MagicMock):
+    @property
+    def __code__(self):
+        # Return a dummy code object to satisfy inspection
+        return (lambda: None).__code__
+
 def create_safe_mock():
-    m = MagicMock()
+    # Use the safe class that propagates behavior to children
+    m = SafeMagicMock()
     m.pytest_plugins = None
+    m.__name__ = "mock_module"
     return m
 
 sys.modules['mcp'] = create_safe_mock()
