@@ -154,8 +154,13 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None, sort_para
             ) as avg_risk,
             (SELECT group_concat(command, '|||') FROM interactions i WHERE i.session_id = s.session_id) as all_commands,
             s.summary,
-            s.risk_score
+            s.risk_score,
+            ii.country,
+            ii.org,
+            ii.network_type,
+            ii.abuse_tags
         FROM sessions s
+        LEFT JOIN ip_intelligence ii ON s.remote_ip = ii.ip
         WHERE 1=1
     """
     params = []
@@ -216,6 +221,8 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None, sort_para
     table.add_column("Client", style="dim")
     table.add_column("Cmds", justify="right")
     table.add_column("Dur", justify="right", style="yellow")
+    table.add_column("Geo", style="blue")
+    table.add_column("ISP/Type", style="dim")
     table.add_column("Risk", justify="right")
     table.add_column("Summary", style="italic white", overflow="fold")
     table.add_column("SessionID", style="dim", no_wrap=True)
@@ -266,7 +273,16 @@ def list_sessions(limit=50, no_failed=False, anon=False, db_path=None, sort_para
         # Full Session ID requested
         sid = r['session_id']
         
-        table.add_row(start, ip, user, pwd, proto, ver, cmds, duration_str, f"[{risk_style}]{risk_str}[/{risk_style}]", summary, sid)
+        # Geo Info
+        geo = r['country'] or "-"
+        isp = r['org'] or r['network_type'] or "-"
+        if len(isp) > 20: isp = isp[:17] + "..."
+        
+        tags = r['abuse_tags'] 
+        if tags and tags != '[]':
+             risk_str += " !" # Flag abuse tags
+        
+        table.add_row(start, ip, user, pwd, proto, ver, cmds, duration_str, geo, isp, f"[{risk_style}]{risk_str}[/{risk_style}]", summary, sid)
 
     console.print(table)
 
@@ -451,9 +467,13 @@ def list_top_ips(limit=50, anon=False, db_path=None):
              FROM interactions i 
              JOIN sessions s2 ON i.session_id = s2.session_id 
              WHERE s2.remote_ip = s.remote_ip 
-             AND i.timestamp > datetime('now', '-1 minute')) as current_rpm
+             AND i.timestamp > datetime('now', '-1 minute')) as current_rpm,
+
+             ii.country,
+             ii.org
 
         FROM sessions s
+        LEFT JOIN ip_intelligence ii ON s.remote_ip = ii.ip
         WHERE 1=1
         GROUP BY s.remote_ip
         ORDER BY current_rpm DESC, total_sessions DESC
@@ -469,8 +489,9 @@ def list_top_ips(limit=50, anon=False, db_path=None):
     table.add_column("IP", style="magenta")
     table.add_column("Sessions", justify="right", style="green")
     table.add_column("Total Cmds", justify="right")
-    table.add_column("1h Cmds", justify="right", style="yellow")
-    table.add_column("Current RPM", justify="right", style="bold")
+    table.add_column("Latest Cmds", justify="right", style="yellow") # Renamed for space
+    table.add_column("RPM", justify="right", style="bold")
+    table.add_column("Location", style="blue")
     table.add_column("Last Seen", style="dim")
     table.add_column("Status", justify="center")
 
@@ -509,6 +530,9 @@ def list_top_ips(limit=50, anon=False, db_path=None):
             status = "High Traffic"
             status_style = "bold blue"
             
+        loc = f"{r['country'] or '?'} / {r['org'] or '?'}"
+        if len(loc) > 30: loc = loc[:27] + "..."
+
         table.add_row(
             str(rank),
             ip,
@@ -516,6 +540,7 @@ def list_top_ips(limit=50, anon=False, db_path=None):
             str(cmds),
             str(recent_1h),
             f"[{rpm_style}]{rpm}[/{rpm_style}]",
+            loc,
             last_seen,
             f"[{status_style}]{status}[/{status_style}]"
         )
@@ -523,6 +548,82 @@ def list_top_ips(limit=50, anon=False, db_path=None):
         
     console.print(table)
     console.print("[dim]Note: 'Current RPM' is based on DB logs. Actual DoS suspension happens in-memory at 1000 RPM.[/dim]")
+
+
+
+def list_payloads(limit=50, anon=False, db_path=None):
+    conn = get_db_connection(db_path)
+    c = conn.cursor()
+    
+    query = """
+        SELECT 
+            p.id,
+            p.timestamp,
+            p.url,
+            p.status,
+            p.payload_md5,
+            p.payload_size,
+            p.file_path,
+            p.ip,
+            p.session_id,
+            p.error_message
+        FROM malicious_payloads p
+        ORDER BY p.timestamp DESC
+        LIMIT ?
+    """
+    
+    c.execute(query, (limit,))
+    rows = c.fetchall()
+    conn.close()
+
+    table = Table(title=f"Malicious Payloads (Last {limit})", box=box.ROUNDED)
+    table.add_column("Time", style="dim", no_wrap=True)
+    table.add_column("Status", justify="center")
+    table.add_column("URL", style="blue underline", overflow="fold")
+    table.add_column("MD5 / Error", style="dim", overflow="fold")
+    table.add_column("Size", justify="right")
+    table.add_column("IP", style="magenta")
+    table.add_column("Local File", style="green", overflow="fold")
+
+    for r in rows:
+        ts = to_local_time(r['timestamp'])
+        ip = clean_ip(r['ip'], anon=anon)
+        
+        status = r['status']
+        status_style = "white"
+        if status == 'completed': status_style = "green"
+        elif status == 'failed': status_style = "red"
+        elif status == 'pending': status_style = "yellow"
+        elif status == 'downloading': status_style = "cyan blink"
+        
+        # MD5 or Error
+        details = r['payload_md5'] or ""
+        if r['error_message']:
+            details = f"[red]{r['error_message']}[/red]"
+            
+        # File Path (shorten)
+        fpath = r['file_path'] or ""
+        if fpath:
+             fpath = os.path.basename(fpath) # Just show filename
+        
+        size_str = "-"
+        if r['payload_size']:
+            size = r['payload_size']
+            if size < 1024: size_str = f"{size} B"
+            else: size_str = f"{size/1024:.1f} KB"
+
+        table.add_row(
+            ts, 
+            f"[{status_style}]{status.upper()}[/{status_style}]", 
+            r['url'],
+            details,
+            size_str,
+            ip,
+            fpath
+        )
+        
+    console.print(table)
+    console.print(f"[dim]Files are located in: data/payloads/[/dim]")
 
 
 def reset_failed_analysis(db_path=None):
@@ -553,6 +654,7 @@ def main():
     group.add_argument("--commands", action="store_true", help="List recent commands")
     group.add_argument("--retry-failed", action="store_true", help="Reset failed analysis")
     group.add_argument("--top-ips", action="store_true", help="Show Top IPs and Frequency")
+    group.add_argument("--payloads", action="store_true", help="List captured malicious payloads")
     
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--no-failed", action="store_true")
@@ -574,6 +676,8 @@ def main():
         reset_failed_analysis(db_path=args.db)
     elif args.top_ips:
         list_top_ips(limit=args.limit, anon=args.anon, db_path=args.db)
+    elif args.payloads:
+        list_payloads(limit=args.limit, anon=args.anon, db_path=args.db)
     else:
         if args.ip or args.session_id:
             list_commands(limit=args.limit, ip_filter=args.ip, session_filter=args.session_id, anon=args.anon, db_path=args.db, sort_param=args.sort, protocol_filter=args.protocol, show_output=args.output)

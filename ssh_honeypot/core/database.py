@@ -237,6 +237,54 @@ class HoneyDB(DatabaseBackend):
             FOREIGN KEY(session_id) REFERENCES sessions(session_id)
         )''')
 
+        # IP Intelligence (Jan 10)
+        c.execute('''CREATE TABLE IF NOT EXISTS ip_intelligence (
+            ip TEXT PRIMARY KEY,
+            hostname TEXT,
+            city TEXT,
+            country TEXT,
+            isp TEXT,
+            org TEXT,
+            asn TEXT,
+            network_type TEXT,
+            first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+            enriched BOOLEAN DEFAULT 0,
+            raw_data TEXT,
+            abuse_tags TEXT DEFAULT '[]'
+        )''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_ip_intel_enriched ON ip_intelligence(enriched, last_seen)')
+
+        # Requested URLs Log (Network Intelligence)
+        c.execute('''CREATE TABLE IF NOT EXISTS requested_urls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            session_id TEXT,
+            url TEXT,
+            method TEXT,
+            user_agent TEXT,
+            command_text TEXT,
+            FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+        )''')
+
+        # Malicious Payloads (Jan 10)
+        c.execute('''CREATE TABLE IF NOT EXISTS malicious_payloads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT,
+            url_hash TEXT UNIQUE,
+            session_id TEXT,
+            ip TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'pending',
+            payload_md5 TEXT,
+            payload_size INTEGER,
+            file_path TEXT,
+            retry_count INTEGER DEFAULT 0,
+            error_message TEXT
+        )''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_payload_status ON malicious_payloads(status)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_payload_md5 ON malicious_payloads(payload_md5)')
+
         conn.commit()
         conn.close()
 
@@ -285,6 +333,10 @@ class HoneyDB(DatabaseBackend):
             conn.execute("INSERT OR IGNORE INTO sessions (session_id, remote_ip, username, password, client_version, fingerprint, protocol) VALUES (?, ?, ?, ?, ?, ?, ?)",
                          (session_id, ip, username, password, client_version, fp_json, protocol))
             conn.commit()
+            
+            # Log IP Visit for Intelligence
+            self.log_ip_visit(ip)
+            
         except Exception as e:
             log.error(f"[!] DB Error start_session (Protocol: {protocol}): {e}")
         finally:
@@ -798,15 +850,102 @@ class HoneyDB(DatabaseBackend):
              # PK is ip, username, path.
              
              parent_path = os.path.dirname(path)
+
+             # Insert tombstone
              conn.execute("""
-                INSERT OR REPLACE INTO user_filesystem (ip, username, path, parent_path, is_deleted)
-                VALUES (?, ?, ?, ?, 1)
+                INSERT OR REPLACE INTO user_filesystem (ip, username, path, parent_path, type, metadata, content, is_deleted)
+                VALUES (?, ?, ?, ?, 'tombstone', '{}', NULL, 1)
              """, (ip, username, path, parent_path))
              conn.commit()
          except Exception as e:
-             log.error(f"[DB] Error deleting user file (tombstone) {path}: {e}")
+             log.error(f"[DB] Error deleting user file {path}: {e}")
          finally:
              conn.close()
+
+    # --- IP Intelligence Methods ---
+    
+    def log_ip_visit(self, ip):
+        """Records an IP visit. Inserts new record or updates last_seen."""
+        conn = self._get_conn()
+        try:
+            conn.execute("""
+                INSERT INTO ip_intelligence (ip, first_seen, last_seen, enriched)
+                VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
+                ON CONFLICT(ip) DO UPDATE SET last_seen = CURRENT_TIMESTAMP
+            """, (ip,))
+            conn.commit()
+        except Exception as e:
+             log.error(f"[DB] Error logging IP visit {ip}: {e}")
+        finally:
+            conn.close()
+
+    def get_unenriched_ips(self, limit=10):
+        """Fetches IPs that haven't been enriched yet, prioritized by recent activity."""
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            # Priority: Most recently seen first
+            c.execute("SELECT ip FROM ip_intelligence WHERE enriched = 0 ORDER BY last_seen DESC LIMIT ?", (limit,))
+            # Only need list of IP strings
+            return [row[0] for row in c.fetchall()]
+        except Exception as e:
+            log.error(f"[DB] Error fetching unenriched IPs: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def save_ip_intelligence(self, ip, intel_data):
+        """Saves enriched data for an IP."""
+        conn = self._get_conn()
+        try:
+            # intel_data is a dict with keys matching columns + 'raw_data'
+            conn.execute("""
+                UPDATE ip_intelligence 
+                SET hostname=?, city=?, country=?, isp=?, org=?, asn=?, network_type=?, raw_data=?, enriched=1
+                WHERE ip=?
+            """, (
+                intel_data.get('hostname'),
+                intel_data.get('city'),
+                intel_data.get('country'),
+                intel_data.get('isp'),
+                intel_data.get('org'),
+                intel_data.get('asn'),
+                intel_data.get('network_type'),
+                json.dumps(intel_data.get('raw_data', {})),
+                ip
+            ))
+            conn.commit()
+        except Exception as e:
+            log.error(f"[DB] Error saving IP intelligence {ip}: {e}")
+        finally:
+            conn.close()
+
+    def add_ip_abuse_tag(self, ip, tag):
+        """Adds an abuse tag to the IP's profile (e.g. 'BruteForce', 'Malware')."""
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT abuse_tags FROM ip_intelligence WHERE ip = ?", (ip,))
+            row = c.fetchone()
+            if not row:
+                # Create rudimentary entry if missing
+                self.log_ip_visit(ip)
+                current_tags = []
+            else:
+                try:
+                    current_tags = json.loads(row[0]) if row[0] else []
+                except: current_tags = []
+            
+            if tag not in current_tags:
+                current_tags.append(tag)
+                conn.execute("UPDATE ip_intelligence SET abuse_tags = ? WHERE ip = ?", (json.dumps(current_tags), ip))
+                conn.commit()
+        except Exception as e:
+            log.error(f"[DB] Error tagging abuse for {ip}: {e}")
+        finally:
+            conn.close()
+
+            conn.close()
 
     def scan_and_repair_corruption(self, ip, username):
         """
@@ -940,7 +1079,9 @@ class HoneyDB(DatabaseBackend):
         Returns: (passed: bool, failure_reason: str)
         """
         # Test Mode Check
-        if os.getenv('SSHPOT_TEST_MODE'):
+        if os.getenv("FAUXSSH_TEST_MODE"):
+            # In test mode, use in-memory DB or special logic if needed
+            # For now, just allow all in test mode.
             return True, None
             
         try:
@@ -1373,3 +1514,133 @@ class HoneyDB(DatabaseBackend):
             report.append(f"{name:<30} | {global_status:<10} | {skel_status:<10} | {user_status:<10} | {result:<10}")
             
         return "\n".join(report)
+
+    # --- Malicious Payload Methods (Jan 10) ---
+    def add_malicious_payload(self, url, url_hash, session_id, ip, timestamp=None):
+        conn = self._get_conn()
+        try:
+            ts = timestamp or datetime.datetime.now()
+            conn.execute('''
+                INSERT INTO malicious_payloads (url, url_hash, session_id, ip, timestamp, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (url, url_hash, session_id, ip, ts, 'pending'))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            pass # Already exists distinct by url_hash
+        except Exception as e:
+            log.error(f"[DB] Error adding payload: {e}")
+        finally:
+            conn.close()
+
+    def get_payload_by_hash(self, url_hash):
+        conn = self._get_conn()
+        try:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM malicious_payloads WHERE url_hash = ?", (url_hash,))
+            return cur.fetchone()
+        finally:
+            conn.close()
+
+    def get_pending_payloads(self, limit=5):
+        conn = self._get_conn()
+        try:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            # Prioritize oldest pending
+            cur.execute("SELECT * FROM malicious_payloads WHERE status = 'pending' ORDER BY timestamp ASC LIMIT ?", (limit,))
+            # Convert to dicts
+            return [dict(row) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def update_payload_status(self, payload_id, status, payload_md5=None, payload_size=None, file_path=None, error=None):
+        conn = self._get_conn()
+        try:
+            sql = "UPDATE malicious_payloads SET status = ?"
+            params = [status]
+            
+            if payload_md5:
+                sql += ", payload_md5 = ?"
+                params.append(payload_md5)
+            if payload_size is not None:
+                sql += ", payload_size = ?"
+                params.append(payload_size)
+            if file_path:
+                sql += ", file_path = ?"
+                params.append(file_path)
+            if error:
+                sql += ", error_message = ?"
+                params.append(error)
+                
+            sql += " WHERE id = ?"
+            params.append(payload_id)
+            
+            conn.execute(sql, params)
+            conn.commit()
+        except Exception as e:
+            log.error(f"[DB] Error updating payload status: {e}")
+        finally:
+            conn.close()
+
+    def is_payload_host_rate_limited(self, hostname):
+        """
+        Check if we have already queued/downloaded a URL from this hostname in the last 24 hours.
+        """
+        conn = self._get_conn()
+        try:
+            # Check for any entry from this host in last 24h
+            # Since we store full URL, we key off the URL string matching hostname...
+            # SQL LIKE is easiest: http://hostname/... or https://hostname/...
+            # This is imperfect but functional for simple detection.
+            one_day_ago = datetime.datetime.now() - datetime.timedelta(days=1)
+            
+            # Simple heuristic: Look for match in URL field
+            # Note: storing 'hostname' in DB would be cleaner for future, currently parsing URL via LIKE
+            c = conn.cursor()
+            c.execute('''
+                SELECT count(*) FROM malicious_payloads 
+                WHERE (url LIKE ? OR url LIKE ?) 
+                AND timestamp > ?
+            ''', (f'%://{hostname}%', f'%://www.{hostname}%', one_day_ago))
+            
+            count = c.fetchone()[0]
+            return count > 0
+        finally:
+            conn.close()
+
+    def get_interactions_with_http(self):
+        """Fetches interactions containing 'http' along with remote_ip from sessions."""
+        conn = self._get_conn()
+        try:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute('''
+                SELECT i.session_id, i.command, i.timestamp, s.remote_ip 
+                FROM interactions i
+                JOIN sessions s ON i.session_id = s.session_id
+                WHERE i.command LIKE '%http%'
+            ''')
+            return [dict(row) for row in c.fetchall()]
+        finally:
+            conn.close()
+    def clear_cache(self):
+        """
+        Clears dynamic filesystem changes and sessions. Preserves system tables.
+        """
+        try:
+            conn = self.get_connection()
+            c = conn.cursor()
+            
+            # Wiping session data and dynamic filesystem changes
+            tables = ["sessions", "interactions", "global_filesystem", 
+                      "downloads", "session_summaries_cache", 
+                      "ip_intelligence", "malicious_payloads"]
+            
+            for table in tables:
+                c.execute(f"DELETE FROM {table}")
+            
+            conn.commit()
+            log.info("[HoneyDB] Cache and Session Data Cleared.")
+        except Exception as e:
+            log.error(f"[HoneyDB] Failed to clear cache: {e}")

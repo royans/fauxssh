@@ -28,7 +28,7 @@ class TestRealismHandlers(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # Enable Test Mode to speed up delays
-        os.environ['SSHPOT_TEST_MODE'] = '1'
+        os.environ['FAUXSSH_TEST_MODE'] = '1'
 
         # Patch PORT
         ssh_honeypot.services.ssh.server.PORT = TEST_PORT
@@ -40,7 +40,7 @@ class TestRealismHandlers(unittest.TestCase):
         
         if not is_server_running(TEST_PORT):
             print(f"[*] Starting Test Server on {TEST_PORT}")
-            os.environ['SSHPOT_PORT'] = str(TEST_PORT)
+            os.environ['FAUXSSH_PORT'] = str(TEST_PORT)
             cls.server_thread = threading.Thread(target=server_main, args=([],))
             cls.server_thread.daemon = True
             cls.server_thread.start()

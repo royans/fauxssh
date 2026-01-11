@@ -11,9 +11,10 @@ class BaseHandler:
     """
     Abstract base class for all command handlers.
     """
-    def __init__(self, db, llm):
+    def __init__(self, db, llm, system_handler=None):
         self.db = db
         self.llm = llm
+        self.system_handler = system_handler
 
     def handle(self, cmd, context):
         """
@@ -48,6 +49,16 @@ class BaseHandler:
         node = self.db.get_fs_node(abs_path)
         if node and (node.get('content') is not None):
              return node['content'], 'local'
+
+        # Check Static/Dynamic Persona Files (if system_handler injected)
+        if hasattr(self, 'system_handler') and self.system_handler:
+            dyn_content = self.system_handler.get_dynamic_file(abs_path)
+            if dyn_content:
+                return dyn_content, 'local'
+            
+            static_content = self.system_handler.get_static_file(abs_path)
+            if static_content:
+                return static_content, 'local'
              
         # 1. Hardcoded Secret (Legacy Easter Egg)
         if 'notes.txt' in target_path: return "Hint: RudolphsRedNose2025!", 'local'

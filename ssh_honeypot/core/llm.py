@@ -111,6 +111,21 @@ class LLMInterface:
             if not host_val:
                 host_val = config.get('server', 'hostname') or 'npc-main-server-01'
 
+            # Load Extra Instructions based on command (Modular Prompts)
+            extra_instructions = ""
+            try:
+                if command and command.strip():
+                    base_cmd = command.split()[0].strip()
+                    # Basic sanitization to prevent path traversal
+                    base_cmd = re.sub(r'[^a-zA-Z0-9_\-]', '', base_cmd).lower()
+                    
+                    rule_path = os.path.join(os.path.dirname(__file__), 'prompts', 'rules', f'{base_cmd}.txt')
+                    if os.path.exists(rule_path):
+                         with open(rule_path, 'r') as f:
+                             extra_instructions = f.read()
+            except Exception as e:
+                log.warning(f"Error loading extra instructions: {e}")
+
             prompt = template.format(
                 hostname=host_val,
                 user=current_user,
@@ -120,7 +135,8 @@ class LLMInterface:
                 file_list_str=file_list_str,
                 paths_str=paths_str,
                 history_str=history_str,
-                command=command
+                command=command,
+                extra_instructions=extra_instructions
             )
         except Exception as e:
             log.error(f"[!] Prompt Formatting Error: {e}")

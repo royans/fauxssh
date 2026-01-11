@@ -35,16 +35,18 @@ except ImportError:
 def get_data_dir():
     """
     Returns the absolute path to the data directory.
-    Priority:
-    1. FAUXSSH_DATA_DIR environment variable (absolute or relative to CWD)
-    2. Default: PROJECT_ROOT/data
     """
     env_path = os.getenv('FAUXSSH_DATA_DIR')
     if env_path:
         # Resolve path (handles relative paths from CWD)
         data_dir = os.path.abspath(env_path)
     else:
-        data_dir = os.path.join(PROJECT_ROOT, 'data')
+        # Auto-detect sibling data directory (common deployment pattern, e.g. ~/c/data next to ~/c/sshpot)
+        sibling_data = os.path.abspath(os.path.join(PROJECT_ROOT, '..', 'data'))
+        if os.path.exists(sibling_data) and os.path.isdir(sibling_data):
+             data_dir = sibling_data
+        else:
+             data_dir = os.path.join(PROJECT_ROOT, 'data')
     
     # Auto-create if missing
     if not os.path.exists(data_dir):

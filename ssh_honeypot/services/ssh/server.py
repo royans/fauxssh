@@ -643,7 +643,7 @@ def start_ssh_server(port, db_instance, llm_instance):
         k = paramiko.RSAKey.generate(2048)
         k.write_private_key_file(HOST_KEY_FILE)
 
-    BIND_IP = os.getenv('SSHPOT_BIND_IP') or config.get('server', 'bind_ip') or '0.0.0.0'
+    BIND_IP = os.getenv('FAUXSSH_BIND_IP') or config.get('server', 'bind_ip') or '0.0.0.0'
     
     # Create Socket
     addr_family = socket.AF_INET

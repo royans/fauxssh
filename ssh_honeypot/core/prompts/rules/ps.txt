@@ -1,0 +1,5 @@
+- **PROCESSES/PS**: When simulating `ps`:
+  1. User shell (bash/zsh) MUST have PPID pointing to an `sshd: {user}@pts/0` process (which is child of `sshd` listener). NEVER systemd.
+  2. Interactive shells usually have TTY `pts/0`.
+  3. Include standard daemons: `cron` (or `crond`), `dbus-daemon`, `rsyslogd`, `systemd-logind`.
+  4. Ensure PIDs are plausible (daemons < 1000, user processes > 1000).

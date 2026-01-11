@@ -14,6 +14,9 @@ python3 tools/analytics/analyze.py --sessions
 
 # Show command history with risk scores
 python3 tools/analytics/analyze.py --commands --limit 20
+
+# List captured malware payloads
+python3 tools/analytics/analyze.py --payloads
 ```
 
 ### Log Viewer (`log_viewer.py`)
@@ -54,8 +57,14 @@ Identifies potential recurring actors by correlating sessions that share:
 1.  **Credentials**: Same password or SSH key used from different IPs.
 2.  **Software Fingerprint (HASSH)**: Same advanced client fingerprint (based on ordered negotiation algorithms).
 
+```
+
+### IP Intelligence (`enrich_ips.py`)
+Backfill or manually trigger IP enrichment (GeoIP/ASN lookups). Useful if background enrichment is too slow or you want to process historical data.
+
 ```bash
-python3 tools/analytics/correlate_actors.py
+# Process all unenriched IPs (Rate limited to 10/min)
+python3 tools/analytics/enrich_ips.py --all
 ```
 
 ## 2. Deployment Tools (Root & `tools/`)

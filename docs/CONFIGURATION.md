@@ -11,25 +11,27 @@ Create a `.env` file in the project root:
 GOOGLE_API_KEY=your_key_here
 
 # Optional: Data Directory Override
+# Optional: Data Directory Override (Defaults to 'data/' or '../data')
+# If not set, the system checks for a sibling 'data' directory (production layout) before defaulting to local 'data/'.
 FAUXSSH_DATA_DIR=/absolute/path/to/data
 
 # Optional: Telnet Support (Default: On)
-SSHPOT_ENABLE_TELNET=true
-SSHPOT_TELNET_PORT=2323
+FAUXSSH_ENABLE_TELNET=true
+FAUXSSH_TELNET_PORT=2323
 
 # Optional: Redis Support (Default: On)
-SSHPOT_ENABLE_REDIS=true
-SSHPOT_REDIS_PORT=6379
+FAUXSSH_ENABLE_REDIS=true
+FAUXSSH_REDIS_PORT=6379
 
 # Optional: MCP Control Plane (Default: On)
-SSHPOT_ENABLE_MCP=true
-SSHPOT_MCP_PORT=8000
-SSHPOT_MCP_MAX_LLM_CALLS=20      # Limit LLM calls per session
-SSHPOT_MCP_THROTTLE_DELAY=2.0    # Delay (sec) for throttling
+FAUXSSH_ENABLE_MCP=true
+FAUXSSH_MCP_PORT=8000
+FAUXSSH_MCP_MAX_LLM_CALLS=20      # Limit LLM calls per session
+FAUXSSH_MCP_THROTTLE_DELAY=2.0    # Delay (sec) for throttling
 
 # Optional: HTTP Honeypot (Default: On, Port 8080)
-SSHPOT_ENABLE_HTTP=true
-SSHPOT_HTTP_PORT=8080
+FAUXSSH_ENABLE_HTTP=true
+FAUXSSH_HTTP_PORT=8080
 
 # Optional: Analytics Privacy
 ANALYTICS_IGNORE_IPS=127.0.0.1,192.168.1.5,10.0.0.1

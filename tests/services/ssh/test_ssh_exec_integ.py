@@ -38,8 +38,9 @@ class TestSSHExec(unittest.TestCase):
         if not is_server_running():
             # Start Server in Thread
             print(f"[*] Starting Test Server on {TEST_PORT}")
-            os.environ['SSHPOT_PORT'] = str(TEST_PORT)
-            os.environ['SSHPOT_ENABLE_TELNET'] = 'false'
+            os.environ['FAUXSSH_TEST_MODE'] = '1'
+            os.environ['FAUXSSH_PORT'] = str(TEST_PORT)
+            os.environ['FAUXSSH_ENABLE_TELNET'] = 'false'
             cls.server_thread = threading.Thread(target=server_main, args=([],))
             cls.server_thread.daemon = True # Daemonize so it dies with main
             cls.server_thread.start()

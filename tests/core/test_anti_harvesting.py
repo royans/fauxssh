@@ -26,10 +26,10 @@ def honey_db():
 
 @pytest.fixture(autouse=True)
 def clean_env():
-    # Ensure SSHPOT_TEST_MODE is filtered out for these tests
+    # Ensure FAUXSSH_TEST_MODE is filtered out for these tests
     with patch.dict(os.environ, {}, clear=False):
-        if 'SSHPOT_TEST_MODE' in os.environ:
-            del os.environ['SSHPOT_TEST_MODE']
+        if 'FAUXSSH_TEST_MODE' in os.environ:
+            del os.environ['FAUXSSH_TEST_MODE']
         yield
 
 def test_anti_harvesting_allow_new_user_initially(honey_db):

@@ -11,6 +11,7 @@ FauxSSH deceptively emulates a realistic Linux server, engaging attackers in lon
 ## Key Features
 
 - **🧠 LLM-Powered Realism**: Uses Google Gemini to dynamically generate file contents (`cat`, `ls`), command responses (`ps aux`, `docker ps`), and error messages.
+- **🎭 Dynamic Persona Generation**: Create bespoke personas on-the-fly using natural language descriptions (e.g., "A secret build server for XYZ Corp"). The system generates a custom filesystem and behaves accordingly.
 - **✨ Researcher Intel Suite**: Includes **Common FS** (global honeytokens), **Smart Session Summary** (LLM-generated narratives & Risk Scores), and **MITRE ATT&CK** T-Code tagging.
 - **🛡️ Defcon-Grade Deception**: Features **Latency Jitter** (randomized network delays) and **Dynamic SSH Banners** (persona-specific strings) to evade scanner fingerprinting.
 - **🔌 Telnet Support**: Optional Telnet listener to capture attacks on legacy protocols, sharing the same persona and intelligence engine.
@@ -18,14 +19,21 @@ FauxSSH deceptively emulates a realistic Linux server, engaging attackers in lon
 - **🟥 High-Interaction Redis**: A realistic Redis honeypot that supports standard commands (`PING`, `INFO`) and uses LLM hallucination for data store queries (`GET`, `SET`).
 - **🤖 MCP "Control Plane"**: Exposes a Model Context Protocol service (Port 8000) mimicking an internal DevOps control plane with fake diagnostic tools.
 - **📼 Session Replay**: Record full TTY sessions (input/output) in [asciinema](https://asciinema.org) format for playback.
+- **Network Emulation**: Simulates `curl`/`wget` with realistic delays and firewalls.
+- **IP Intelligence**: Automatically tracks and enriches attacker IPs with GeoIP, ASN, and ISP data (Rate-limited to 600 req/hr).
+- **Dynamic Filesystem**: Persists user changes per session.
 - **🔒 Safe & Isolated**: All uploaded files are sandboxed. The "filesystem" is virtual and strictly isolated from the host.
 - **🚨 Real-Time Alerting**: Stream high-risk sessions live to Discord or Slack.
+- **🦠 Malicious Payload Analysis**: Automatically detects, queues, downloads, and analyzes malware dropped via `curl`/`wget`. Tracks payloads by MD5 and origin URL.
 - **📊 Built-in Analytics**: CLI tools to visualize sessions, inspect malware, and correlate threat actors.
 
 ## Recent Improvements (Jan 9)
 - **Robust Telnet Input**: Completely rewrote Telnet input handling (`TelnetHelper`) to fix "Enter key hangs" and support byte-by-byte typing/fragmentation.
 - **Scanning Noise Suppression**: Added intelligent log filtering to automatically suppress "Incompatible ssh peer" and other Paramiko tracebacks from mass scanners.
 - **Anti-Harvesting Isolation**: Verified strict IP-based isolation for anti-harvesting rules (one abusive IP won't lock out others).
+- **Network Realism**: Enhanced Persona Generator to support detailed network configuration (CIDR, Gateway, DNS).
+- **LLMv2 Engine**: Refactored LLM Core to use official Google GenAI SDK with an Extensible Provider Pattern, supporting future models.
+- **Robust Startup**: Improved `start.sh` to validate persona existence and prevent silent failures.
 
 ## Quick Start
 
@@ -62,6 +70,17 @@ Use the included script for robust background execution and logging.
 ./tools/startup.sh
 ```
 
+### 3. Dynamic Persona Generation
+Generate and run a custom persona instantly. For full details, see the [Persona System Guide](personas/README.md).
+
+```bash
+# Create and start a new persona
+./start.sh --create-persona "A banking server involves in SWIFT transactions with sensitive CSVs in /var/data"
+
+# Future runs will automatically use this last-created persona
+./start.sh
+```
+
 ## Analytics Examples
 
 FauxSSH includes powerful CLI tools to visualize captured data. See [Logging & Analytics](docs/LOGGING.md) for details.
@@ -80,6 +99,10 @@ Filter by IP (supports IPv4 and mapped IPv6), Session ID, or Protocol:
 `python3 tools/analytics/analyze.py --commands --session-id 49b8ac`
 `python3 tools/analytics/analyze.py --sessions --protocol mcp`
 
+### Payload Analysis
+Track downloaded malware artifacts (automatic background collection):
+`python3 tools/analytics/analyze.py --payloads`
+
 ### Filesystem Forensics
 Inspect and manage attacker uploads in real-time.
 `python3 tools/analytics/fs_inspector.py --tree`
@@ -89,6 +112,7 @@ Inspect and manage attacker uploads in real-time.
 
 ## Documentation
 
+*   **[Persona System Guide](personas/README.md)**: Master the art of dynamic personas and custom templates.
 *   [**Configuration Guide**](docs/CONFIGURATION.md): `.env` settings, port binding, and model tuning.
 *   [**Deployment Guide**](docs/DEPLOYMENT.md): Production startup, cron jobs, and port forwarding (Port 22).
 *   [**Alerting Setup**](docs/ALERTING.md): Configure Discord/Slack webhooks and keyword triggers.

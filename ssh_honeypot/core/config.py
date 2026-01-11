@@ -11,7 +11,7 @@ except ImportError:
 
 DEFAULT_CONFIG_DICT = {
     "server": {
-        "host_key_file": "data/host.key",
+        "host_key_file": os.path.join(get_data_dir(), "host.key"),
         "port": 2222,
         "bind_ip": "0.0.0.0",
         "hostname": "web.blogofy.com"
@@ -30,7 +30,7 @@ DEFAULT_CONFIG_DICT = {
         "timeout": 60
     },
     "logging": {
-        "json_log_file": "data/honeypot.json.log",
+        "json_log_file": os.path.join(get_data_dir(), "honeypot.json.log"),
         "enable_session_replay": False
     },
     "upload": {
@@ -75,7 +75,10 @@ class ConfigManager:
         # 3. Load Persona (Default + Override)
         self.load_persona()
 
-        # 4. Validate with Pydantic
+        # 4. Validate with Pydantic (Initial)
+        self._validate_and_refresh()
+
+    def _validate_and_refresh(self):
         try:
             self.model = AppConfig(**self._raw_config)
             # Dump back to dict to maintain existing get() behavior easily
@@ -107,8 +110,8 @@ class ConfigManager:
             ("ALERT_THRESHOLD_NOTIFY", "alerting", "notify_threshold"),
             ("ALERT_THRESHOLD_SESSION", "alerting", "session_threshold"),
             ("ALERT_THRESHOLD_IP", "alerting", "ip_threshold"),
-            ("SSHPOT_MCP_PORT", "mcp", "port"),
-            ("SSHPOT_HTTP_PORT", "http", "port"), 
+            ("FAUXSSH_MCP_PORT", "mcp", "port"),
+            ("FAUXSSH_HTTP_PORT", "http", "port"), 
             ("HTTP_LLM_RPM", "http", "llm_rpm"),
             ("HTTP_LLM_RPD", "http", "llm_rpd"), 
         ]:
@@ -126,41 +129,80 @@ class ConfigManager:
         base_name = "CentOS7_Legacy_Compute"
         personas_dir = os.path.join(PROJECT_ROOT, "personas")
         
-        # Base
+        # 1. Start with Base Config (CentOS 7) always as foundation
+        # This ensures we have a valid structure even if target is partial
         base_config = self._read_persona_file(base_name, personas_dir)
         if base_config:
-            # Flatten 'system' if needed for backward compatibility
+            # Flatten 'system' for backward compatibility if needed
             if 'system' in base_config:
                  for k, v in base_config['system'].items():
                       base_config[k] = v
-            
             self._raw_config['persona'] = base_config
+
+        # 2. Determine Target Persona
+        # Precedence: Explicit Override (CLI) > Env Var > Last Used State > Default
+        target = override_name
         
-        # Override
-        target = override_name or os.getenv("SSH_PERSONA")
+        if not target:
+            target = os.getenv("SSH_PERSONA")
+            
+        if not target:
+            try:
+                from ssh_honeypot.core.state_manager import StateManager
+                target = StateManager.get_last_persona()
+            except ImportError:
+                pass
+                
+        if not target:
+            target = base_name
+
+        # 3. Load Target (if different from base)
         if target and target != base_name:
-            print(f"[*] Loading Persona Override: {target}")
+            print(f"[*] Loading Persona: {target}")
             override_config = self._read_persona_file(target, personas_dir)
             if override_config:
                 self._deep_merge(self._raw_config['persona'], override_config)
+            else:
+                print(f"[!] Warning: Persona '{target}' not found. Falling back to {base_name}.")
+        
+        # 4. Refresh derived config
+        self._validate_and_refresh()
 
-    def _read_persona_file(self, name_or_path, personas_dir):
-        # ... Reuse logic ...
-        # Simplified for brevity in replace
-        fpath = None
-        if os.path.exists(name_or_path) and (name_or_path.endswith('.yaml') or os.path.isdir(name_or_path)):
-             fpath = os.path.join(name_or_path, 'persona.yaml') if os.path.isdir(name_or_path) else name_or_path
-        else:
-             fpath = os.path.join(personas_dir, name_or_path, 'persona.yaml')
-            
-        if os.path.exists(fpath):
-            try:
-                with open(fpath, 'r') as f:
-                    data = yaml.safe_load(f)
-                    data['_fs_path'] = os.path.join(os.path.dirname(fpath), 'fs')
-                    return data
-            except: return None
+    def _read_persona_file(self, name_or_path, personas_dir_ignored=None):
+        # We ignore the passed personas_dir arg in favor of our multi-path logic
+        # But keep signature compatible just in case
+        
+        # Candidate Directories
+        search_dirs = [
+            os.path.join(PROJECT_ROOT, "personas"),       # Code-based (Base)
+            os.path.join(get_data_dir(), "personas") # Data-based (Dynamic)
+        ]
+        
+        # 1. Direct Path check
+        if os.path.exists(name_or_path):
+             if os.path.isdir(name_or_path):
+                  return self._load_yaml_fs(os.path.join(name_or_path, 'persona.yaml'))
+             elif name_or_path.endswith('.yaml'):
+                  return self._load_yaml_fs(name_or_path)
+        
+        # 2. Search in initialized directories
+        for p_dir in search_dirs:
+             candidate = os.path.join(p_dir, name_or_path, 'persona.yaml')
+             if os.path.exists(candidate):
+                  return self._load_yaml_fs(candidate)
+                  
         return None
+
+    def _load_yaml_fs(self, yaml_path):
+        try:
+             with open(yaml_path, 'r') as f:
+                  data = yaml.safe_load(f)
+                  # FS path is sibling to yaml typically
+                  data['_fs_path'] = os.path.join(os.path.dirname(yaml_path), 'fs')
+                  return data
+        except Exception as e:
+             print(f"Error loading persona yaml {yaml_path}: {e}")
+             return None
 
     def get_persona_by_name(self, persona_name):
         """

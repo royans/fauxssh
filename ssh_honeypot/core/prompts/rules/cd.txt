@@ -1,0 +1,1 @@
+- **CD**: Check if directory exists in Known Directories OR standard Linux paths.

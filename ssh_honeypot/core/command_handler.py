@@ -87,12 +87,12 @@ class CommandHandler:
         self.system_handler = SystemHandler(db, llm_interface)
         self.network_handlers = network_handlers
         
-        self.cat_handler = CatCommand(db, llm_interface)
-        self.head_handler = HeadCommand(db, llm_interface)
-        self.tail_handler = TailCommand(db, llm_interface)
-        self.grep_handler = GrepCommand(db, llm_interface)
-        self.wc_handler = WcCommand(db, llm_interface)
-        self.cut_handler = CutCommand(db, llm_interface)
+        self.cat_handler = CatCommand(db, llm_interface, self.system_handler)
+        self.head_handler = HeadCommand(db, llm_interface, self.system_handler)
+        self.tail_handler = TailCommand(db, llm_interface, self.system_handler)
+        self.grep_handler = GrepCommand(db, llm_interface, self.system_handler)
+        self.wc_handler = WcCommand(db, llm_interface, self.system_handler)
+        self.cut_handler = CutCommand(db, llm_interface, self.system_handler)
 
         self.who_handler = WhoCommand(db, llm_interface)
         self.apt_handler = AptCommand(db, llm_interface)
@@ -309,7 +309,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
              
              if len(parts) == 2 or (len(parts) > 2 and parts[2] == '-'):
                  # sudo su / sudo su - (Root)
-                if os.getenv('SSHPOT_TEST_MODE'):
+                if os.getenv('FAUXSSH_TEST_MODE'):
                     random_response_delay(0.01, 0.05)
                 else:
                     random_response_delay(1.0, 2.5) # Fake password delay?
@@ -318,7 +318,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 return f"[sudo] password for {user}: \nSorry, try again.\n[sudo] password for {user}: \n", {}, {'source': 'local', 'cached': False}
 
         if '-i' in parts or '/bin/bash' in cmd or 'sh' in cmd:
-             if os.getenv('SSHPOT_TEST_MODE'):
+             if os.getenv('FAUXSSH_TEST_MODE'):
                  random_response_delay(0.01, 0.05)
              else:
                  random_response_delay(1.0, 2.0)
@@ -453,8 +453,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                  cmd = " ".join(parts[1:])
                  parts = cmd.split()
                  # We updated 'cmd', subsequent logic will use this new 'cmd'
+                 context['force_unix_handlers'] = True
              else:
-                 return "BusyBox v1.30.1 multi-call binary.\nUsage: busybox [function] [arguments]...\n", {}, {'source': 'local', 'cached': False}
+                  # Flag to force Unix handlers even if Persona is Cisco
+                  context['force_unix_handlers'] = True
+                  return "BusyBox v1.30.1 multi-call binary.\nUsage: busybox [function] [arguments]...\n", {}, {'source': 'local', 'cached': False}
         
         # 0.1a Nohup Dispatch
         if parts and parts[0] == 'nohup':
@@ -893,6 +896,10 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         persona = context.get('persona_config', {})
         is_cisco = persona and persona.get('system', {}).get('handler_type') == 'cisco_ios'
         
+        # Bypass Cisco check if forced (Busybox)
+        if context.get('force_unix_handlers'):
+            is_cisco = False
+        
         if not is_cisco and not self._is_allowed(cmd):
             return f"bash: {base_cmd}: command not found", {}, {'source': 'denied', 'cached': False}
 
@@ -905,7 +912,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         # 4. Dispatch to Specific Handlers (or generic LLM)
         # SKIP Unix Handlers if Cisco Persona
         persona = context.get('persona_config', {})
-        if persona and persona.get('system', {}).get('handler_type') == 'cisco_ios':
+        if persona and persona.get('system', {}).get('handler_type') == 'cisco_ios' and not context.get('force_unix_handlers'):
              handler_name = None # Force fallback to generic (LLM) which will simulate Cisco behavior
         else:
              handler_name = f"handle_{base_cmd}"
@@ -931,7 +938,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             
             # Skip fallback too if Cisco
             use_fallback = True
-            if persona and persona.get('system', {}).get('handler_type') == 'cisco_ios':
+            if persona and persona.get('system', {}).get('handler_type') == 'cisco_ios' and not context.get('force_unix_handlers'):
                  use_fallback = False
 
             if use_fallback and hasattr(self, handler_name_norm):
@@ -1338,7 +1345,24 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         return self.system_handler.handle_netstat(cmd, context)
 
     def handle_nproc(self, cmd, context):
-        return self.system_handler.handle_nproc(cmd, context)
+        out, updates = self.system_handler.handle_nproc(cmd, context)
+        return out, updates, {'source': 'local', 'cached': False}
+
+    def handle_lscpu(self, cmd, context):
+        out, updates = self.system_handler.handle_lscpu(cmd, context)
+        return out, updates, {'source': 'local', 'cached': False}
+
+    def handle_lspci(self, cmd, context):
+        out, updates = self.system_handler.handle_lspci(cmd, context)
+        return out, updates, {'source': 'local', 'cached': False}
+
+    def handle_dmidecode(self, cmd, context):
+        out, updates = self.system_handler.handle_dmidecode(cmd, context)
+        return out, updates, {'source': 'local', 'cached': False}
+
+    def handle_last(self, cmd, context):
+        out, updates = self.system_handler.handle_last(cmd, context)
+        return out, updates, {'source': 'local', 'cached': False}
 
 
 
@@ -2130,51 +2154,8 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
 
     def handle_uname(self, cmd, context):
-        # Support basic flags: -a, -s, -n, -r, -v, -m, -p, -i, -o
-        # Default (no args) is -s
-        # We ignore flags for now and just return a standard "all" string if -a or multiple flags,
-        # or just kernel name if no flags. 
-        # Actually, let's be slightly smarter since the bot requests "-s -v -n -r -m".
-        
-        # Hardcoded Persona Values (Debian 11)
-        kernel_name = config.get('persona', 'kernel_name') or "Linux"
-        nodename = config.get('server', 'hostname') or "npc-main-server-01"
-        
-        kernel_release = config.get('persona', 'kernel_release') or "5.10.0-21-cloud-amd64"
-        kernel_version = config.get('persona', 'kernel_version') or "#1 SMP Debian 5.10.162-1 (2023-01-21)"
-        machine = config.get('persona', 'machine') or "x86_64"
-        processor = config.get('persona', 'processor') or "x86_64"
-        hardware_platform = config.get('persona', 'hardware_platform') or "x86_64"
-        os_name = config.get('persona', 'os_name') or "GNU/Linux"
-        
-        output_parts = []
-        
-        args = cmd.split()[1:]
-        flags = set()
-        for arg in args:
-            if arg.startswith('-'):
-                for char in arg[1:]:
-                    flags.add(char)
-        
-        if not flags:
-            flags.add('s')
-            
-        if 'a' in flags:
-            # -a = -snrvmo (usually)
-            return f"{kernel_name} {nodename} {kernel_release} {kernel_version} {machine} {os_name}\n", {}, {'source': 'local', 'cached': False}
-
-        # Order matters: s n r v m p i o
-        out = []
-        if 's' in flags: out.append(kernel_name)
-        if 'n' in flags: out.append(nodename)
-        if 'r' in flags: out.append(kernel_release)
-        if 'v' in flags: out.append(kernel_version)
-        if 'm' in flags: out.append(machine)
-        if 'p' in flags: out.append(processor)
-        if 'i' in flags: out.append(hardware_platform)
-        if 'o' in flags: out.append(os_name)
-        
-        return " ".join(out) + "\n", {}, {'source': 'local', 'cached': False}
+        out, updates = self.system_handler.handle_uname(cmd, context)
+        return out, updates, {'source': 'local', 'cached': False}
 
     def handle_nvidia_smi(self, cmd, context):
         output = """Wed Dec 31 19:12:44 2025       
@@ -2204,25 +2185,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 """
         return output, {}, {'source': 'local', 'cached': False}
 
-    def handle_lspci(self, cmd, context):
-        # Realistic lspci for a high-end server (Dual H100)
-        output = """00:00.0 Host bridge: Intel Corporation 440FX - 82441FX PMC [Natoma] (rev 02)
-00:01.0 ISA bridge: Intel Corporation 82371SB PIIX3 ISA [Natoma/Triton II]
-00:01.3 Bridge: Intel Corporation 82371AB/EB/MB PIIX4 ACPI (rev 03)
-00:02.0 VGA compatible controller: Cirrus Logic GD 5446
-00:03.0 Ethernet controller: Red Hat, Inc. Virtio network device
-00:04.0 SCSI storage controller: Red Hat, Inc. Virtio block device
-3b:00.0 3D controller: NVIDIA Corporation H100 PCIe [Hopper] (rev a1)
-d8:00.0 3D controller: NVIDIA Corporation H100 PCIe [Hopper] (rev a1)
-"""
-        return output, {}, {'source': 'local', 'cached': False}
 
-    def handle_dmidecode(self, cmd, context):
-        # Handle specific processor-version check
-        if '-s processor-version' in cmd or '--string processor-version' in cmd:
-            proc_ver = config.get('persona', 'processor_version') or "Intel(R) Xeon(R) Platinum 8480+"
-            return f"{proc_ver}\n", {}, {'source': 'local', 'cached': False}
-        return self.handle_generic(cmd, context)
 
     def handle_ps(self, cmd, context):
         # 1. Parse Flags

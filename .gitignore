@@ -8,6 +8,8 @@ server.pid
 # C extensions
 *.so
 
+dangerous_*.txt
+
 nohup.out
 *.sqlite
 
@@ -217,7 +219,10 @@ ssh_honeypot/.env
 # Runtime Data
 data/*
 !data/.gitkeep
+# Keep personas directory structure but ignore dynamic contents
 !data/personas/
+data/personas/*
+!data/personas/.gitkeep
 
 # Exception for Personas (contains fake root fs with ruled names like var/)
 !personas/**

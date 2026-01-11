@@ -34,7 +34,9 @@ class SystemHandler(BaseHandler):
         self.STATIC_FILES = {}
         
         self.DYNAMIC_FILES = {
-            '/proc/uptime': self.generate_proc_uptime
+            '/proc/uptime': self.generate_proc_uptime,
+            '/proc/cpuinfo': self.generate_proc_cpuinfo,
+            '/proc/version': self.generate_proc_version
         }
 
     def _get_uptime_seconds(self):
@@ -52,7 +54,7 @@ class SystemHandler(BaseHandler):
         seconds_today = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
         
         total_uptime = base_seconds + seconds_today
-        idle_time = total_uptime * 0.98 # Mostly idle
+        idle_time = total_uptime * 95 # Mostly idle (192 cores means lots of idle time sum)
         
         return total_uptime, idle_time
 
@@ -60,11 +62,158 @@ class SystemHandler(BaseHandler):
         up, idle = self._get_uptime_seconds()
         return f"{up:.2f} {idle:.2f}\n"
 
+    def generate_proc_version(self):
+        # Linux version 5.10.0-21-cloud-amd64 (debian-kernel@lists.debian.org) (gcc (Debian 10.2.1-6) 10.2.1 20210110, GNU ld (GNU Binutils for Debian) 2.35.2) #1 SMP Debian 5.10.162-1 (2023-01-21)
+        return "Linux version 5.10.0-21-cloud-amd64 (debian-kernel@lists.debian.org) (gcc (Debian 10.2.1-6) 10.2.1 20210110, GNU ld (GNU Binutils for Debian) 2.35.2) #1 SMP Debian 5.10.162-1 (2023-01-21)\n"
+
+    def generate_proc_cpuinfo(self):
+        # Generate 192 cores (loop) to match nproc
+        # AMD EPYC 9654
+        out = []
+        for i in range(192):
+             out.append(f"processor\t: {i}")
+             out.append("vendor_id\t: AuthenticAMD")
+             out.append("cpu family\t: 25")
+             out.append("model\t\t: 17")
+             out.append("model name\t: AMD EPYC 9654 96-Core Processor")
+             out.append("stepping\t: 1")
+             out.append("microcode\t: 0xa10113e")
+             out.append("cpu MHz\t\t: 2400.000")
+             out.append("cache size\t: 1024 KB")
+             out.append("physical id\t: 0")
+             out.append("siblings\t: 192")
+             out.append(f"core id\t\t: {i % 96}")
+             out.append(f"cpu cores\t: 96")
+             out.append("apicid\t\t: 0")
+             out.append("initial apicid\t: 0")
+             out.append("fpu\t\t: yes")
+             out.append("fpu_exception\t: yes")
+             out.append("cpuid level\t: 16")
+             out.append("wp\t\t: yes")
+             out.append("flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl nonstop_tsc cpuid extd_apicid aperfmperf pni pclmulqdq monitor ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 invpcid_single hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local avx512_bf16 clzero irperf xsaveerptr rdpru wbnoinvd amd_ppin arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq la57 rdpid overflow_recov succor smca fsrm")
+             out.append("bugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass retbleed smp_rsb_alternate_prediction")
+             out.append("bogomips\t: 4799.86")
+             out.append("TLB size\t: 3584 4K pages")
+             out.append("clflush size\t: 64")
+             out.append("cache_alignment\t: 64")
+             out.append("address sizes\t: 52 bits physical, 57 bits virtual")
+             out.append("power management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]")
+             out.append("")
+        return "\n".join(out)
+
     def get_dynamic_file(self, path):
         if path in self.DYNAMIC_FILES:
             return self.DYNAMIC_FILES[path]()
         return None
 
+    def handle_lscpu(self, cmd, context):
+        # Output matching the cpuinfo above
+        out = """Architecture:                    x86_64
+CPU op-mode(s):                  32-bit, 64-bit
+Byte Order:                      Little Endian
+Address sizes:                   52 bits physical, 57 bits virtual
+CPU(s):                          192
+On-line CPU(s) list:             0-191
+Thread(s) per core:              2
+Core(s) per socket:              96
+Socket(s):                       1
+NUMA node(s):                    1
+Vendor ID:                       AuthenticAMD
+CPU family:                      25
+Model:                           17
+Model name:                      AMD EPYC 9654 96-Core Processor
+Stepping:                        1
+Frequency boost:                 enabled
+CPU MHz:                         2400.000
+CPU max MHz:                     3700.0000
+CPU min MHz:                     1500.0000
+BogoMIPS:                        4799.86
+Virtualization:                  AMD-V
+L1d cache:                       3 MiB
+L1i cache:                       3 MiB
+L2 cache:                        96 MiB
+L3 cache:                        384 MiB
+NUMA node0 CPU(s):               0-191
+Vulnerability Itlb multihit:     Not affected
+Vulnerability L1tf:              Not affected
+Vulnerability Mds:               Not affected
+Vulnerability Meltdown:          Not affected
+Vulnerability Mmio stale data:   Not affected
+Vulnerability Retbleed:          Not affected
+Vulnerability Spec store bypass: Mitigation; Speculative Store Bypass disabled via prctl and seccomp
+Vulnerability Spectre v1:        Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:        Mitigation; Retpolines, IBPB: conditional, IBRS_FW, STIBP: always-on, RSB filling, PBRSB-eIBRS: Not affected
+Vulnerability Srbds:             Not affected
+Vulnerability Tsx async abort:   Not affected
+Flags:                           fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl nonstop_tsc cpuid extd_apicid aperfmperf pni pclmulqdq monitor ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 invpcid_single hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local avx512_bf16 clzero irperf xsaveerptr rdpru wbnoinvd amd_ppin arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq la57 rdpid overflow_recov succor smca fsrm
+"""
+        return out, {}
+
+    def handle_lspci(self, cmd, context):
+        # Realistic NVIDIA H100 output + standard system
+        out = """00:00.0 Host bridge: Intel Corporation 440FX - 82441FX PMC [Natoma] (rev 02)
+00:01.0 ISA bridge: Intel Corporation 82371SB PIIX3 ISA [Natoma/Triton II]
+00:01.3 Bridge: Intel Corporation 82371AB/EB/MB PIIX4 ACPI (rev 01)
+00:02.0 VGA compatible controller: Cirrus Logic GD 5446
+00:03.0 VGA compatible controller: NVIDIA Corporation H100 PCIe [Hopper] (rev a1)
+00:04.0 Ethernet controller: Red Hat, Inc. Virtio network device
+00:05.0 Communication controller: Red Hat, Inc. Virtio console
+00:06.0 SCSI storage controller: Red Hat, Inc. Virtio block device
+00:07.0 Unclassified device [00ff]: Red Hat, Inc. Virtio memory balloon
+10:00.0 Non-Volatile memory controller: Amazon.com, Inc. NVMe SSD Controller (rev 01)
+"""
+        return out, {}
+
+    def handle_dmidecode(self, cmd, context):
+         # Usually requires root (except for help/version or some flags? no usually root)
+         if context.get('user') != 'root':
+             return "Permission denied\n", {}
+             
+         if '-s processor-version' in cmd or '--string processor-version' in cmd:
+            try:
+                 proc_ver = config.get('persona', 'processor_version') or "Intel(R) Xeon(R) Platinum 8480+"
+            except:
+                 proc_ver = "Intel(R) Xeon(R) Platinum 8480+"
+            return f"{proc_ver}\n", {}
+
+         out = """# dmidecode 3.3
+Getting SMBIOS data from sysfs.
+SMBIOS 2.8 present.
+
+Handle 0x0100, DMI type 1, 27 bytes
+System Information
+	Manufacturer: Google
+	Product Name: Google Compute Engine
+	Version: Not Specified
+	Serial Number: GoogleCloud-12345
+	UUID: 12345678-1234-1234-1234-1234567890AB
+	Wake-up Type: Power Switch
+	SKU Number: Not Specified
+	Family: Not Specified
+
+Handle 0x2000, DMI type 32, 11 bytes
+System Boot Information
+	Status: No errors detected
+"""
+         return out, {}
+    
+    def handle_last(self, cmd, context):
+        # Realistic last output
+        user = context.get('user', 'root')
+        ip = context.get('client_ip', '1.2.3.4')
+        now = datetime.datetime.now()
+        cur_str = now.strftime("%a %b %d %H:%M")
+        
+        # Fake history
+        out = []
+        out.append(f"{user:<8} pts/0        {ip:<16} {cur_str}   still logged in")
+        # Add some previous fake logins
+        out.append(f"root     pts/1        192.168.1.100    Tue Oct 10 12:00 - 13:00  (01:00)")
+        out.append(f"admin    pts/0        10.0.0.50        Mon Oct  9 09:30 - 10:15  (00:45)")
+        out.append(f"reboot   system boot  5.10.0-21-cloud  Mon Oct  9 09:00   still running")
+        
+        return "\n".join(out) + "\n", {}
+    
     def handle_hostname(self, cmd, context):
         h = config.get('server', 'hostname') or 'npc-main-server-01'
         
@@ -96,8 +245,8 @@ class SystemHandler(BaseHandler):
         kernel_release = "5.10.0-21-cloud-amd64"
         kernel_version = "#1 SMP Debian 5.10.162-1 (2023-01-21)"
         machine = "x86_64"
-        processor = "unknown"
-        hardware_platform = "unknown"
+        processor = "x86_64"
+        hardware_platform = "x86_64"
         os_name = "GNU/Linux"
         
         parts = cmd.split()
@@ -128,6 +277,7 @@ class SystemHandler(BaseHandler):
             return f"{kernel_name}\n", {}
             
         return " ".join(out) + "\n", {}
+
 
     def handle_uptime(self, cmd, context):
         now_dt = datetime.datetime.now()

@@ -1,0 +1,2 @@
+- **LS**: If `ls` is called on a specific file (e.g. `ls /etc/passwd`), output ONLY that file entry. Do NOT list CWD content.
+- **FILES**: Directory listing should suggest web server environment (e.g. `/var/www/html`, `/etc/apache2`, `/opt/scripts`).

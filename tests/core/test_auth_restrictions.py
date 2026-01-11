@@ -29,7 +29,7 @@ class TestAuthRestrictions(unittest.TestCase):
     def setUpClass(cls):
         ssh_honeypot.services.ssh.server.PORT = TEST_PORT
         ssh_honeypot.services.ssh.server.ip_connection_counts.clear()
-        os.environ['SSHPOT_TEST_MODE'] = 'true'
+        os.environ['FAUXSSH_TEST_MODE'] = 'true'
         ssh_honeypot.services.ssh.server.MAX_SESSIONS_PER_IP = 100  # Prevent rate limiting during tests
         # Disable LLM
         if ssh_honeypot.services.ssh.server.llm is None:
@@ -46,7 +46,7 @@ class TestAuthRestrictions(unittest.TestCase):
         os.environ['SSHPOT_ENABLE_TELNET'] = 'false'
         
         if not is_server_running(TEST_PORT):
-            os.environ['SSHPOT_PORT'] = str(TEST_PORT)
+            os.environ['FAUXSSH_PORT'] = str(TEST_PORT)
             cls.server_thread = threading.Thread(target=server_main, args=([],))
             cls.server_thread.daemon = True
             cls.server_thread.start()

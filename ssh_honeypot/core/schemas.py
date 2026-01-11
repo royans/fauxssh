@@ -1,8 +1,11 @@
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict, Any
+import os
+from ssh_honeypot.core.utils import get_data_dir
 
 class ServerConfig(BaseModel):
-    host_key_file: str = "data/host.key"
+    # Use Field(default_factory=...) to evaluate at runtime
+    host_key_file: str = Field(default_factory=lambda: os.path.join(get_data_dir(), "host.key"))
     port: int = 2222
     bind_ip: str = "0.0.0.0"
     hostname: str = "web.blogofy.com"
@@ -15,7 +18,7 @@ class LLMConfig(BaseModel):
     timeout: int = 60
 
 class LoggingConfig(BaseModel):
-    json_log_file: str = "data/honeypot.json.log"
+    json_log_file: str = Field(default_factory=lambda: os.path.join(get_data_dir(), "honeypot.json.log"))
     enable_session_replay: bool = False
 
 class UploadConfig(BaseModel):

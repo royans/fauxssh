@@ -47,7 +47,8 @@ class TestExecSim(unittest.TestCase):
         cls.mock_llm_instance.generate_response.side_effect = lambda *args, **kwargs: '{"output": "SIMULATED EXECUTION"}'
         
         if not is_server_running(TEST_PORT):
-            os.environ['SSHPOT_PORT'] = str(TEST_PORT)
+            os.environ['FAUXSSH_TEST_MODE'] = '1'
+            os.environ['FAUXSSH_PORT'] = str(TEST_PORT)
             cls.server_thread = threading.Thread(target=server_main, args=([],))
             cls.server_thread.daemon = True
             cls.server_thread.start()
