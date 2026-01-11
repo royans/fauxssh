@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import MagicMock
 from ssh_honeypot.handlers.unix.cmd_wc import WcCommand
 
+
 class TestWcCommand:
     @pytest.fixture
     def handler(self):
@@ -11,12 +12,14 @@ class TestWcCommand:
 
     def test_wc_default_file(self, handler):
         # Setup mock
-        handler._generate_or_get_content = MagicMock(return_value=("hello world\nline 2", "local"))
-        
+        handler._generate_or_get_content = MagicMock(
+            return_value=("hello world\nline 2", "local")
+        )
+
         cmd = "wc test.txt"
         context = {}
         res, _, _ = handler.handle(cmd, context)
-        
+
         parts = res.split()
         # "hello world\nline 2" -> 2 lines, 4 words, 18 chars
         assert parts[0] == "2"
@@ -26,15 +29,15 @@ class TestWcCommand:
 
     def test_wc_lines_only_pipe(self, handler):
         cmd = "wc -l"
-        context = {'stdin': "a\nb\nc"}
+        context = {"stdin": "a\nb\nc"}
         res, _, _ = handler.handle(cmd, context)
         assert res.strip() == "3"
 
     def test_wc_lines_words_pipe(self, handler):
         cmd = "wc -lw"
-        context = {'stdin': "hello"}
+        context = {"stdin": "hello"}
         res, _, _ = handler.handle(cmd, context)
         parts = res.split()
         assert len(parts) == 2
-        assert parts[0] == "1" # lines
-        assert parts[1] == "1" # words
+        assert parts[0] == "1"  # lines
+        assert parts[1] == "1"  # words

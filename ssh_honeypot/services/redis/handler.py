@@ -3,6 +3,7 @@ import json
 import time
 from ssh_honeypot.core.utils import random_response_delay
 
+
 class RedisHandler:
     def __init__(self, db, llm):
         self.db = db
@@ -11,17 +12,17 @@ class RedisHandler:
     def _encode_bulk_string(self, text):
         if text is None:
             return b"$-1\r\n"
-        data = text.encode('utf-8')
-        return f"${len(data)}\r\n".encode('utf-8') + data + b"\r\n"
+        data = text.encode("utf-8")
+        return f"${len(data)}\r\n".encode("utf-8") + data + b"\r\n"
 
     def _encode_simple_string(self, text):
-        return f"+{text}\r\n".encode('utf-8')
+        return f"+{text}\r\n".encode("utf-8")
 
     def _encode_error(self, text):
-        return f"-{text}\r\n".encode('utf-8')
+        return f"-{text}\r\n".encode("utf-8")
 
     def _encode_integer(self, val):
-        return f":{val}\r\n".encode('utf-8')
+        return f":{val}\r\n".encode("utf-8")
 
     def handle_command(self, command, client_ip):
         """
@@ -31,7 +32,7 @@ class RedisHandler:
         parts = command.split()
         if not parts:
             return b""
-        
+
         cmd_upper = parts[0].upper()
         args = parts[1:]
 
@@ -42,12 +43,12 @@ class RedisHandler:
 
         # 2. Cache Check (LLM Fallback)
         # Use MD5 of command as cache key
-        cmd_hash = hashlib.md5(command.encode('utf-8')).hexdigest()
+        cmd_hash = hashlib.md5(command.encode("utf-8")).hexdigest()
         cached = self.db.get_cached_response(cmd_hash)
         if cached:
             # We assume cached content is the "text" content, we need to wrap it?
-            # Or did we cache the raw RESP? 
-            # Storing raw bytes in DB TEXT field is risky. 
+            # Or did we cache the raw RESP?
+            # Storing raw bytes in DB TEXT field is risky.
             # Let's assume we store the "result text" and default to Bulk String wrapping.
             # UNLESS we explicitly store metadata about type.
             # For now: We store text, and wrap as Bulk String.
@@ -60,7 +61,7 @@ class RedisHandler:
 
     def handle_PING(self, args):
         if args:
-             return self._encode_bulk_string(args[0])
+            return self._encode_bulk_string(args[0])
         return self._encode_simple_string("PONG")
 
     def handle_ECHO(self, args):
@@ -166,12 +167,12 @@ db0:keys=52,expires=0,avg_ttl=0
         return self._encode_bulk_string(info)
 
     def handle_CLIENT(self, args):
-        if args and args[0].upper() == 'LIST':
-             # Fake client list
-             res = "id=12 addr=127.0.0.1:54321 fd=8 name= age=123 idle=0 flags=N db=0 sub=0 psub=0 multi=-1 qbuf=26 qbuf-free=32742 obl=0 oll=0 omem=0 events=r cmd=client\n"
-             return self._encode_bulk_string(res)
+        if args and args[0].upper() == "LIST":
+            # Fake client list
+            res = "id=12 addr=127.0.0.1:54321 fd=8 name= age=123 idle=0 flags=N db=0 sub=0 psub=0 multi=-1 qbuf=26 qbuf-free=32742 obl=0 oll=0 omem=0 events=r cmd=client\n"
+            return self._encode_bulk_string(res)
         return self._encode_simple_string("OK")
-    
+
     def handle_CONFIG(self, args):
         # Simplified config get support
         return self._encode_bulk_string("dir /var/lib/redis\ndbfilename dump.rdb\n")
@@ -180,7 +181,7 @@ db0:keys=52,expires=0,avg_ttl=0
 
     def llm_fallback(self, command, client_ip, cmd_hash):
         try:
-             prompt = f"""You are a Redis Data Store.
+            prompt = f"""You are a Redis Data Store.
              The user sent the command: {command}
              
              Act as a real Redis server. 
@@ -197,34 +198,34 @@ db0:keys=52,expires=0,avg_ttl=0
              Cmd: SET foo bar -> Response: OK
              Cmd: GET foo -> Response: bar
              """
-             
-             # Call LLM
-             resp = self.llm.generate_response(
-                 command, 
-                 "/", 
-                 [], # History? Redis is stateless mostly for this context
-                 [], 
-                 [],
-                 client_ip=client_ip, 
-                 override_prompt=prompt
-             )
-             
-             text_resp = resp.strip()
-             
-             # Heuristic Response Encoding
-             if text_resp == "OK":
-                 self.db.cache_response(cmd_hash, "OK")
-                 return self._encode_simple_string("OK")
-             elif text_resp.startswith("ERR"):
-                 self.db.cache_response(cmd_hash, text_resp)
-                 return self._encode_error(text_resp)
-             elif not text_resp:
-                 self.db.cache_response(cmd_hash, "") # Store empty for cache hits
-                 return self._encode_bulk_string(None) # Redis NIL
-             else:
-                 # Default: Bulk String content
-                 self.db.cache_response(cmd_hash, text_resp)
-                 return self._encode_bulk_string(text_resp)
+
+            # Call LLM
+            resp = self.llm.generate_response(
+                command,
+                "/",
+                [],  # History? Redis is stateless mostly for this context
+                [],
+                [],
+                client_ip=client_ip,
+                override_prompt=prompt,
+            )
+
+            text_resp = resp.strip()
+
+            # Heuristic Response Encoding
+            if text_resp == "OK":
+                self.db.cache_response(cmd_hash, "OK")
+                return self._encode_simple_string("OK")
+            elif text_resp.startswith("ERR"):
+                self.db.cache_response(cmd_hash, text_resp)
+                return self._encode_error(text_resp)
+            elif not text_resp:
+                self.db.cache_response(cmd_hash, "")  # Store empty for cache hits
+                return self._encode_bulk_string(None)  # Redis NIL
+            else:
+                # Default: Bulk String content
+                self.db.cache_response(cmd_hash, text_resp)
+                return self._encode_bulk_string(text_resp)
 
         except Exception as e:
             return self._encode_error(f"ERR internal error: {e}")

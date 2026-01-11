@@ -10,11 +10,14 @@ except ImportError:
 
 from ssh_honeypot.core.logging_setup import log
 
+
 class IPEnricher:
     def __init__(self):
         self.ip_api_url = "http://ip-api.com/json/{ip}?fields=status,message,country,city,isp,org,as,hosting,query"
         if not whois:
-            log.warning("[Enricher] 'python-whois' not installed. Whois lookups disabled.")
+            log.warning(
+                "[Enricher] 'python-whois' not installed. Whois lookups disabled."
+            )
 
     def get_reverse_dns(self, ip):
         try:
@@ -31,7 +34,7 @@ class IPEnricher:
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
                 data = response.json()
-                if data.get('status') == 'success':
+                if data.get("status") == "success":
                     return data
         except Exception as e:
             log.debug(f"[Enricher] GeoIP failed for {ip}: {e}")
@@ -43,11 +46,7 @@ class IPEnricher:
         try:
             w = whois.whois(ip)
             # Whois data is often messy/unstructured. We try to grab the most relevant fields.
-            return {
-                "registrar": w.registrar,
-                "org": w.org,
-                "emails": w.emails
-            }
+            return {"registrar": w.registrar, "org": w.org, "emails": w.emails}
         except Exception as e:
             # Frequent timeouts/failures are expected
             return None
@@ -58,24 +57,46 @@ class IPEnricher:
         """
         if not geoip_data:
             return "Unknown"
-        
-        isp = (geoip_data.get('isp') or '').lower()
-        org = (geoip_data.get('org') or '').lower()
-        asn = (geoip_data.get('as') or '').lower()
-        hosting = geoip_data.get('hosting', False)
+
+        isp = (geoip_data.get("isp") or "").lower()
+        org = (geoip_data.get("org") or "").lower()
+        asn = (geoip_data.get("as") or "").lower()
+        hosting = geoip_data.get("hosting", False)
 
         # 1. Check for known Cloud/Hosting providers
-        cloud_keywords = ['amazon', 'google', 'microsoft', 'digitalocean', 'linode', 'oracle', 'alibaba', 'hetzner', 'ovh', 'vps', 'hosting']
+        cloud_keywords = [
+            "amazon",
+            "google",
+            "microsoft",
+            "digitalocean",
+            "linode",
+            "oracle",
+            "alibaba",
+            "hetzner",
+            "ovh",
+            "vps",
+            "hosting",
+        ]
         if hosting or any(k in isp or k in org for k in cloud_keywords):
             return "DATACENTER"
 
         # 2. Check for Residential ISPs
-        residential_keywords = ['comcast', 'verizon', 'at&t', 'spectrum', 'charter', 'cox', 'telecom', 'broadband', 'fios']
+        residential_keywords = [
+            "comcast",
+            "verizon",
+            "at&t",
+            "spectrum",
+            "charter",
+            "cox",
+            "telecom",
+            "broadband",
+            "fios",
+        ]
         if any(k in isp or k in org for k in residential_keywords):
             return "RESIDENTIAL"
 
         # 3. Education
-        if 'university' in org or 'college' in org or 'education' in isp:
+        if "university" in org or "college" in org or "education" in isp:
             return "ACADEMIC"
 
         return "CORPORATE"
@@ -85,27 +106,23 @@ class IPEnricher:
         Orchestrates the enrichment. Returns dict suitable for DB.
         """
         log.info(f"[Enricher] Enriching {ip}...")
-        
+
         rdns = self.get_reverse_dns(ip)
         geo = self.get_geoip_and_isp(ip)
         whois_data = self.get_whois_data(ip)
-        
+
         # Merge raw data for storage
-        raw_data = {
-            'rdns': rdns,
-            'geo': geo,
-            'whois': whois_data
-        }
-        
+        raw_data = {"rdns": rdns, "geo": geo, "whois": whois_data}
+
         result = {
-            'hostname': rdns,
-            'city': geo.get('city') if geo else None,
-            'country': geo.get('country') if geo else None,
-            'isp': geo.get('isp') if geo else None,
-            'org': geo.get('org') if geo else None,
-            'asn': geo.get('as') if geo else None,
-            'network_type': self.analyze_network_type(geo),
-            'raw_data': raw_data
+            "hostname": rdns,
+            "city": geo.get("city") if geo else None,
+            "country": geo.get("country") if geo else None,
+            "isp": geo.get("isp") if geo else None,
+            "org": geo.get("org") if geo else None,
+            "asn": geo.get("as") if geo else None,
+            "network_type": self.analyze_network_type(geo),
+            "raw_data": raw_data,
         }
-        
+
         return result

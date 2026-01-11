@@ -1,11 +1,11 @@
-
 import pytest
 from unittest.mock import MagicMock
 import sys
 import os
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from ssh_honeypot.core.command_handler import CommandHandler
+
 
 class TestLongCommands:
     @pytest.fixture
@@ -14,7 +14,9 @@ class TestLongCommands:
         mock_db = MagicMock()
         h = CommandHandler(mock_llm, mock_db)
         # Mock handle_generic to verify delegation
-        h.handle_generic = MagicMock(return_value=("generic_response", {}, {'source': 'llm'}))
+        h.handle_generic = MagicMock(
+            return_value=("generic_response", {}, {"source": "llm"})
+        )
         return h
 
     def test_complex_chain_detection(self, handler):
@@ -22,30 +24,32 @@ class TestLongCommands:
         # Create a chain of 35 commands to exceed the 30-limit
         # "printf 0 && printf 1 ... && printf 34"
         cmd = " && ".join([f"printf {i}" for i in range(35)])
-        
+
         resp, _, meta = handler.process_command(cmd, {})
-        
+
         handler.handle_generic.assert_called_once()
         assert resp == "generic_response"
-        
+
     def test_long_command_length(self, handler):
         # 2. Very long command > 4096 chars
         # We use 'printf' instead of 'echo' because 'echo' is now EXEMPT from complexity checks.
         cmd = "printf " + "A" * 5000
         handler.handle_generic.reset_mock()
-        
+
         resp, _, meta = handler.process_command(cmd, {})
         handler.handle_generic.assert_called_once()
-        
+
     def test_simple_command_pass(self, handler):
         # 3. Simple command (Should NOT trigger)
         cmd = "ls -la"
         # Mock handle_ls to ensure it doesn't crash if called
-        handler.handle_ls = MagicMock(return_value=("ls_output", {}, {'source': 'local'}))
+        handler.handle_ls = MagicMock(
+            return_value=("ls_output", {}, {"source": "local"})
+        )
         handler.handle_generic.reset_mock()
-        
+
         resp, _, meta = handler.process_command(cmd, {})
-        
+
         handler.handle_generic.assert_not_called()
         handler.handle_ls.assert_called_once()
 
@@ -53,55 +57,59 @@ class TestLongCommands:
         # 4. Simple semicolon chain (Should NOT trigger if <= 30 semicolons)
         cmd = "echo A ; echo B"
         # Mock handle_echo
-        handler.handle_echo = MagicMock(return_value=("echo_out", {}, {'source': 'local'}))
+        handler.handle_echo = MagicMock(
+            return_value=("echo_out", {}, {"source": "local"})
+        )
         handler.handle_generic.reset_mock()
-        
+
         resp, _, meta = handler.process_command(cmd, {})
-        
+
         handler.handle_generic.assert_not_called()
         # Should split and call echo twice
         assert handler.handle_echo.call_count == 2
 
     def test_full_chain_offloading_integration(self):
         """
-        Verify that a complex command actually goes through 
+        Verify that a complex command actually goes through
         cache check -> LLM -> cache save flow.
         """
         mock_llm = MagicMock()
         mock_db = MagicMock()
         h = CommandHandler(mock_llm, mock_db)
         # Use REAL handle_generic, do NOT mock it.
-        
+
         # Setup mocks for dependencies
-        context = {'cwd': '/root', 'session_id': 'test_sess'}
+        context = {"cwd": "/root", "session_id": "test_sess"}
         # We need > 30 '&&' to trigger complex offload
         part_list = [f"printf {i}" for i in range(35)]
         chain_cmd = " && ".join(part_list)
-        
+
         # 1. Cache Miss
         mock_db.get_cached_response.return_value = None
-        
+
         # 2. LLM Response
-        mock_llm.generate_response.return_value = '{"output": "simulated chain output...", "new_cwd": "/root"}'
-        
+        mock_llm.generate_response.return_value = (
+            '{"output": "simulated chain output...", "new_cwd": "/root"}'
+        )
+
         # Act
         resp, updates, meta = h.process_command(chain_cmd, context)
-        
+
         # Assertions
         # 1. Check routing to handle_generic (implied by cache check on FULL command)
-        mock_db.get_cached_response.assert_called_with(chain_cmd, '/root')
-        
+        mock_db.get_cached_response.assert_called_with(chain_cmd, "/root")
+
         # 2. Check LLM Call
         mock_llm.generate_response.assert_called_once()
         args, _ = mock_llm.generate_response.call_args
-        assert args[0] == chain_cmd # First arg is command
-        
+        assert args[0] == chain_cmd  # First arg is command
+
         # 3. Check Caching
         mock_db.cache_response.assert_called_once()
-        
+
         # 4. Check Return
         assert "simulated chain" in resp
-        assert meta['source'] == 'llm'
+        assert meta["source"] == "llm"
 
     def test_complex_chain_cache_hit(self):
         """
@@ -110,22 +118,24 @@ class TestLongCommands:
         mock_llm = MagicMock()
         mock_db = MagicMock()
         h = CommandHandler(mock_llm, mock_db)
-        
-        context = {'cwd': '/root', 'session_id': 'test_sess'}
+
+        context = {"cwd": "/root", "session_id": "test_sess"}
         # Must contain >30 &&
         chain_cmd = " && ".join([f"sleep {i}" for i in range(35)])
-        
+
         # 1. Cache HIT
         # db.get_cached_response returns raw text or JSON string
-        mock_db.get_cached_response.return_value = '{"output": "CACHED_OUTPUT", "new_cwd": "/root"}'
-        
+        mock_db.get_cached_response.return_value = (
+            '{"output": "CACHED_OUTPUT", "new_cwd": "/root"}'
+        )
+
         # Act
         resp, updates, meta = h.process_command(chain_cmd, context)
-        
+
         # Assertions
-        mock_db.get_cached_response.assert_called_with(chain_cmd, '/root')
-        mock_llm.generate_response.assert_not_called() # Should NOT hit LLM
-        
+        mock_db.get_cached_response.assert_called_with(chain_cmd, "/root")
+        mock_llm.generate_response.assert_not_called()  # Should NOT hit LLM
+
         assert resp == "CACHED_OUTPUT"
-        assert meta['source'] == 'cache'
-        assert meta['cached'] is True
+        assert meta["source"] == "cache"
+        assert meta["cached"] is True

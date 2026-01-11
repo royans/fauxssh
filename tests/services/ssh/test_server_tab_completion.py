@@ -4,9 +4,10 @@ import sys
 import os
 
 # Add project root to sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from ssh_honeypot.services.ssh.server import handle_tab_completion
+
 
 class TestTabCompletion(unittest.TestCase):
 
@@ -14,13 +15,13 @@ class TestTabCompletion(unittest.TestCase):
         # Setup
         chan = MagicMock()
         buffer = "testfile"
-        vfs = {'/': ['otherfile', 'another']}
-        cwd = '/'
+        vfs = {"/": ["otherfile", "another"]}
+        cwd = "/"
         prompt = "$ "
-        
+
         # Action
         new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
-        
+
         # Assert: No change, no sends
         self.assertEqual(new_buffer, "testfile")
         chan.send.assert_not_called()
@@ -29,13 +30,13 @@ class TestTabCompletion(unittest.TestCase):
         # Setup
         chan = MagicMock()
         buffer = "sys"
-        vfs = {'/': ['system.log', 'other']}
-        cwd = '/'
+        vfs = {"/": ["system.log", "other"]}
+        cwd = "/"
         prompt = "$ "
-        
+
         # Action
         new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
-        
+
         # Assert: Completed to "system.log"
         self.assertEqual(new_buffer, "system.log")
         # Verify "tem.log" was sent
@@ -45,13 +46,13 @@ class TestTabCompletion(unittest.TestCase):
         # Setup
         chan = MagicMock()
         buffer = "ls sys"
-        vfs = {'/': ['system.log', 'other']}
-        cwd = '/'
+        vfs = {"/": ["system.log", "other"]}
+        cwd = "/"
         prompt = "$ "
-        
+
         # Action
         new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
-        
+
         # Assert: Completed last word
         self.assertEqual(new_buffer, "ls system.log")
         chan.send.assert_called_with("tem.log")
@@ -60,38 +61,39 @@ class TestTabCompletion(unittest.TestCase):
         # Setup
         chan = MagicMock()
         buffer = "te"
-        vfs = {'/': ['test1', 'test2', 'other']}
-        cwd = '/'
+        vfs = {"/": ["test1", "test2", "other"]}
+        cwd = "/"
         prompt = "$ "
-        
+
         # Action
         new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
-        
+
         # Assert: Buffer unchanged
         self.assertEqual(new_buffer, "te")
-        
+
         # Verify listing calls
         # We expect \r\n, list, \r\n, prompt, buffer
         calls = [c[0][0] for c in chan.send.call_args_list]
-        self.assertIn(b'\r\n', calls)
-        self.assertIn(b"test1  test2", calls) # Joined by double space
-        self.assertIn("$ ", calls) # prompt (passed as string)
-        self.assertIn(b"te", calls) # buffer (encoded)
+        self.assertIn(b"\r\n", calls)
+        self.assertIn(b"test1  test2", calls)  # Joined by double space
+        self.assertIn("$ ", calls)  # prompt (passed as string)
+        self.assertIn(b"te", calls)  # buffer (encoded)
 
     def test_empty_buffer(self):
-         # If buffer empty, we decided to handle it gracefully (maybe list all? current logic: prefix="")
-         # prefix="" means matches ALL files
-         chan = MagicMock()
-         buffer = ""
-         vfs = {'/': ['a', 'b']}
-         cwd = '/'
-         prompt = "$ "
-         
-         handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
-         
-         # Expect listing of 'a  b'
-         calls = [c[0][0] for c in chan.send.call_args_list]
-         self.assertIn(b"a  b", calls)
+        # If buffer empty, we decided to handle it gracefully (maybe list all? current logic: prefix="")
+        # prefix="" means matches ALL files
+        chan = MagicMock()
+        buffer = ""
+        vfs = {"/": ["a", "b"]}
+        cwd = "/"
+        prompt = "$ "
 
-if __name__ == '__main__':
+        handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
+
+        # Expect listing of 'a  b'
+        calls = [c[0][0] for c in chan.send.call_args_list]
+        self.assertIn(b"a  b", calls)
+
+
+if __name__ == "__main__":
     unittest.main()

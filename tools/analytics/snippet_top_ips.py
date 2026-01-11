@@ -1,13 +1,13 @@
-
 def list_top_ips(limit=50, anon=False, db_path=None):
     conn = get_db_connection(db_path)
     c = conn.cursor()
-    
+
     # 1. Total Unique IPs
     try:
         c.execute("SELECT COUNT(DISTINCT remote_ip) FROM sessions")
         total_unique_ips = c.fetchone()[0]
-    except: total_unique_ips = 0
+    except:
+        total_unique_ips = 0
 
     query = """
         SELECT 
@@ -42,12 +42,15 @@ def list_top_ips(limit=50, anon=False, db_path=None):
         ORDER BY current_rpm DESC, total_sessions DESC
         LIMIT ?
     """
-    
+
     c.execute(query, (limit,))
     rows = c.fetchall()
     conn.close()
 
-    table = Table(title=f"Top Attacking IPs (Limit {limit}) - Total IPs: {total_unique_ips}", box=box.ROUNDED)
+    table = Table(
+        title=f"Top Attacking IPs (Limit {limit}) - Total IPs: {total_unique_ips}",
+        box=box.ROUNDED,
+    )
     table.add_column("Rank", style="dim", justify="right")
     table.add_column("IP", style="magenta")
     table.add_column("Sessions", justify="right", style="green")
@@ -59,25 +62,25 @@ def list_top_ips(limit=50, anon=False, db_path=None):
 
     rank = 1
     for r in rows:
-        ip = clean_ip(r['remote_ip'], anon=anon)
-        sessions = r['total_sessions']
-        cmds = r['total_cmds']
-        recent_1h = r['recent_cmds_1h']
-        rpm = r['current_rpm']
-        last_seen = to_local_time(r['last_seen'])
-        
+        ip = clean_ip(r["remote_ip"], anon=anon)
+        sessions = r["total_sessions"]
+        cmds = r["total_cmds"]
+        recent_1h = r["recent_cmds_1h"]
+        rpm = r["current_rpm"]
+        last_seen = to_local_time(r["last_seen"])
+
         # Determine Status/Risk
         # RPM Limit is 1000
         rpm_style = "white"
         status = "Idle"
         status_style = "dim"
-        
+
         if rpm > 0:
             status = "Active"
             status_style = "green"
-            
+
         if rpm >= 1000:
-            status = "SUSPENDED (Sim)" # Likely suspended by DoSProtector
+            status = "SUSPENDED (Sim)"  # Likely suspended by DoSProtector
             status_style = "bold red reverse"
             rpm_style = "bold red"
         elif rpm >= 800:
@@ -91,7 +94,7 @@ def list_top_ips(limit=50, anon=False, db_path=None):
         elif rpm > 100:
             status = "High Traffic"
             status_style = "bold blue"
-            
+
         table.add_row(
             str(rank),
             ip,
@@ -100,9 +103,11 @@ def list_top_ips(limit=50, anon=False, db_path=None):
             str(recent_1h),
             f"[{rpm_style}]{rpm}[/{rpm_style}]",
             last_seen,
-            f"[{status_style}]{status}[/{status_style}]"
+            f"[{status_style}]{status}[/{status_style}]",
         )
         rank += 1
-        
+
     console.print(table)
-    console.print("[dim]Note: 'Current RPM' is based on DB logs. Actual DoS suspension happens in-memory at 1000 RPM.[/dim]")
+    console.print(
+        "[dim]Note: 'Current RPM' is based on DB logs. Actual DoS suspension happens in-memory at 1000 RPM.[/dim]"
+    )

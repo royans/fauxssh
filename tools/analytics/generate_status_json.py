@@ -15,20 +15,24 @@ sys.path.append(os.path.join(PROJECT_ROOT, "ssh_honeypot"))
 
 try:
     from config_manager import get_data_dir, get_ignored_ips
+
     DB_PATH = os.path.join(get_data_dir(), "honeypot.sqlite")
 except ImportError:
     DB_PATH = os.path.join(PROJECT_ROOT, "data", "honeypot.sqlite")
 
+
 def anonymize_ip(ip):
-    if not ip: return "unknown"
+    if not ip:
+        return "unknown"
     if ":" in ip:
         # IPv6: Truncate to first 4 segments? Or just generic mask.
         # Simple approach: keep first 3 words if possible, or just masked
         return "xxxx:xxxx:xxxx:xxxx::200"
-    parts = ip.split('.')
+    parts = ip.split(".")
     if len(parts) == 4:
         return f"{parts[0]}.{parts[1]}.{parts[2]}.200"
     return "xxx.xxx.xxx.200"
+
 
 def get_db():
     if not os.path.exists(DB_PATH):
@@ -38,90 +42,100 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
+
 def generate_report():
     conn = get_db()
     cursor = conn.cursor()
-    
-    report = {
-        "generated_at": datetime.now().isoformat(),
-        "status": {},
-        "activity": {}
-    }
-    
+
+    report = {"generated_at": datetime.now().isoformat(), "status": {}, "activity": {}}
+
     try:
         # Prepare IP Filter
         try:
             ignored = get_ignored_ips()
-        except: ignored = []
-        
+        except:
+            ignored = []
+
         sess_filter = ""
         auth_filter = ""
         params = []
-        
+
         if ignored:
-            placeholders = ','.join(['?'] * len(ignored))
+            placeholders = ",".join(["?"] * len(ignored))
             sess_filter = f" AND remote_ip NOT IN ({placeholders})"
             auth_filter = f" AND client_ip NOT IN ({placeholders})"
             params = ignored
 
         # 1. General Stats
-        cursor.execute(f"SELECT COUNT(*) FROM sessions WHERE username != 'royans'{sess_filter}", params)
+        cursor.execute(
+            f"SELECT COUNT(*) FROM sessions WHERE username != 'royans'{sess_filter}",
+            params,
+        )
         total_sessions = cursor.fetchone()[0]
-        
-        cursor.execute(f"""
+
+        cursor.execute(
+            f"""
             SELECT COUNT(*) FROM interactions i
             JOIN sessions s ON i.session_id = s.session_id
             WHERE s.username != 'royans' {sess_filter.replace('remote_ip', 's.remote_ip')}
-        """, params)
+        """,
+            params,
+        )
         total_commands = cursor.fetchone()[0]
-        
-        cursor.execute(f"SELECT MIN(start_time) FROM sessions WHERE username != 'royans'{sess_filter}", params)
-        row_min = cursor.fetchone() # returns (None,) if no sessions
+
+        cursor.execute(
+            f"SELECT MIN(start_time) FROM sessions WHERE username != 'royans'{sess_filter}",
+            params,
+        )
+        row_min = cursor.fetchone()  # returns (None,) if no sessions
         first_seen = row_min[0] if row_min else None
-        
+
         report["status"] = {
             "total_sessions": total_sessions,
             "total_commands": total_commands,
-            "tracking_since": first_seen
+            "tracking_since": first_seen,
         }
-        
+
         # 2. Top Requesters (IPs)
         # We look at sessions for unique IPs
-        cursor.execute(f"""
+        cursor.execute(
+            f"""
             SELECT remote_ip, COUNT(*) as count 
             FROM sessions 
             WHERE username != 'royans'{sess_filter}
             GROUP BY remote_ip 
             ORDER BY count DESC 
             LIMIT 10
-        """, params)
+        """,
+            params,
+        )
         top_ips = []
         for row in cursor.fetchall():
-            top_ips.append({
-                "ip": anonymize_ip(row["remote_ip"]),
-                "count": row["count"]
-            })
+            top_ips.append(
+                {"ip": anonymize_ip(row["remote_ip"]), "count": row["count"]}
+            )
         report["activity"]["top_ips"] = top_ips
-        
+
         # 3. Top Usernames
-        cursor.execute(f"""
+        cursor.execute(
+            f"""
             SELECT username, COUNT(*) as count 
             FROM auth_events 
             WHERE username != 'royans'{auth_filter}
             GROUP BY username 
             ORDER BY count DESC 
             LIMIT 10
-        """, params)
+        """,
+            params,
+        )
         top_users = []
         for row in cursor.fetchall():
-            top_users.append({
-                "username": row["username"],
-                "count": row["count"]
-            })
+            top_users.append({"username": row["username"], "count": row["count"]})
         report["activity"]["top_usernames"] = top_users
-        
+
         # 4. Top Commands
-        cursor.execute(f"""
+        cursor.execute(
+            f"""
             SELECT i.command, COUNT(*) as count 
             FROM interactions i
             JOIN sessions s ON i.session_id = s.session_id
@@ -129,92 +143,100 @@ def generate_report():
             GROUP BY i.command 
             ORDER BY count DESC 
             LIMIT 10
-        """, params)
+        """,
+            params,
+        )
         top_cmds = []
         for row in cursor.fetchall():
-            top_cmds.append({
-                "command": row["command"],
-                "count": row["count"]
-            })
+            top_cmds.append({"command": row["command"], "count": row["count"]})
         report["activity"]["top_commands"] = top_cmds
-        
+
         # 5. Top Client Versions
-        cursor.execute(f"""
+        cursor.execute(
+            f"""
             SELECT client_version, COUNT(*) as count 
             FROM sessions 
             WHERE username != 'royans'{sess_filter}
             GROUP BY client_version 
             ORDER BY count DESC 
             LIMIT 10
-        """, params)
+        """,
+            params,
+        )
         top_clients = []
         for row in cursor.fetchall():
-            top_clients.append({
-                "client": row["client_version"],
-                "count": row["count"]
-            })
+            top_clients.append({"client": row["client_version"], "count": row["count"]})
         report["activity"]["top_clients"] = top_clients
 
         # 6. Recent Sessions
-        cursor.execute(f"""
+        cursor.execute(
+            f"""
             SELECT session_id, remote_ip, username, start_time, client_version 
             FROM sessions 
             WHERE username != 'royans'{sess_filter}
             ORDER BY start_time DESC 
             LIMIT 5
-        """, params)
+        """,
+            params,
+        )
         recent_sessions = []
         for row in cursor.fetchall():
-            recent_sessions.append({
-                "time": row["start_time"],
-                "ip": anonymize_ip(row["remote_ip"]),
-                "user": row["username"],
-                "client": row["client_version"]
-            })
+            recent_sessions.append(
+                {
+                    "time": row["start_time"],
+                    "ip": anonymize_ip(row["remote_ip"]),
+                    "user": row["username"],
+                    "client": row["client_version"],
+                }
+            )
         report["activity"]["recent_sessions"] = recent_sessions
-        
+
         # 7. Threat Stats [NEW]
         report["threat_stats"] = {}
-        
+
         # 7a. Activity Type Distribution
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT activity_type, COUNT(*) as count
             FROM command_analysis
             GROUP BY activity_type
             ORDER BY count DESC
-        """)
+        """
+        )
         activity_dist = []
         for row in cursor.fetchall():
-            activity_dist.append({
-                "type": row["activity_type"],
-                "count": row["count"]
-            })
+            activity_dist.append({"type": row["activity_type"], "count": row["count"]})
         report["threat_stats"]["activity_distribution"] = activity_dist
-        
+
         # 7b. Top High Risk Commands
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT command_text, risk_score, activity_type, COUNT(*) as count
             FROM command_analysis
             WHERE risk_score >= 7
             GROUP BY command_text
             ORDER BY risk_score DESC, count DESC
             LIMIT 5
-        """)
+        """
+        )
         top_risk = []
         for row in cursor.fetchall():
-            top_risk.append({
-                "command": row["command_text"],
-                "risk": row["risk_score"],
-                "type": row["activity_type"]
-            })
+            top_risk.append(
+                {
+                    "command": row["command_text"],
+                    "risk": row["risk_score"],
+                    "type": row["activity_type"],
+                }
+            )
         report["threat_stats"]["high_risk_commands"] = top_risk
 
     except Exception as e:
         report["error"] = str(e)
     finally:
         conn.close()
-        
+
     print(json.dumps(report, indent=2))
+
 
 if __name__ == "__main__":
     generate_report()

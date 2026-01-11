@@ -1,12 +1,14 @@
 from ssh_honeypot.handlers.base import BaseHandler
 
+
 class CatCommand(BaseHandler):
     def handle(self, cmd, context):
-        if context.get('stdin'):
-             return context['stdin'], {}, {'source': 'pipe', 'cached': False}
-             
-        if '--help' in cmd:
-             return """Usage: cat [OPTION]... [FILE]...
+        if context.get("stdin"):
+            return context["stdin"], {}, {"source": "pipe", "cached": False}
+
+        if "--help" in cmd:
+            return (
+                """Usage: cat [OPTION]... [FILE]...
 Concatenate FILE(s) to standard output.
 
 With no FILE, or when FILE is -, read standard input.
@@ -31,14 +33,18 @@ Examples:
 GNU coreutils online help: <https://www.gnu.org/software/coreutils/>
 Full documentation <https://www.gnu.org/software/coreutils/cat>
 or available locally via: info '(coreutils) cat invocation'
-""", {}, {}
+""",
+                {},
+                {},
+            )
 
         parts = cmd.split()
         # Simplistic parsing: take last arg as filename
         target_path = parts[-1] if len(parts) > 1 else ""
-        
+
         # Interactive cat (no args) not supported, return empty for now
-        if not target_path: return "", {}, {} 
-        
+        if not target_path:
+            return "", {}, {}
+
         content, source = self._generate_or_get_content("cat", target_path, context)
-        return content + "\n", {}, {'source': source, 'cached': source == 'local'}
+        return content + "\n", {}, {"source": source, "cached": source == "local"}

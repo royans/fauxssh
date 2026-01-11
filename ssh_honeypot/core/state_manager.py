@@ -1,4 +1,3 @@
-
 import os
 import logging
 
@@ -6,13 +5,15 @@ from ssh_honeypot.core.utils import get_data_dir
 
 log = logging.getLogger("sshpot")
 
+
 class StateManager:
     """
     Manages persistent state for the honeypot, such as the last used persona.
     """
+
     @property
     def STATE_FILE(self):
-         return os.path.join(get_data_dir(), ".last_persona")
+        return os.path.join(get_data_dir(), ".last_persona")
 
     @classmethod
     def get_state_file_path(cls):

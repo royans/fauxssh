@@ -10,7 +10,7 @@ print("Loading Risk Model v1.0...")
 print("Using GPU: Tesla K80 (Device 0)")
 
 # Placeholder for ancient code
-x = T.dmatrix('x')
+x = T.dmatrix("x")
 s = 1 / (1 + T.exp(-x))
 logistic = theano.function([x], s)
 

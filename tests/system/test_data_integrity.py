@@ -1,4 +1,3 @@
-
 import os
 import shutil
 import tempfile
@@ -16,16 +15,17 @@ from ssh_honeypot.core.config import ConfigManager
 from ssh_honeypot.core.persona_generator import PersonaGenerator
 from ssh_honeypot.core.database import HoneyDB
 
+
 class TestDataIntegrity(unittest.TestCase):
     """
     CRITICAL: This test suite ensures that NO data is written to the default
     directory when a custom data directory is configured.
     """
-    
+
     @classmethod
     def setUpClass(cls):
         print(f"\n[CRITICAL TEST] Using Isolated Data Dir: {TEST_DATA_DIR}")
-        
+
     @classmethod
     def tearDownClass(cls):
         print(f"[CRITICAL TEST] Cleaning up: {TEST_DATA_DIR}")
@@ -39,41 +39,40 @@ class TestDataIntegrity(unittest.TestCase):
     def test_database_creation(self):
         """Verify SQLite DB is created in the right place."""
         db_path = os.path.join(TEST_DATA_DIR, "honeypot.sqlite")
-        
-        # Override config default usage in HoneyDB if necessary, 
+
+        # Override config default usage in HoneyDB if necessary,
         # but HoneyDB usually gets path from config or utils.
         # Looking at HoneyDB code (not shown fully here, assuming it uses config)
-        
+
         # Let's patch ConfigManager to return our dynamic path for safety if it's hardcoded in default dict
-        # Actually ConfigManager should load defaults. 
+        # Actually ConfigManager should load defaults.
         # The DEFAULT_CONFIG_DICT in config.py has "data/honeypot.sqlite".
         # We need to verify if ConfigManager resolves this relative to CWD or DATA_DIR.
         # If it's relative to CWD (Project Root), it might fail this test if not updated.
-        pass 
+        pass
 
     def test_persona_generator_output(self):
         """Verify dynamic personas are written to custom data dir."""
         mock_llm = MagicMock()
-        mock_llm.generate_response.return_value = "Pong" # simplified
-        
+        mock_llm.generate_response.return_value = "Pong"  # simplified
+
         gen = PersonaGenerator(mock_llm)
         assert gen.output_personas_dir.startswith(TEST_DATA_DIR)
-        
-        
+
     def test_state_manager(self):
         """Verify StateManager writes .last_persona to custom data dir."""
         from ssh_honeypot.core.state_manager import StateManager
-        
+
         test_persona = "test_data_integrity_persona"
         StateManager.save_last_persona(test_persona)
-        
+
         # Check expected path
         expected_path = os.path.join(TEST_DATA_DIR, ".last_persona")
         assert os.path.exists(expected_path), f"State file not found at {expected_path}"
-        
-        with open(expected_path, 'r') as f:
+
+        with open(expected_path, "r") as f:
             assert f.read().strip() == test_persona
-            
+
         # Ensure regex/blacklist logic didn't put it in root
         root_path = os.path.join(PROJECT_ROOT, ".last_persona")
         assert not os.path.exists(root_path), "State file LEAKED to project root!"
@@ -81,11 +80,11 @@ class TestDataIntegrity(unittest.TestCase):
     def test_schemas_defaults(self):
         """Verify Pydantic models use correct default paths."""
         from ssh_honeypot.core.schemas import ServerConfig, LoggingConfig
-        
+
         # Server Config
         srv = ServerConfig()
         assert srv.host_key_file.startswith(TEST_DATA_DIR)
-        
+
         # Logging Config
         log_conf = LoggingConfig()
         assert log_conf.json_log_file.startswith(TEST_DATA_DIR)
@@ -96,5 +95,6 @@ class TestDataIntegrity(unittest.TestCase):
         # Ideally, we want all writeable paths to be under get_data_dir().
         pass
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

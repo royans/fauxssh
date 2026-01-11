@@ -1,12 +1,12 @@
-
 import unittest
 from unittest.mock import MagicMock, patch
 import json
 import os
 import sys
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from ssh_honeypot.core.database import HoneyDB
+
 
 class TestLoggingMetrics(unittest.TestCase):
     def setUp(self):
@@ -16,7 +16,7 @@ class TestLoggingMetrics(unittest.TestCase):
         self.json_path = "test_metrics.json.log"
         if os.path.exists(self.json_path):
             os.remove(self.json_path)
-            
+
         self.db = HoneyDB(self.db_path)
 
     def tearDown(self):
@@ -33,17 +33,18 @@ class TestLoggingMetrics(unittest.TestCase):
             command="ls -la",
             response="total 0",
             duration_ms=123.45,
-            request_md5="deadbeef"
+            request_md5="deadbeef",
         )
-        
+
         # Verify JSON content
-        with open(self.json_path, 'r') as f:
+        with open(self.json_path, "r") as f:
             line = f.readline()
             data = json.loads(line)
-            
+
         self.assertEqual(data["response_time_ms"], 123.45)
         self.assertEqual(data["request_md5"], "deadbeef")
         self.assertEqual(data["command"], "ls -la")
+
 
 if __name__ == "__main__":
     unittest.main()

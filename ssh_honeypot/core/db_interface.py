@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 
+
 class DatabaseBackend(ABC):
     """
     Abstract Base Class for Honeypot Database Backends.

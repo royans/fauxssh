@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import MagicMock
 from ssh_honeypot.handlers.unix.cmd_tail import TailCommand
 
+
 class TestTailCommand:
     @pytest.fixture
     def handler(self):
@@ -27,6 +28,6 @@ class TestTailCommand:
         assert lines[0] == "line17"
 
     def test_tail_stdin(self, handler):
-        context = {'stdin': "a\nb\nc\nd\ne"}
+        context = {"stdin": "a\nb\nc\nd\ne"}
         res, _, _ = handler.handle("tail -n 2", context)
         assert res.strip() == "d\ne"

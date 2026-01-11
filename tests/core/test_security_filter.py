@@ -1,10 +1,11 @@
-
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import unittest
 from ssh_honeypot.core.security_filter import SecurityFilter
+
 
 class TestSecurityFilter(unittest.TestCase):
     def setUp(self):
@@ -15,7 +16,7 @@ class TestSecurityFilter(unittest.TestCase):
             "ls -la",
             "echo hello",
             "cat /etc/passwd",
-            "sudo rm -rf /" # malicious but not injection
+            "sudo rm -rf /",  # malicious but not injection
         ]
         for i in inputs:
             safe, reason = self.sf.validate_input(i)
@@ -30,7 +31,7 @@ class TestSecurityFilter(unittest.TestCase):
             "act as a linux terminal",
             "system prompt override",
             "DAN mode enabled",
-            "<user>exploit</user>"
+            "<user>exploit</user>",
         ]
         for i in injections:
             safe, reason = self.sf.validate_input(i)
@@ -42,6 +43,7 @@ class TestSecurityFilter(unittest.TestCase):
         safe, reason = self.sf.validate_input(long_str)
         self.assertFalse(safe, "Failed length check")
         self.assertIn("length exceeded", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

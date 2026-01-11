@@ -7,6 +7,7 @@ try:
 except ImportError:
     from config_manager import config
 
+
 def get_skeleton_data(json_path=None):
     """
     Returns a list of file nodes for the Skeleton layer.
@@ -23,27 +24,27 @@ def get_skeleton_data(json_path=None):
     if not json_path:
         # Default: ProjectRoot/personas/base_fs.json
         # Also try data/personas/base_fs.json for backwards compat or structure variations
-        p1 = os.path.join(project_root, 'personas', 'base_fs.json')
-        p2 = os.path.join(project_root, 'data', 'personas', 'base_fs.json')
-        
+        p1 = os.path.join(project_root, "personas", "base_fs.json")
+        p2 = os.path.join(project_root, "data", "personas", "base_fs.json")
+
         if os.path.exists(p1):
-             json_path = p1
+            json_path = p1
         elif os.path.exists(p2):
-             json_path = p2
+            json_path = p2
         else:
-             # Fallback to legacy or let it fail gracefully
-             json_path = p1
+            # Fallback to legacy or let it fail gracefully
+            json_path = p1
 
     nodes = []
-    
+
     # 1. Load Static Seed
     if os.path.exists(json_path):
         try:
-            with open(json_path, 'r') as f:
+            with open(json_path, "r") as f:
                 nodes = json.load(f)
         except Exception as e:
             logging.error(f"FS Seeder: Failed to load JSON: {e}")
-            
+
     # 2. Append Dynamic User Defaults
     # Note: These are now handled by the persona overlay in fs/home/USER/
     home_defaults = []
@@ -55,56 +56,65 @@ def get_skeleton_data(json_path=None):
     # Fix: fs_seeder is in ssh_honeypot/core/
     # base_dir (ssh_honeypot) -> parent is project root
     # project_root defined above
-    common_fs_path = os.path.join(project_root, 'personas', 'common_fs')
-    
+    common_fs_path = os.path.join(project_root, "personas", "common_fs")
+
     if os.path.exists(common_fs_path):
         common_nodes = load_overlay_nodes(common_fs_path)
         # Merge Common Nodes
         if common_nodes:
-            node_map = {n['path']: i for i, n in enumerate(nodes)}
+            node_map = {n["path"]: i for i, n in enumerate(nodes)}
             for new_node in common_nodes:
-                path = new_node['path']
+                path = new_node["path"]
                 if path in node_map:
                     nodes[node_map[path]] = new_node
                 else:
                     nodes.append(new_node)
                     node_map[path] = len(nodes) - 1
-        logging.info(f"FS Seeder: Loaded {len(common_nodes)} common items from {common_fs_path}")
-
+        logging.info(
+            f"FS Seeder: Loaded {len(common_nodes)} common items from {common_fs_path}"
+        )
 
     # 3. Load Filesystem Overlay from Persona
-    fs_path = config.get('persona', '_fs_path')
+    fs_path = config.get("persona", "_fs_path")
     overlay_nodes = []
 
     import sys
+
     sys.stderr.write(f"[DEBUG] FS Seeder: _fs_path from config is '{fs_path}'\n")
-    
+
     if fs_path and os.path.exists(fs_path):
         # logging.info(f"Loading filesytem overlay from {fs_path}")
         overlay_nodes = load_overlay_nodes(fs_path)
-        sys.stderr.write(f"[DEBUG] FS Seeder: Loaded {len(overlay_nodes)} overlay nodes.\n")
+        sys.stderr.write(
+            f"[DEBUG] FS Seeder: Loaded {len(overlay_nodes)} overlay nodes.\n"
+        )
     else:
-        sys.stderr.write(f"[DEBUG] FS Seeder: Skipping overlay! Path invalid or missing.\n")
-        
+        sys.stderr.write(
+            f"[DEBUG] FS Seeder: Skipping overlay! Path invalid or missing.\n"
+        )
+
     # Merge Strategy: Overwrite existing paths with new nodes
     if overlay_nodes:
         # Create map for quick lookup
-        node_map = {n['path']: i for i, n in enumerate(nodes)}
-        
+        node_map = {n["path"]: i for i, n in enumerate(nodes)}
+
         for new_node in overlay_nodes:
-            path = new_node['path']
+            path = new_node["path"]
             if path in node_map:
                 # Update existing
                 nodes[node_map[path]] = new_node
             else:
                 nodes.append(new_node)
                 node_map[path] = len(nodes) - 1
-        
+
         # User requested explicit logging validation
-        user_files_count = sum(1 for n in overlay_nodes if n['path'].startswith('~'))
-        logging.info(f"Persona Overlay: Fully loaded {len(overlay_nodes)} files, including {user_files_count} in users directory.")
+        user_files_count = sum(1 for n in overlay_nodes if n["path"].startswith("~"))
+        logging.info(
+            f"Persona Overlay: Fully loaded {len(overlay_nodes)} files, including {user_files_count} in users directory."
+        )
 
     return nodes
+
 
 def load_overlay_nodes(fs_root):
     """
@@ -112,40 +122,43 @@ def load_overlay_nodes(fs_root):
     Handles 'USER' directory remapping to '~'.
     """
     overlay = []
-    
-    fs_config = config.get('persona', 'filesystem') or {}
-    meta_overrides = fs_config.get('metadata_overrides', {})
-    default_home_owner = fs_config.get('default_home_owner', False)
-    user_home_mapping = fs_config.get('user_home_mapping', False)
+
+    fs_config = config.get("persona", "filesystem") or {}
+    meta_overrides = fs_config.get("metadata_overrides", {})
+    default_home_owner = fs_config.get("default_home_owner", False)
+    user_home_mapping = fs_config.get("user_home_mapping", False)
 
     for root, dirs, files in os.walk(fs_root):
         # Determine relative path from fs_root
         rel_root = os.path.relpath(root, fs_root)
-        if rel_root == ".": rel_root = ""
-        
+        if rel_root == ".":
+            rel_root = ""
+
         # Calculate virtual absolute path
         # e.g. fs/etc/issue -> /etc/issue
-        
+
         # Handle Directory Nodes
         for d in dirs:
             real_path = os.path.join(root, d)
             v_rel_path = os.path.join(rel_root, d)
             v_abs_path = "/" + v_rel_path.lstrip("/")
-            
+
             # Dynamic mapping: /home/USER -> ~
             # Note: We use '~' which HoneyDB expands to /home/<actual_user>
             remapped_path = v_abs_path
             is_user_home = False
-            
-            if user_home_mapping and (v_abs_path == "/home/USER" or v_abs_path.startswith("/home/USER/")):
-                 remapped_path = v_abs_path.replace("/home/USER", "~", 1)
-                 is_user_home = True
+
+            if user_home_mapping and (
+                v_abs_path == "/home/USER" or v_abs_path.startswith("/home/USER/")
+            ):
+                remapped_path = v_abs_path.replace("/home/USER", "~", 1)
+                is_user_home = True
 
             # Metadata defaults
             owner = "root"
             group = "root"
             perm = "drwxr-xr-x"
-            
+
             if is_user_home and default_home_owner and remapped_path.startswith("~"):
                 # Use special marker that HoneyDB or FS seeder might interpret?
                 # HoneyDB's seed_fs resolves '~' but doesn't auto-set owner unless we tell it.
@@ -163,44 +176,42 @@ def load_overlay_nodes(fs_root):
                 # HoneyDB uses `cow_layers` per session.
                 # The BASE layer is shared.
                 # If we put `~` in path, `HoneyDB.get_node` resolves `~` to `/home/<current_user>`.
-                owner = "root" # Default for shared layer.
-            
+                owner = "root"  # Default for shared layer.
+
             # Applying overrides
             if v_abs_path in meta_overrides:
-                 ov = meta_overrides[v_abs_path]
-                 owner = ov.get('owner', owner)
-                 perm = ov.get('mode', perm) # mode vs permissions field name mismatch?
-                 # Seed uses 'permissions'. Config uses 'mode'. Let's normalize.
-                 perm = ov.get('permissions', perm)
+                ov = meta_overrides[v_abs_path]
+                owner = ov.get("owner", owner)
+                perm = ov.get("mode", perm)  # mode vs permissions field name mismatch?
+                # Seed uses 'permissions'. Config uses 'mode'. Let's normalize.
+                perm = ov.get("permissions", perm)
 
-            overlay.append({
-                "path": remapped_path,
-                "parent_path": os.path.dirname(remapped_path), # Approximation
-                "type": "directory",
-                "metadata": {
-                    "permissions": perm,
-                    "owner": owner,
-                    "group": group
+            overlay.append(
+                {
+                    "path": remapped_path,
+                    "parent_path": os.path.dirname(remapped_path),  # Approximation
+                    "type": "directory",
+                    "metadata": {"permissions": perm, "owner": owner, "group": group},
                 }
-            })
+            )
 
         # Handle File Nodes
         for f in files:
             real_path = os.path.join(root, f)
             v_rel_path = os.path.join(rel_root, f)
             v_abs_path = "/" + v_rel_path.lstrip("/")
-            
+
             remapped_path = v_abs_path
             if user_home_mapping and (v_abs_path.startswith("/home/USER/")):
-                 remapped_path = v_abs_path.replace("/home/USER", "~", 1)
+                remapped_path = v_abs_path.replace("/home/USER", "~", 1)
 
             # Read Content
             content = ""
             try:
-                if os.path.getsize(real_path) > 1024 * 50: # 50KB Limit
+                if os.path.getsize(real_path) > 1024 * 50:  # 50KB Limit
                     content = "binary_large_file"
                 else:
-                    with open(real_path, 'r', encoding='utf-8') as fh:
+                    with open(real_path, "r", encoding="utf-8") as fh:
                         content = fh.read()
             except UnicodeDecodeError:
                 content = "binary_data"
@@ -211,14 +222,14 @@ def load_overlay_nodes(fs_root):
             owner = "root"
             group = "root"
             perm = "-rw-r--r--"
-            
+
             # Dynamic Ownership for Home Directory
             # If we are in ~, and the config says default_home_owner=True,
             # we purposely leaving 'owner' unset (None) so HoneyDB's list_user_dir
             # will dynamically fill it with the current session username.
             if default_home_owner and remapped_path.startswith("~"):
-                 owner = None
-                 group = None
+                owner = None
+                group = None
 
             # Applying overrides
             # Check both absolute path (/home/USER/file) and remapped path (~/file)
@@ -227,60 +238,73 @@ def load_overlay_nodes(fs_root):
                 target_override = meta_overrides[v_abs_path]
             elif remapped_path in meta_overrides:
                 target_override = meta_overrides[remapped_path]
-                
-            if target_override:
-                 if 'owner' in target_override: owner = target_override['owner']
-                 perm = target_override.get('permissions', target_override.get('mode', perm))
 
-            meta = {
-                "permissions": perm,
-                "size": len(content)
-            }
-            if owner: meta["owner"] = owner
-            if group: meta["group"] = group
-            
-            overlay.append({
-                "path": remapped_path,
-                "parent_path": os.path.dirname(remapped_path),
-                "type": "file",
-                "content": content,
-                "metadata": meta
-            })
-            
+            if target_override:
+                if "owner" in target_override:
+                    owner = target_override["owner"]
+                perm = target_override.get(
+                    "permissions", target_override.get("mode", perm)
+                )
+
+            meta = {"permissions": perm, "size": len(content)}
+            if owner:
+                meta["owner"] = owner
+            if group:
+                meta["group"] = group
+
+            overlay.append(
+                {
+                    "path": remapped_path,
+                    "parent_path": os.path.dirname(remapped_path),
+                    "type": "file",
+                    "content": content,
+                    "metadata": meta,
+                }
+            )
+
     return overlay
-    
+
+
 def seed_filesystem(db, json_path=None):
     """
     Populates the global_filesystem table with skeleton data.
     """
     nodes = get_skeleton_data(json_path)
     count = 0
-    
+
     # Use direct connection for bulk operation
     conn = db._get_conn()
     try:
         for node in nodes:
             # Replicate update_fs_node logic but with shared connection
-            path = node['path']
-            parent_path = node.get('parent_path')
-            type_Str = node['type']
-            metadata = node['metadata'] 
-            content = node.get('content')
-            
+            path = node["path"]
+            parent_path = node.get("parent_path")
+            type_Str = node["type"]
+            metadata = node["metadata"]
+            content = node.get("content")
+
             # Ensure content is string
             if isinstance(content, (dict, list)):
                 content = str(content)
-                
-            conn.execute("""
+
+            conn.execute(
+                """
                 INSERT OR REPLACE INTO global_filesystem (path, parent_path, type, metadata, content)
                 VALUES (?, ?, ?, ?, ?)
-            """, (path, parent_path, type_Str, json.dumps(metadata) if isinstance(metadata, dict) else metadata, content))
+            """,
+                (
+                    path,
+                    parent_path,
+                    type_Str,
+                    json.dumps(metadata) if isinstance(metadata, dict) else metadata,
+                    content,
+                ),
+            )
             count += 1
         conn.commit()
     except Exception as e:
         logging.error(f"FS Seeder: Failed in bulk seed: {e}")
     finally:
         conn.close()
-        
-    logging.info(f"FS Seeder: Seeded {count} items into global_filesystem.")
 
+    logging.info(f"FS Seeder: Seeded {count} items into global_filesystem.")
