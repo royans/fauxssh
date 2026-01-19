@@ -39,17 +39,27 @@ log_info "Running Pre-flight Checks..."
 BLOCKERS=0
 AUTOFIX=0
 
-# Check Python3
+# Check Python3 or Python
+PYTHON_CMD=""
 if command -v python3 >/dev/null 2>&1; then
-    echo -e "  [${GREEN}OK${NC}] Python 3 detected."
+    PYTHON_CMD="python3"
+elif command -v python >/dev/null 2>&1; then
+    # Verify version 3
+    if python -c "import sys; sys.exit(0 if sys.version_info.major == 3 else 1)" 2>/dev/null; then
+        PYTHON_CMD="python"
+    fi
+fi
+
+if [ -n "$PYTHON_CMD" ]; then
+    echo -e "  [${GREEN}OK${NC}] Python 3 detected ($PYTHON_CMD)."
 else
     echo -e "  [${RED}FAIL${NC}] Python 3 is missing. (Action Required)"
     BLOCKERS=$((BLOCKERS+1))
 fi
 
 # Check Venv Capability (Try creating a temp one)
-if command -v python3 >/dev/null 2>&1; then
-    if python3 -m venv /tmp/test_fauxssh_venv >/dev/null 2>&1; then
+if [ -n "$PYTHON_CMD" ]; then
+    if $PYTHON_CMD -m venv /tmp/test_fauxssh_venv >/dev/null 2>&1; then
         echo -e "  [${GREEN}OK${NC}] Python Venv module (with pip) is working."
         rm -rf /tmp/test_fauxssh_venv
     else
@@ -108,7 +118,7 @@ else
     fi
     
     # Extract using Python (reliable)
-    python3 -c "import zipfile, sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$TMP_ZIP" "$TMP_EXTRACT"
+    $PYTHON_CMD -c "import zipfile, sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$TMP_ZIP" "$TMP_EXTRACT"
     
     # Move files
     # Zip contains fauxssh-main/ folder. We need to flatten it.
@@ -138,7 +148,7 @@ fi
 # 3. Virtual Environment
 if [ ! -d "venv" ]; then
     log_info "Creating virtual environment..."
-    if ! python3 -m venv venv; then
+    if ! $PYTHON_CMD -m venv venv; then
         log_err "Failed to create virtual environment."
         echo ""
         echo -e "${YELLOW}Common Fix for Debian/Ubuntu:${NC}"
@@ -166,11 +176,17 @@ elif [ -x "./venv/bin/pip3" ] && ./venv/bin/pip3 --version >/dev/null 2>&1; then
 fi
 
 if [ "$PIP_VALID" = false ]; then
-    log_err "pip is broken or missing in ./venv/bin/. The virtual environment is corrupted."
-    log_info "Removing broken virtual environment..."
-    rm -rf venv
-    log_info "Please run this installer again to re-create it correctly."
-    exit 1
+    # Try generic 'pip' if detection failed
+    if [ -x "./venv/bin/pip" ]; then
+        PIP_CMD="./venv/bin/pip"
+        PIP_VALID=true
+    else
+        log_err "pip is broken or missing in ./venv/bin/. The virtual environment is corrupted."
+        log_info "Removing broken virtual environment..."
+        rm -rf venv
+        log_info "Please run this installer again to re-create it correctly."
+        exit 1
+    fi
 fi
 
 # Upgrade pip first
@@ -194,22 +210,52 @@ fi
 echo ""
 log_info "Configuring AI Features..."
 
-# Check if key is already set
-CURRENT_KEY=$(grep "^GOOGLE_API_KEY=" .env 2>/dev/null | cut -d '=' -f2)
-# Remove potential quotes
-CURRENT_KEY=$(echo "$CURRENT_KEY" | tr -d '"' | tr -d "'")
+USER_KEY=""
+NEED_VALIDATION=false
+FROM_ENV_VAR=false
+SKIP_PROMPT=false
 
-if [ -z "$CURRENT_KEY" ] || [ "$CURRENT_KEY" = "your_key_here" ]; then
+# 1. Check Environment Variable
+if [ -n "$GOOGLE_API_KEY" ]; then
+    log_info "Found GOOGLE_API_KEY in environment variables."
+    USER_KEY="$GOOGLE_API_KEY"
+    NEED_VALIDATION=true
+    FROM_ENV_VAR=true
+    SKIP_PROMPT=true
+fi
+
+# 2. Check .env (Only if not in Env Var)
+if [ -z "$USER_KEY" ]; then
+    CURRENT_KEY=$(grep "^GOOGLE_API_KEY=" .env 2>/dev/null | cut -d '=' -f2 | tr -d '"' | tr -d "'")
+    if [ -n "$CURRENT_KEY" ] && [ "$CURRENT_KEY" != "your_key_here" ]; then
+         log_info "Gemini API Key already configured in .env."
+         SKIP_PROMPT=true
+         # We validation skip for existing .env to avoid blocking updates/re-installs
+    fi
+fi
+
+# 3. Prompt User (Only if no Key found anywhere)
+if [ "$SKIP_PROMPT" = false ]; then
     echo "  FauxSSH uses Google Gemini for dynamic persona generation and chat."
     echo "  (Get a key for free at https://aistudio.google.com/)"
     echo ""
-    read -p "  Enter your Gemini API Key (or press Enter to skip): " USER_KEY
+    # Ensure tty for prompt
+    if [ -t 0 ]; then
+        read -p "  Enter your Gemini API Key (or press Enter to skip): " USER_KEY
+    else
+        echo "  [Non-interactive] No Gemini Key provided. Skipping."
+    fi
     
     if [ -n "$USER_KEY" ]; then
-        log_info "Validating API Key..."
-        
-        # Validation Script
-        VALIDATOR_SCRIPT=$(cat <<EOF
+        NEED_VALIDATION=true
+    fi
+fi
+
+# 4. Validate and Save
+if [ "$NEED_VALIDATION" = true ]; then
+    log_info "Validating API Key..."
+    
+    VALIDATOR_SCRIPT=$(cat <<EOF
 import sys
 import google.generativeai as genai
 try:
@@ -222,38 +268,48 @@ except Exception as e:
     sys.exit(1)
 EOF
 )
-        VALIDATION_OUT=$(./venv/bin/python3 -c "$VALIDATOR_SCRIPT" "$USER_KEY" 2>&1)
-        
-        if [[ "$VALIDATION_OUT" == *"OK"* ]]; then
-             log_ok "API Key is valid."
+    # Use || true to prevent set -e from exiting on validation failure
+    # Use ./venv/bin/python for venv correctness
+    VALIDATION_OUT=$(./venv/bin/python -c "$VALIDATOR_SCRIPT" "$USER_KEY" 2>&1 || true)
+    
+    if [[ "$VALIDATION_OUT" == *"OK"* ]]; then
+         log_ok "API Key is valid."
+         
+         # Persist to .env (Always, checking if different)
+         if grep -q "GOOGLE_API_KEY=" .env; then
+             REPLACE_SCRIPT="import sys; lines = open('.env').readlines(); out = [l if not l.startswith('GOOGLE_API_KEY=') else f'GOOGLE_API_KEY={sys.argv[1]}\n' for l in lines]; open('.env', 'w').writelines(out)"
+             ./venv/bin/python -c "$REPLACE_SCRIPT" "$USER_KEY"
+         else
+             echo "GOOGLE_API_KEY=$USER_KEY" >> .env
+         fi
+         if [ "$FROM_ENV_VAR" = true ]; then
+             log_info "Saved environment variable key to .env for persistence."
+         fi
+         
+         # Ask for Persona Generation
+         SHOULD_GENERATE=false
+         echo ""
+         if [ -t 0 ]; then
+            read -p "  Do you want to generate a custom persona now? [y/N] " GEN_CHOICE
+            if [[ "$GEN_CHOICE" =~ ^[Yy]$ ]]; then SHOULD_GENERATE=true; fi
+         else
+             log_info "Non-interactive mode detected. Skipping persona generation."
+         fi
+         
+         if [ "$SHOULD_GENERATE" = true ]; then
+             read -p "  Describe the persona (e.g. 'Production DB Server for a bank'): " PERSONA_DESC
+             if [ -z "$PERSONA_DESC" ]; then PERSONA_DESC="Standard enterprise linux server"; fi
              
-             # Save to .env
-             if grep -q "GOOGLE_API_KEY=" .env; then
-                 # Use python to replace to avoid sed escaping issues with special chars in keys
-                 REPLACE_SCRIPT="import sys; lines = open('.env').readlines(); out = [l if not l.startswith('GOOGLE_API_KEY=') else f'GOOGLE_API_KEY={sys.argv[1]}\n' for l in lines]; open('.env', 'w').writelines(out)"
-                 ./venv/bin/python3 -c "$REPLACE_SCRIPT" "$USER_KEY"
-             else
-                 echo "GOOGLE_API_KEY=$USER_KEY" >> .env
-             fi
+             log_info "Generating persona via LLM (this may take 10-20s)..."
              
-             # Ask for Persona Generation
-             echo ""
-             read -p "  Do you want to generate a custom persona now? [y/N] " GEN_CHOICE
-             if [[ "$GEN_CHOICE" =~ ^[Yy]$ ]]; then
-                 read -p "  Describe the persona (e.g. 'Production DB Server for a bank'): " PERSONA_DESC
-                 if [ -z "$PERSONA_DESC" ]; then PERSONA_DESC="Standard enterprise linux server"; fi
-                 
-                 log_info "Generating persona via LLM (this may take 10-20s)..."
-                 
-                 # Generation Script
-                 GEN_SCRIPT=$(cat <<EOF
+             GEN_SCRIPT=$(cat <<EOF
 import sys
 import os
 sys.path.append(os.getcwd())
-# Ensure config reloads env
-from dotenv import load_dotenv
-load_dotenv(override=True)
 try:
+    # Ensure config reloads env
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
     from ssh_honeypot.core.llm import LLMInterface
     from ssh_honeypot.core.persona_generator import PersonaGenerator
     llm = LLMInterface()
@@ -265,42 +321,52 @@ except Exception as e:
     sys.exit(1)
 EOF
 )
-                 GEN_OUT=$(./venv/bin/python3 -c "$GEN_SCRIPT" "$PERSONA_DESC" 2>&1)
-                 
-                 if [[ "$GEN_OUT" == *"CREATED:"* ]]; then
-                      P_NAME=$(echo "$GEN_OUT" | cut -d':' -f2)
-                      log_ok "Persona '$P_NAME' created and set active."
-                 else
-                      log_err "Generation failed: $GEN_OUT"
-                 fi
-             fi
+             GEN_OUT=$(./venv/bin/python -c "$GEN_SCRIPT" "$PERSONA_DESC" 2>&1 || true)
              
-        else
-             log_warn "API Key validation failed. Using empty key."
-             log_warn "Error: $VALIDATION_OUT"
-        fi
+             if [[ "$GEN_OUT" == *"CREATED:"* ]]; then
+                  P_NAME=$(echo "$GEN_OUT" | cut -d':' -f2)
+                  log_ok "Persona '$P_NAME' created and set active."
+             else
+                  log_err "Generation failed: $GEN_OUT"
+             fi
+         fi
+         
     else
-        log_info "Skipping AI setup. You can configure .env later."
+         log_warn "API Key validation failed ($VALIDATION_OUT)."
+         if [ "$FROM_ENV_VAR" = true ]; then
+             log_err "The provided GOOGLE_API_KEY environment variable is invalid."
+         fi
     fi
+elif [ -z "$USER_KEY" ] && [ -n "$CURRENT_KEY" ] && [ "$CURRENT_KEY" != "your_key_here" ]; then
+    log_info "Gemini API Key already configured (Skipping validation)."
 else
-    log_info "Gemini API Key already configured."
+    log_info "Skipping AI setup. You can configure .env later."
 fi
 
 # 6. Config Check
 log_info "Running system check..."
-if ./venv/bin/python3 tools/check_config.py; then
+if ./venv/bin/python tools/check_config.py; then
     log_ok "System Check Passed."
 else
     log_warn "System Check Warnings (Review above)."
 fi
 
-# 7. Final Instructions
+# 7. Auto-Start
+echo ""
+log_info "Starting FauxSSH Service..."
+if ./start.sh; then
+    log_ok "Service started in background."
+else
+    log_err "Failed to start service."
+fi
+
+# 8. Final Instructions
 echo ""
 echo -e "${GREEN}==========================================${NC}"
 echo -e "${GREEN}       Installation Complete!             ${NC}"
 echo -e "${GREEN}==========================================${NC}"
 echo ""
-echo -e "1. Start FauxSSH:     ${YELLOW}$INSTALL_DIR/start.sh${NC}"
+echo -e "1. Service Status:    ${YELLOW}ps aux | grep main.py${NC}"
 echo -e "2. Enable Service:    ${YELLOW}$INSTALL_DIR/tools/setup_service.sh${NC}"
 echo ""
 echo -e "${BLUE}Permissions Note:${NC}"
