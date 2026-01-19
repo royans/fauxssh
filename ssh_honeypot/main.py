@@ -13,15 +13,7 @@ from ssh_honeypot.core.config import config
 from ssh_honeypot.core.utils import get_data_dir
 from ssh_honeypot.core.logging_setup import log
 from ssh_honeypot.core.persona_validator import validate_active_persona
-from ssh_honeypot.core.background_tasks import (
-    cleanup_loop,
-    analysis_loop,
-    ip_enrichment_loop,
-    analysis_loop,
-    ip_enrichment_loop,
-    payload_download_loop,
-    payload_analysis_loop,
-)
+from ssh_honeypot.core.background_tasks import start_background_tasks
 from ssh_honeypot.core import fs_seeder
 
 # Imports from Services
@@ -202,29 +194,10 @@ def main(argv=None):
         analysis_loop(db, llm, run_once=True)
         return
 
-    # Start Background Tasks
-    cleanup_thread = threading.Thread(target=cleanup_loop, args=(db,), daemon=True)
-    cleanup_thread.start()
+    # Start Background Tasks (Job Scheduler)
+    from ssh_honeypot.core.background_tasks import start_background_tasks
 
-    analysis_thread = threading.Thread(
-        target=analysis_loop, args=(db, llm), daemon=True
-    )
-    analysis_thread.start()
-
-    ip_enrich_thread = threading.Thread(
-        target=ip_enrichment_loop, args=(db,), daemon=True
-    )
-    ip_enrich_thread.start()
-
-    payload_thread = threading.Thread(
-        target=payload_download_loop, args=(db,), daemon=True
-    )
-    payload_thread.start()
-
-    payload_analysis_thread = threading.Thread(
-        target=payload_analysis_loop, args=(db,), daemon=True
-    )
-    payload_analysis_thread.start()
+    start_background_tasks(db, llm)
 
     # Determine Ports
     ssh_port = int(os.getenv("FAUXSSH_PORT", config.get("server", "port") or 2222))

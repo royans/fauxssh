@@ -324,6 +324,23 @@ class PostgresBackend(DatabaseBackend):
                 "CREATE INDEX IF NOT EXISTS idx_llm_usage_ip_time ON llm_usage(ip, timestamp)"
             )
 
+            # Payload Requests (Many-to-One Tracker)
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS payload_requests (
+                    id SERIAL PRIMARY KEY,
+                    payload_id INTEGER,
+                    ip TEXT,
+                    session_id TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(payload_id) REFERENCES malicious_payloads(id)
+                )
+            """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_payload_req_pid ON payload_requests(payload_id)"
+            )
+
             # Requested URLs
             cursor.execute(
                 """
@@ -552,6 +569,35 @@ class PostgresBackend(DatabaseBackend):
             )
         except Exception:
             pass
+
+        # Payload Pipeline Hook (Restored)
+        try:
+            from .payload_manager import PayloadManager
+
+            if command and (
+                "http" in command or "wget" in command or "curl" in command
+            ):
+                pm = PayloadManager(self)
+                urls = pm.extract_urls(command)
+
+                if urls:
+                    # Fetch IP for session
+                    conn = self._get_conn()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT remote_ip FROM sessions WHERE session_id = %s",
+                        (session_id,),
+                    )
+                    row = cursor.fetchone()
+                    conn.close()
+
+                    remote_ip = row[0] if row else "unknown"
+
+                    for url in urls:
+                        pm.queue_payload(url, session_id, remote_ip)
+
+        except Exception as e:
+            log.error(f"[Postgres] Error in Payload Pipeline: {e}")
 
     def get_cached_response(self, command, cwd):
         h = hashlib.sha256(f"{cwd}:{command}".encode()).hexdigest()
@@ -1382,31 +1428,142 @@ class PostgresBackend(DatabaseBackend):
         return []
 
     def add_malicious_payload(self, url, url_hash, session_id, ip, timestamp=None):
-        # Implementation omitted for brevity
-        pass
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            # 1. Insert/Get Payload ID
+            cursor.execute(
+                """
+                INSERT INTO malicious_payloads (url, url_hash, session_id, ip, timestamp)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (url_hash) DO NOTHING
+                RETURNING id
+            """,
+                (
+                    url,
+                    url_hash,
+                    session_id,
+                    ip,
+                    timestamp or datetime.datetime.now(),
+                ),
+            )
+            row = cursor.fetchone()
+
+            if row:
+                payload_id = row[0]
+            else:
+                # Assuming it exists, fetch it
+                cursor.execute(
+                    "SELECT id FROM malicious_payloads WHERE url_hash = %s", (url_hash,)
+                )
+                row = cursor.fetchone()
+                payload_id = row[0] if row else None
+
+            # 2. Track Request (Always)
+            if payload_id:
+                cursor.execute(
+                    """
+                    INSERT INTO payload_requests (payload_id, ip, session_id, timestamp)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (payload_id, ip, session_id, timestamp or datetime.datetime.now()),
+                )
+
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Error adding malicious payload: {e}")
+            conn.rollback()  # Ensure rollback on error
+        finally:
+            conn.close()
 
     def get_payload_by_hash(self, url_hash):
         return None
 
     def get_pending_payloads(self, limit=5):
-        return []
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(
+                "SELECT * FROM malicious_payloads WHERE status = 'pending' ORDER BY retry_count ASC, timestamp ASC LIMIT %s",
+                (limit,),
+            )
+            return [dict(r) for r in cursor.fetchall()]
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching pending payloads: {e}")
+            return []
+        finally:
+            conn.close()
 
     def update_payload_status(
         self,
         payload_id,
         status,
         file_path=None,
-        error_message=None,
+        error=None,  # Changed from error_message to match call site
         payload_md5=None,
         payload_size=None,
     ):
-        pass
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            updates = ["status = %s"]
+            params = [status]
+
+            if file_path:
+                updates.append("file_path = %s")
+                params.append(file_path)
+            if error:
+                updates.append("error_message = %s")
+                params.append(error)
+            if payload_md5:
+                updates.append("payload_md5 = %s")
+                params.append(payload_md5)
+            if payload_size is not None:
+                updates.append("payload_size = %s")
+                params.append(payload_size)
+
+            # Increment retry count if failed
+            if status == "failed":
+                updates.append("retry_count = retry_count + 1")
+
+            params.append(payload_id)
+
+            sql = f"UPDATE malicious_payloads SET {', '.join(updates)} WHERE id = %s"
+            cursor.execute(sql, tuple(params))
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Error updating payload {payload_id}: {e}")
+        finally:
+            conn.close()
 
     def is_payload_host_rate_limited(self, hostname):
         return False
 
     def get_interactions_with_http(self):
-        return []
+        # ... logic ...
+        pass
+
+    def get_interactions_since_id(self, last_id, limit=100):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(
+                """
+                SELECT i.id, i.session_id, i.command, i.timestamp, s.remote_ip 
+                FROM interactions i
+                LEFT JOIN sessions s ON i.session_id = s.session_id
+                WHERE i.id > %s AND (i.command LIKE '%%http%%' OR i.command LIKE '%%wget%%' OR i.command LIKE '%%curl%%')
+                ORDER BY i.id ASC
+                LIMIT %s
+            """,
+                (last_id, limit),
+            )
+            return cursor.fetchall() or []
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching interactions since {last_id}: {e}")
+            return []
+        finally:
+            conn.close()
 
     def clear_cache(self):
         self.sanitize_artifacts()

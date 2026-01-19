@@ -13,8 +13,8 @@ from ssh_honeypot.core.utils import (
 try:
     from ssh_honeypot.core.schemas import AppConfig
 except ImportError:
-    # Bootstrap
-    pass
+    # Bootstrap or missing dependencies
+    AppConfig = None
 
 try:
     from dotenv import load_dotenv
@@ -123,6 +123,14 @@ class ConfigManager:
         self._validate_and_refresh()
 
     def _validate_and_refresh(self):
+        if AppConfig is None:
+            # Avoid crashing if dependencies are missing (e.g. pydantic)
+            print(
+                "[!] Warning: AppConfig schema not available (missing dependencies?). Validation skipped."
+            )
+            self._config = self._raw_config
+            return
+
         try:
             self.model = AppConfig(**self._raw_config)
             # Dump back to dict to maintain existing get() behavior easily

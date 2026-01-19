@@ -660,6 +660,36 @@ class SQLiteBackend(DatabaseBackend):
         except Exception as e:
             log.error(f"Error logging to Unified EventLogger: {e}")
 
+        # Payload Pipeline Hook (Restored)
+        try:
+            from .payload_manager import PayloadManager
+
+            # Optimization: Only check if command looks suspicious
+            if command and (
+                "http" in command or "wget" in command or "curl" in command
+            ):
+                pm = PayloadManager(self)
+                urls = pm.extract_urls(command)
+
+                if urls:
+                    # Fetch IP for session
+                    conn = self._get_conn()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT remote_ip FROM sessions WHERE session_id = ?",
+                        (session_id,),
+                    )
+                    row = cursor.fetchone()
+                    conn.close()
+
+                    remote_ip = row[0] if row else "unknown"
+
+                    for url in urls:
+                        pm.queue_payload(url, session_id, remote_ip)
+
+        except Exception as e:
+            log.error(f"[DB] Error in Payload Pipeline: {e}")
+
     def get_cached_response(self, command, cwd):
         if cache:
             val = cache.get_content(command, cwd)
@@ -2261,6 +2291,28 @@ class SQLiteBackend(DatabaseBackend):
                 JOIN sessions s ON i.session_id = s.session_id
                 WHERE i.command LIKE '%http%'
             """
+            )
+            return [dict(row) for row in c.fetchall()]
+        finally:
+            conn.close()
+
+    def get_interactions_since_id(self, last_id, limit=100):
+        """Fetches interactions newer than last_id for incremental scanning."""
+        conn = self._get_conn()
+        try:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            # Only fetch fields needed for payload extraction
+            c.execute(
+                """
+                SELECT i.id, i.session_id, i.command, i.timestamp, s.remote_ip 
+                FROM interactions i
+                LEFT JOIN sessions s ON i.session_id = s.session_id
+                WHERE i.id > ? AND (i.command LIKE '%http%' OR i.command LIKE '%wget%' OR i.command LIKE '%curl%')
+                ORDER BY i.id ASC
+                LIMIT ?
+            """,
+                (last_id, limit),
             )
             return [dict(row) for row in c.fetchall()]
         finally:

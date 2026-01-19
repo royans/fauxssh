@@ -13,7 +13,7 @@ from ssh_honeypot.main import main as server_main
 import ssh_honeypot.services.ssh.server
 
 TEST_PORT = (
-    2225  # Use distinct port for this test suite to allow parallel execution if needed
+    2228  # Use distinct port for this test suite to allow parallel execution if needed
 )
 
 
@@ -43,6 +43,13 @@ class TestTimeHandler(unittest.TestCase):
             print(f"[*] Starting Test Server on {TEST_PORT}")
             os.environ["FAUXSSH_TEST_MODE"] = "1"
             os.environ["FAUXSSH_PORT"] = str(TEST_PORT)
+            # Disable other services to avoid port conflicts (MySQL 3306, Redis 6379, etc)
+            os.environ["FAUXSSH_ENABLE_TELNET"] = "false"
+            os.environ["FAUXSSH_ENABLE_REDIS"] = "false"
+            os.environ["FAUXSSH_ENABLE_MYSQL"] = "false"
+            os.environ["FAUXSSH_ENABLE_MCP"] = "false"
+            os.environ["FAUXSSH_ENABLE_HTTP"] = "false"
+
             cls.server_thread = threading.Thread(target=server_main, args=([],))
             cls.server_thread.daemon = True
             cls.server_thread.start()

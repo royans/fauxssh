@@ -807,6 +807,9 @@ def list_payloads(limit=50, anon=False, db_path=None, show_all=False):
     else:
         c = conn.cursor()
 
+    # Dialect-specific aggregation
+    agg_func = "STRING_AGG" if ph == "%s" else "group_concat"
+
     query = f"""
         SELECT 
             p.id,
@@ -816,7 +819,8 @@ def list_payloads(limit=50, anon=False, db_path=None, show_all=False):
             p.payload_md5,
             p.payload_size,
             p.file_path,
-            p.ip,
+            p.ip as first_ip,
+            (SELECT {agg_func}(DISTINCT ip, ', ') FROM payload_requests pr WHERE pr.payload_id = p.id) as all_ips,
             p.session_id,
             p.session_id,
             p.error_message,
@@ -839,11 +843,31 @@ def list_payloads(limit=50, anon=False, db_path=None, show_all=False):
     table.add_column("Score", style="bold")
     table.add_column("Details", style="dim", overflow="fold")
     table.add_column("Size", justify="right")
-    table.add_column("IP", style="magenta")
+    table.add_column("IPs", style="magenta")
 
     for r in rows:
         ts = to_local_time(r["timestamp"])
-        ip = clean_ip(r["ip"], anon=anon)
+
+        # Combine first IP (legacy/backup) with new list if new table empty?
+        # Ideally all_ips covers it. But for safety:
+        ips_str = r["all_ips"]
+        if not ips_str:
+            ips_str = r["first_ip"]  # Fallback for old records
+
+        # Clean IPs
+        ip_list = (
+            [clean_ip(ip.strip(), anon=anon) for ip in ips_str.split(",")]
+            if ips_str
+            else []
+        )
+        # Unique valid IPs
+        ip_list = sorted(list(set([ip for ip in ip_list if ip and ip != "-"])))
+
+        # Format for display (truncate if too many)
+        if len(ip_list) > 3:
+            display_ip = f"{', '.join(ip_list[:2])} (+{len(ip_list)-2})"
+        else:
+            display_ip = ", ".join(ip_list)
 
         status = r["status"]
         status_style = "white"
@@ -936,7 +960,7 @@ def list_payloads(limit=50, anon=False, db_path=None, show_all=False):
             vt_score_str,
             details,
             size_str,
-            ip,
+            display_ip,
         )
 
     console.print(table)

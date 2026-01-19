@@ -101,28 +101,39 @@ Generate and run a custom persona instantly. For full details, see the [Persona 
 FauxSSH includes powerful CLI tools to visualize captured data. See [Logging & Analytics](docs/LOGGING.md) for details.
 
 ### Recent Sessions
-`python3 tools/analytics/analyze.py --sessions --anon --sort Risk:Desc`
+`./tools/analyze.sh --sessions --anon --sort Risk:Desc`
 ![Recent Sessions](docs/images/report_sessions.png)
 
 ### Command History
-`python3 tools/analytics/analyze.py --commands --limit 100 --sort Risk:Desc,Unique:Desc`
+`./tools/analyze.sh --commands --limit 100 --sort Risk:Desc,Unique:Desc`
 ![Command History](docs/images/report_commands.png)
 
 ### Advanced Filtering
 Filter by IP (supports IPv4 and mapped IPv6), Session ID, or Protocol:
-`python3 tools/analytics/analyze.py --ip 111.222.333.444`
-`python3 tools/analytics/analyze.py --commands --session-id 49b8ac`
-`python3 tools/analytics/analyze.py --sessions --protocol mcp`
+`./tools/analyze.sh --ip 111.222.333.444`
+`./tools/analyze.sh --commands --session-id 49b8ac`
+`./tools/analyze.sh --sessions --protocol mcp`
 
 ### Payload Analysis
 Track downloaded malware artifacts (automatic background collection):
-`python3 tools/analytics/analyze.py --payloads`
+`./tools/analyze.sh --payloads`
 
 ### Filesystem Forensics
 Inspect and manage attacker uploads in real-time.
 `python3 tools/analytics/fs_inspector.py --tree`
 `python3 tools/analytics/fs_inspector.py --ip <IP> --cat /path/to/malware.sh`
 `python3 tools/analytics/fs_inspector.py --ip <IP> --delete`
+
+## CLI Tools Reference
+
+In addition to the analytics, FauxSSH includes several utility scripts in `tools/`:
+
+- **`tools/analyze.sh`**: The main entry point for analytics (handles virtualenv automatically).
+- **`tools/export_logs.py`**: Export database logs to JSON/CSV for external analysis.
+- **`tools/import_logs.py`**: Import legacy logs or merge databases.
+- **`tools/check_config.py`**: Validate your configuration and persona settings without starting the server.
+- **`tools/validate_persona.py`**: Strict validation for custom persona definitions.
+- **`tools/setup_service.sh`**: Helper to generate a `systemd` service file for production.
 
 
 ## Documentation

@@ -56,8 +56,12 @@ class TestComplexScenarios(unittest.TestCase):
         # Seed FS for tests that rely on static files (like test_cd_logic)
         ssh_honeypot.core.fs_seeder.seed_filesystem(db)
 
-        # Disable Telnet to prevent port conflicts
-        os.environ["SSHPOT_ENABLE_TELNET"] = "false"
+        # Disable secondary services to prevent port conflicts
+        os.environ["FAUXSSH_ENABLE_TELNET"] = "false"
+        os.environ["FAUXSSH_ENABLE_REDIS"] = "false"
+        os.environ["FAUXSSH_ENABLE_MYSQL"] = "false"
+        os.environ["FAUXSSH_ENABLE_MCP"] = "false"
+        os.environ["FAUXSSH_ENABLE_HTTP"] = "false"
 
         if not is_server_running(TEST_PORT):
             print(f"[*] Starting Test Server on {TEST_PORT}")

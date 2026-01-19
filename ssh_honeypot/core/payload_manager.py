@@ -5,6 +5,8 @@ import time
 import requests
 import logging
 import json
+import ipaddress
+import socket
 from urllib.parse import urlparse
 from datetime import datetime, timedelta
 
@@ -96,8 +98,10 @@ class PayloadManager:
 
             existing = self.db.get_payload_by_hash(url_hash)
             if existing:
-                # Already tracked
-                return
+                # Already tracked in main table, but we want to log the request
+                # So we continue to add_malicious_payload which handles deduplication
+                # while adding to payload_requests table.
+                pass
 
             # 2. Host Rate Limiting (1 per day)
             parsed = urlparse(url)
@@ -318,8 +322,67 @@ class PayloadManager:
                 payload_id, result=json.dumps({"error": str(e)})
             )
 
+    def _is_safe_url(self, url):
+        """
+        Validates URL to prevent SSRF and internal scanning.
+        Blocks:
+        - Basic Auth Credentials (user:pass@...)
+        - Private IPs (RFC1918)
+        - Loopback / Link-Local IPs
+        - Non-HTTP schemes
+        """
+        try:
+            parsed = urlparse(url)
+
+            # 1. Scheme Check
+            if parsed.scheme not in ("http", "https"):
+                return False, "Invalid scheme"
+
+            # 2. Basic Auth Check
+            if parsed.username or parsed.password:
+                return False, "Basic Auth detected"
+
+            hostname = parsed.hostname
+            if not hostname:
+                return False, "No hostname"
+
+            # 3. DNS Resolution & IP Check
+            try:
+                # Use getaddrinfo to handle IPv4/IPv6
+                # This returns a list of (family, socktype, proto, canonname, sockaddr)
+                addr_info = socket.getaddrinfo(hostname, None)
+                found_ips = [info[4][0] for info in addr_info]
+            except socket.gaierror:
+                return False, "DNS resolution failed"
+
+            for ip_str in found_ips:
+                try:
+                    ip = ipaddress.ip_address(ip_str)
+                    if ip.is_loopback:
+                        return False, f"Loopback IP detected: {ip_str}"
+                    if ip.is_link_local:
+                        return False, f"Link-Local IP detected: {ip_str}"
+                    if ip.is_private:
+                        return False, f"Private IP detected: {ip_str}"
+                    # Reserved/Multicast could also be blocked, but private covers most risks
+                    if ip.is_reserved:  # Covers some other ranges
+                        return False, f"Reserved IP detected: {ip_str}"
+                except ValueError:
+                    continue  # Should not happen with getaddrinfo results
+
+            return True, "Safe"
+
+        except Exception as e:
+            return False, f"Validation error: {e}"
+
     def _download_file(self, url, timeout=10, max_size=10 * 1024 * 1024):
         """Helper to download with safety limits."""
+        # Pre-flight SSRF Check
+        is_safe, reason = self._is_safe_url(url)
+        if not is_safe:
+            logger.warning(f"[PayloadManager] SSRF Blocked: {url} -> {reason}")
+            raise ValueError(f"SSRF Protection Blocked: {reason}")
+
         try:
             headers = {"User-Agent": "curl/7.68.0"}  # Pretend to be legitimate tool
             with requests.get(
