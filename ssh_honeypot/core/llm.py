@@ -17,8 +17,10 @@ except ImportError:
 
 class LLMInterface:
     def __init__(self, api_key=None):
-        # Fetch API KEY lazily to ensure environment is loaded
-        raw_key = api_key or os.getenv("GOOGLE_API_KEY") or ""
+        # Fetch API KEY lazily, prioritizing config which handles .env loading
+        raw_key = (
+            api_key or config.get("llm", "api_key") or os.getenv("GOOGLE_API_KEY") or ""
+        )
         self.api_key = raw_key.strip()
         log.debug(
             f"LLMInterface Init - api_key arg: {bool(api_key)}, self.api_key set: {bool(self.api_key)} (Len: {len(self.api_key)})"

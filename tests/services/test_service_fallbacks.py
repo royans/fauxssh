@@ -49,8 +49,14 @@ class TestServiceFallbacks(unittest.TestCase):
         self.assertIn("<center><h1>404 Not Found</h1></center>", content)
 
     # --- SSH/LLM Fallback Test ---
-    def test_llm_fallback_messages(self):
-        # Initialize LLM without API Key
+    @patch("ssh_honeypot.core.llm.config")
+    def test_llm_fallback_messages(self, mock_config):
+        # Ensure config returns empty for api_key
+        mock_config.get.side_effect = lambda section, key, *args: (
+            "" if section == "llm" and key == "api_key" else None
+        )
+
+        # Initialize LLM without API Key (and mocked config)
         llm = LLMInterface(api_key="")
 
         # 1. Generic Command

@@ -71,11 +71,11 @@ class PersonaGenerator:
             self._configure_persona_yaml(new_persona_path, metadata, description)
 
             # 5. Generate Files
-            if metadata.get("suggested_files"):
-                log.info(
-                    f"Generating filesystem artifacts ({len(metadata['suggested_files'])})..."
-                )
-                self._generate_artifacts(new_persona_path, metadata["suggested_files"])
+            # Support both old 'suggested_files' and new 'files' keys
+            files_to_gen = metadata.get("files") or metadata.get("suggested_files")
+            if files_to_gen:
+                log.info(f"Generating filesystem artifacts ({len(files_to_gen)})...")
+                self._generate_artifacts(new_persona_path, files_to_gen)
 
             # 6. Validate
             self._validate_generated_persona(new_persona_path)
@@ -109,7 +109,7 @@ class PersonaGenerator:
            - distro_version: (e.g. "2023.4", "7")
            - distro_pretty_name: (e.g. "Kali GNU/Linux Rolling")
            - kernel_release: (e.g. "6.5.0-kali3-amd64")
-           - processor_version: (Specific CPU model if mentioned, else realistic default)
+           - processor_version: (Specific CPU model if mentioned, otherwise realistic default)
            
         2. hardware: An object containing (for context injection):
            - cpu_info: (e.g. "2 vCPU", "AMD EPYC")
@@ -132,7 +132,8 @@ class PersonaGenerator:
            - open_ports: A list of integer ports exposed by this server (e.g. [22, 80, 443]). Ensure these match the services described.
            
         5. http: An object containing web server details (if applicable, else defaults):
-           - server_header: (e.g. "Apache/2.4.6 (CentOS)")
+           - server_header: (e.g. "Apache/2.4.6 (CentOS)", "nginx/1.18.0")
+           - web_root: (e.g. "/var/www/html", "/usr/share/nginx/html", "/opt/tomcat/webapps"). Choose based on the server software (Apache vs Nginx vs Tomcat).
            - headers: A dictionary of default HTTP headers (e.g. {{"X-Powered-By": "PHP/5.6", "Server": "Apache/2.4.6"}})
            
         6. access_control: An object containing:
@@ -141,7 +142,12 @@ class PersonaGenerator:
 
         7. prompt_context: A 2-3 sentence summary of the server's role and identity.
         
-        8. suggested_files: A list of objects {{ "path": "/path...", "type": "file", "description": "..." }} for 3-5 critical files.
+        8. files: A list of objects representing CRITICAL and PERSONALIZED files found on this specific system.
+           Format: {{ "path": "/absolute/path/to/file", "type": "file", "description": "Detailed description of content." }}
+           MANDATORY FILES TO GENERATE:
+             - An 'index.html' (or index.php) placed in the 'web_root' you selected above. It should reflect the company/role described.
+             - At least 3-5 other files specific to the persona (e.g. CSVs in /home/user, logs in /var/log, config files in /etc).
+             - Do NOT generate generic linux files like /bin/ls. Focus on user data and app configs.
         """
 
         # We misuse generate_response slightly as it expects cmd/cwd.
@@ -156,8 +162,8 @@ class PersonaGenerator:
             end = resp.rfind("}")
             if start != -1 and end != -1:
                 return json.loads(resp[start : end + 1])
-        except:
-            log.warning("Failed to parse JSON from LLM analysis. Using defaults.")
+        except Exception as e:
+            log.warning(f"Failed to parse JSON from LLM analysis: {e}")
 
         return {}
 
@@ -216,6 +222,10 @@ class PersonaGenerator:
             for k, v in metadata["http"].items():
                 if v:
                     config["http"][k] = v
+
+            # Explicitly set web_root if provided by LLM
+            if "web_root" in metadata["http"]:
+                config["http"]["web_root"] = metadata["http"]["web_root"]
 
         # 5. Update Access Control
         if metadata.get("access_control"):
