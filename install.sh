@@ -1,6 +1,6 @@
 #!/bin/bash
 # FauxSSH Professional Installer
-# Usage: ./install.sh [INSTALL_DIR]
+# Usage: ./install.sh [INSTALL_DIR] [-y|--non-interactive]
 
 set -e
 
@@ -23,9 +23,29 @@ ${NC}
 
 echo -e "$BANNER"
 
-# Vars
+# Vars & Args Parsing
 REPO_URL="https://github.com/royans/fauxssh.git"
 DEFAULT_DIR="$HOME/fauxssh"
+
+NON_INTERACTIVE=false
+ARGS=()
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -y|--yes|--non-interactive)
+            NON_INTERACTIVE=true
+            shift
+            ;;
+        *)
+            ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Restore positional arguments (INSTALL_DIR)
+set -- "${ARGS[@]}"
 INSTALL_DIR="${1:-$DEFAULT_DIR}"
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -236,18 +256,22 @@ fi
 
 # 3. Prompt User (Only if no Key found anywhere)
 if [ "$SKIP_PROMPT" = false ]; then
-    echo "  FauxSSH uses Google Gemini for dynamic persona generation and chat."
-    echo "  (Get a key for free at https://aistudio.google.com/)"
-    echo ""
-    # Ensure tty for prompt
-    if [ -t 0 ]; then
-        read -p "  Enter your Gemini API Key (or press Enter to skip): " USER_KEY
+    if [ "$NON_INTERACTIVE" = true ]; then
+        echo "  [Non-interactive] No Gemini Key found in environment or .env. Skipping configuration."
     else
-        echo "  [Non-interactive] No Gemini Key provided. Skipping."
-    fi
-    
-    if [ -n "$USER_KEY" ]; then
-        NEED_VALIDATION=true
+        echo "  FauxSSH uses Google Gemini for dynamic persona generation and chat."
+        echo "  (Get a key for free at https://aistudio.google.com/)"
+        echo ""
+        # Ensure tty for prompt
+        if [ -t 0 ]; then
+            read -p "  Enter your Gemini API Key (or press Enter to skip): " USER_KEY
+        else
+            echo "  [Non-interactive shell] Skipping Gemini Prompt."
+        fi
+        
+        if [ -n "$USER_KEY" ]; then
+            NEED_VALIDATION=true
+        fi
     fi
 fi
 
@@ -288,16 +312,25 @@ EOF
          
          # Ask for Persona Generation
          SHOULD_GENERATE=false
-         echo ""
-         if [ -t 0 ]; then
-            read -p "  Do you want to generate a custom persona now? [y/N] " GEN_CHOICE
-            if [[ "$GEN_CHOICE" =~ ^[Yy]$ ]]; then SHOULD_GENERATE=true; fi
-         else
-             log_info "Non-interactive mode detected. Skipping persona generation."
+         PERSONA_DESC=""
+         
+         # Logic: If FAUX_PERSONA env var is set, use it. Else if Interactive, prompt.
+         if [ -n "$FAUX_PERSONA" ]; then
+             SHOULD_GENERATE=true
+             PERSONA_DESC="$FAUX_PERSONA"
+             log_info "Found FAUX_PERSONA environment variable. Auto-generating persona..."
+         elif [ "$NON_INTERACTIVE" = true ]; then
+             log_info "Non-interactive mode: Skipping persona generation prompt."
+         elif [ -t 0 ]; then
+             echo ""
+             read -p "  Do you want to generate a custom persona now? [y/N] " GEN_CHOICE
+             if [[ "$GEN_CHOICE" =~ ^[Yy]$ ]]; then
+                 SHOULD_GENERATE=true
+                 read -p "  Describe the persona (e.g. 'Production DB Server for a bank'): " PERSONA_DESC
+             fi
          fi
          
          if [ "$SHOULD_GENERATE" = true ]; then
-             read -p "  Describe the persona (e.g. 'Production DB Server for a bank'): " PERSONA_DESC
              if [ -z "$PERSONA_DESC" ]; then PERSONA_DESC="Standard enterprise linux server"; fi
              
              log_info "Generating persona via LLM (this may take 10-20s)..."
