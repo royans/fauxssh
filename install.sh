@@ -184,35 +184,21 @@ fi
 # 4. Dependencies
 log_info "Installing Python dependencies (this may take a moment)..."
 
-PIP_CMD="./venv/bin/pip"
-PIP_VALID=false
-
-# Check if pip exists and runs
-if [ -x "$PIP_CMD" ] && "$PIP_CMD" --version >/dev/null 2>&1; then
-    PIP_VALID=true
-elif [ -x "./venv/bin/pip3" ] && ./venv/bin/pip3 --version >/dev/null 2>&1; then
-    PIP_CMD="./venv/bin/pip3"
-    PIP_VALID=true
+# Use python -m pip for maximum compatibility (avoids pip vs pip3 issues)
+VENV_PYTHON="./venv/bin/python"
+if [ ! -x "$VENV_PYTHON" ] && [ -x "./venv/bin/python3" ]; then
+    VENV_PYTHON="./venv/bin/python3"
 fi
 
-if [ "$PIP_VALID" = false ]; then
-    # Try generic 'pip' if detection failed
-    if [ -x "./venv/bin/pip" ]; then
-        PIP_CMD="./venv/bin/pip"
-        PIP_VALID=true
-    else
-        log_err "pip is broken or missing in ./venv/bin/. The virtual environment is corrupted."
-        log_info "Removing broken virtual environment..."
-        rm -rf venv
-        log_info "Please run this installer again to re-create it correctly."
-        exit 1
-    fi
+if [ ! -x "$VENV_PYTHON" ]; then
+     log_err "Virtual Environment python interpreter not found."
+     exit 1
 fi
 
-# Upgrade pip first
-"$PIP_CMD" install --upgrade pip >/dev/null 2>&1 || true
+# Upgrade pip
+"$VENV_PYTHON" -m pip install --upgrade pip --quiet >/dev/null 2>&1 || true
 
-if ! "$PIP_CMD" install -r requirements.txt --quiet; then
+if ! "$VENV_PYTHON" -m pip install -r requirements.txt --quiet; then
     log_err "Failed to install dependencies."
     exit 1
 fi

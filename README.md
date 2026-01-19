@@ -49,6 +49,16 @@ Fastest way to get started. Handles dependencies, virtualenv, and configuration.
 env bash -c "$(curl -sL https://raw.githubusercontent.com/royans/fauxssh/main/install.sh)"
 ```
 
+### 1.5 Three-Line Quick Installation (Customized)
+Create a custom persona with help from LLM
+
+```bash
+GOOGLE_API_KEY="your_key_here"; export GOOGLE_API_KEY
+FAUX_PERSONA="Ubuntu 12.5 server with 12 CPU Cores, 24 GB RAM, 500 GB SSD" ; export FAUX_PERSONA 
+env bash -c "$(curl -sL https://raw.githubusercontent.com/royans/fauxssh/main/install.sh)"
+```
+
+
 ### 2. Manual Installation
 For developers who prefer full control.
 

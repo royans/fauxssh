@@ -129,10 +129,19 @@ class PersonaGenerator:
            - default_gateway: (The router IP, e.g. "10.14.1.1")
            - dns_servers: (List of DNS IPs, e.g. ["8.8.8.8", "10.14.1.1"])
            - interfaces: A dictionary of "interface": "ip" mappings (e.g. {{"eth0": "10.14.1.50"}}). logic: If user specifies a network CIDR (10.14.1.X/24), pick a random realistic IP in that range.
+           - open_ports: A list of integer ports exposed by this server (e.g. [22, 80, 443]). Ensure these match the services described.
            
-        5. prompt_context: A 2-3 sentence summary of the server's role and identity.
+        5. http: An object containing web server details (if applicable, else defaults):
+           - server_header: (e.g. "Apache/2.4.6 (CentOS)")
+           - headers: A dictionary of default HTTP headers (e.g. {{"X-Powered-By": "PHP/5.6", "Server": "Apache/2.4.6"}})
+           
+        6. access_control: An object containing:
+           - allow_root: (Boolean, true/false)
+           - max_auth_tries_per_ip: (Integer, e.g. 3)
+
+        7. prompt_context: A 2-3 sentence summary of the server's role and identity.
         
-        6. suggested_files: A list of objects {{ "path": "/path...", "type": "file", "description": "..." }} for 3-5 critical files.
+        8. suggested_files: A list of objects {{ "path": "/path...", "type": "file", "description": "..." }} for 3-5 critical files.
         """
 
         # We misuse generate_response slightly as it expects cmd/cwd.
@@ -174,6 +183,10 @@ class PersonaGenerator:
             if "network" not in config:
                 config["network"] = {}
 
+            # Handle open_ports list specifically
+            if "open_ports" in metadata["network"]:
+                config["network"]["open_ports"] = metadata["network"]["open_ports"]
+
             # Handle nested interfaces carefully
             if "interfaces" in metadata["network"]:
                 config["network"]["interfaces"] = metadata["network"]["interfaces"]
@@ -189,17 +202,31 @@ class PersonaGenerator:
                     val = val.replace("\n", "").replace("\r", "")
 
                     config["network"][k] = val
-                    config["network"][k] = val
-                elif k == "interfaces":
-                    # Handled above explicitly if needed, but the loop logic might skip or double process.
-                    # The original code had specific 'interfaces' handling check at line 164.
-                    # We should ensure we don't overwrite it if handled there, OR just handle everything here.
+                elif k in ["interfaces", "open_ports"]:
+                    # Handled above explicitly
                     pass
                 elif v:
                     # Generic copy for new fields (network_type, subnet_cidr, default_gateway, dns_servers)
                     config["network"][k] = v
 
-        # 4. Update System Prompt (Inject Context & Hardware Identity)
+        # 4. Update HTTP Settings
+        if metadata.get("http"):
+            if "http" not in config:
+                config["http"] = {}
+            for k, v in metadata["http"].items():
+                if v:
+                    config["http"][k] = v
+
+        # 5. Update Access Control
+        if metadata.get("access_control"):
+            if "access_control" not in config:
+                config["access_control"] = {}
+            for k, v in metadata["access_control"].items():
+                # Allow boolean False to be set (so check is not None)
+                if v is not None:
+                    config["access_control"][k] = v
+
+        # 6. Update System Prompt (Inject Context & Hardware Identity)
         current_prompt = config["prompts"]["system_prompt"]
 
         sys_meta = metadata.get("system", {})

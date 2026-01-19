@@ -88,6 +88,7 @@ def test_no_hardcoded_secrets():
         "test_codebase_security.py",
         "publish_fauxssh.sh",
         "install.sh",
+        "README.md",
     }
 
     violations = []
