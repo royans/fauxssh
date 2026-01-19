@@ -65,6 +65,30 @@ def analyze_session(session_id, db=None, llm=None):
 
         # Update Session
         db.update_session_summary(session_id, summary, risk_score)
+
+        # Trigger Alert Check
+        try:
+            from .alert_manager import AlertManager
+
+            # Fetch IP (We need to re-fetch or pass it in. Pass it in is better but requires sig change.
+            # db.get_session_info(session_id)?
+            # Let's just fetch it from DB for reliability
+            session_info = db.get_session(session_id)
+            if session_info:
+                remote_ip = session_info.get("remote_ip", "unknown")
+                protocol = session_info.get("protocol", "ssh")
+
+                mgr = AlertManager()
+                mgr.check_risk_score(
+                    session_id,
+                    remote_ip,
+                    risk_score,
+                    explanation=f"Session Summary: {summary}",
+                    protocol=protocol,
+                )
+        except Exception as e:
+            log.error(f"[SessionAnalyzer] Alert Trigger Error: {e}")
+
         return "Analyzed (LLM)"
 
     return "Failed (LLM Error)"

@@ -214,6 +214,8 @@ Flags:                           fpu vme de pse tsc msr pae mce cx8 apic sep mtr
     def handle_dmidecode(self, cmd, context):
         # Usually requires root (except for help/version or some flags? no usually root)
         if context.get("user") != "root":
+            if "2>/dev/null" in cmd:
+                return "", {}
             return "Permission denied\n", {}
 
         if "-s processor-version" in cmd or "--string processor-version" in cmd:
@@ -283,6 +285,8 @@ System Boot Information
             else:
                 # Attempt to set hostname -> Permission denied (unless root)
                 if context.get("user") != "root":
+                    if "2>/dev/null" in cmd:
+                        return "", {}
                     return f"hostname: you must be root to change the host name\n", {}
                 else:
                     # Fake set success (no persistence)

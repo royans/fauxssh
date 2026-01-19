@@ -28,22 +28,14 @@ class AlertManager:
 
         # Load Config
         webhook_url = config.get("alerting", "webhook_url")
+        self.notifier = WebhookNotifier(webhook_url)
 
         self.notify_threshold = int(config.get("alerting", "notify_threshold") or 6)
         self.session_threshold = int(config.get("alerting", "session_threshold") or 7)
         self.ip_threshold = int(config.get("alerting", "ip_threshold") or 9)
         self.keywords = config.get("alerting", "keywords") or []
 
-        self.notifier = WebhookNotifier(webhook_url)
-
-        # State
-        self.monitored_ips = set()
-        self.monitored_sessions = set()
-
-        # Rate Limiting (Discord)
-        self.msg_history_1h = []  # List of timestamps
-        self.limit_min = 20
-        self.limit_hour = 50
+        self.service_thresholds = config.get("alerting", "service_thresholds") or {}
 
         if webhook_url:
             log.info(
@@ -51,6 +43,15 @@ class AlertManager:
             )
         else:
             log.info("[AlertManager] Initialized (Disabled: No URL).")
+
+        # Runtime State
+        self.monitored_sessions = set()
+        self.monitored_ips = set()
+        self.msg_history_1h = []  # Timestamps of sent messages
+
+        # Hardcoded Rate Limits (Safety)
+        self.limit_hour = 20
+        self.limit_min = 5
 
     def _check_rate_limit(self):
         """Returns True if message can be sent, False otherwise."""
@@ -93,19 +94,33 @@ class AlertManager:
         # We might need to extend WebhookNotifier or abuse send_alert.
         # Let's inspect WebhookNotifier. Assuming send_alert(session_id, ip, explanation, risk)
         # We can pass "SYSTEM" as session_id.
-        self.notifier.send_alert("SYSTEM", ip, f"DoS Ban: {reason} ({duration}s)", 10)
+        self.notifier.send_alert("SYSTEM", ip, f"DoS Ban: {reason} ({duration}s)", 99)
 
     def reload_config(self):
         """Reloads config from manager (useful if .env changes dynamically, though unlikely)"""
         self.__init__()
 
-    def check_risk_score(self, session_id, ip, score, explanation="High Risk Activity"):
+    def check_risk_score(
+        self, session_id, ip, score, explanation="High Risk Activity", protocol="ssh"
+    ):
         """Evaluates if a risk score should trigger an alert/monitoring based on Tiers."""
         if not self.notifier.webhook_url:
             return
 
+        # Determine Thresholds
+        notify_limit = self.notify_threshold
+        session_limit = self.session_threshold
+        ip_limit = self.ip_threshold
+
+        # Override if protocol specific config exists
+        if protocol and protocol in self.service_thresholds:
+            t = self.service_thresholds[protocol]
+            notify_limit = t.get("notify_threshold", notify_limit)
+            session_limit = t.get("session_threshold", session_limit)
+            ip_limit = t.get("ip_threshold", ip_limit)
+
         # Tier 1: Notify
-        if score >= self.notify_threshold:
+        if score >= notify_limit:
             if self._check_rate_limit():
                 self.notifier.send_alert(session_id, ip, explanation, score)
                 self._record_sent()
@@ -115,18 +130,18 @@ class AlertManager:
                 )
 
         # Tier 2: Monitor Session
-        if score >= self.session_threshold:
+        if score >= session_limit:
             if session_id not in self.monitored_sessions:
                 log.info(
-                    f"[AlertManager] Enabling Stream for Session {session_id} (Risk: {score} >= {self.session_threshold})"
+                    f"[AlertManager] Enabling Stream for Session {session_id} (Risk: {score} >= {session_limit})"
                 )
                 self.monitored_sessions.add(session_id)
 
         # Tier 3: Monitor IP
-        if score >= self.ip_threshold:
+        if score >= ip_limit:
             if ip not in self.monitored_ips:
                 log.info(
-                    f"[AlertManager] Flagging IP {ip} for future monitoring (Risk: {score} >= {self.ip_threshold})"
+                    f"[AlertManager] Flagging IP {ip} for future monitoring (Risk: {score} >= {ip_limit})"
                 )
                 self.monitored_ips.add(ip)
 

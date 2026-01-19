@@ -272,39 +272,19 @@ def seed_filesystem(db, json_path=None):
     nodes = get_skeleton_data(json_path)
     count = 0
 
-    # Use direct connection for bulk operation
-    conn = db._get_conn()
-    try:
-        for node in nodes:
-            # Replicate update_fs_node logic but with shared connection
-            path = node["path"]
-            parent_path = node.get("parent_path")
-            type_Str = node["type"]
-            metadata = node["metadata"]
-            content = node.get("content")
-
-            # Ensure content is string
-            if isinstance(content, (dict, list)):
-                content = str(content)
-
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO global_filesystem (path, parent_path, type, metadata, content)
-                VALUES (?, ?, ?, ?, ?)
-            """,
-                (
-                    path,
-                    parent_path,
-                    type_Str,
-                    json.dumps(metadata) if isinstance(metadata, dict) else metadata,
-                    content,
-                ),
+    # We use db.update_fs_node to ensure cross-backend compatibility
+    # and handle schema-specific logic (e.g. INSERT OR REPLACE vs ON CONFLICT)
+    for node in nodes:
+        try:
+            db.update_fs_node(
+                path=node["path"],
+                parent_path=node.get("parent_path"),
+                type=node["type"],
+                metadata=node["metadata"],
+                content=node.get("content"),
             )
             count += 1
-        conn.commit()
-    except Exception as e:
-        logging.error(f"FS Seeder: Failed in bulk seed: {e}")
-    finally:
-        conn.close()
+        except Exception as e:
+            logging.error(f"FS Seeder: Failed to seed {node['path']}: {e}")
 
     logging.info(f"FS Seeder: Seeded {count} items into global_filesystem.")

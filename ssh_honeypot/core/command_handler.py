@@ -27,6 +27,8 @@ from ssh_honeypot.handlers.unix.cmd_tail import TailCommand
 from ssh_honeypot.handlers.unix.cmd_grep import GrepCommand
 from ssh_honeypot.handlers.unix.cmd_wc import WcCommand
 from ssh_honeypot.handlers.unix.cmd_cut import CutCommand
+from ssh_honeypot.handlers.unix.cmd_sed import SedCommand
+from ssh_honeypot.handlers.unix.cmd_awk import AwkCommand
 
 log = logging.getLogger("sshpot")
 try:
@@ -103,6 +105,8 @@ class CommandHandler:
         self.last_handler = LastCommand(db, llm_interface)
         self.rmdir_handler = RmdirCommand(db, llm_interface)
         self.nohup_handler = NohupCommand(db, llm_interface)
+        self.sed_handler = SedCommand(db, llm_interface)
+        self.awk_handler = AwkCommand(db, llm_interface)
 
         # Expanded whitelist maps commands to handler functions or generic
         self.STATE_COMMANDS = {
@@ -562,6 +566,42 @@ Sector size (logical/physical): 512 bytes / 512 bytes
     def handle_chattr(self, cmd, context):
         return self.chattr_handler.handle(cmd, context)
 
+    def _smart_split(self, cmd, separator):
+        parts = []
+        current_part = []
+        in_sq = False
+        in_dq = False
+        paren_level = 0
+        sep_len = len(separator)
+        i = 0
+        while i < len(cmd):
+            char = cmd[i]
+
+            # Check separator match if not in quote/paren
+            if not in_sq and not in_dq and paren_level == 0:
+                if cmd[i : i + sep_len] == separator:
+                    parts.append("".join(current_part).strip())
+                    current_part = []
+                    i += sep_len
+                    continue
+
+            if char == "'" and not in_dq:
+                in_sq = not in_sq
+            elif char == '"' and not in_sq:
+                in_dq = not in_dq
+            elif char == "(" and not in_sq and not in_dq:
+                paren_level += 1
+            elif char == ")" and not in_sq and not in_dq:
+                paren_level -= 1
+
+            current_part.append(char)
+            i += 1
+
+        if current_part:
+            parts.append("".join(current_part).strip())
+
+        return [p for p in parts if p]
+
     def process_command(self, cmd, context):
         """
         Input: cmd (str), context (dict)
@@ -584,10 +624,16 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if "env" not in context:
             context["env"] = {}
 
+        log.debug(f"[CMD_TRACE] Processing cmd: '{cmd}'")
+
         # 0. Sanitization (Redirection stripping)
-        # Strip non-printable characters and non-ASCII (fix for Telnet IAC residues)
-        # Keep only basic ASCII printable characters (32-126)
-        cmd = "".join(ch for ch in cmd if 32 <= ord(ch) <= 126)
+        # Strip non-printable characters but KEEP format control (LF, CR, Tab)
+        # Keep only basic ASCII printable characters (32-126) + \n (10), \r (13), \t (9)
+        cmd = "".join(
+            ch for ch in cmd if (32 <= ord(ch) <= 126) or ord(ch) in {10, 13, 9}
+        )
+
+        log.debug(f"[CMD_TRACE] Sanitized cmd: '{cmd}'")
 
         # Strip 2>/dev/null, 2>&1, 1>/dev/null, >/dev/null
         # Note: We replace with space to preserve separation
@@ -595,7 +641,34 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         cmd = re.sub(r"1>/dev/null", " ", cmd)
         cmd = re.sub(r">/dev/null", " ", cmd)
         cmd = re.sub(r"2>&1", " ", cmd)
-        cmd = re.sub(r"\s+", " ", cmd).strip()
+        cmd = cmd.strip()
+
+        # 0. Subshell Handling: Strip outer parenthesis e.g. (grep ...)
+        # We recursively strip if the parentheses wrap the WHOLE command.
+        # e.g. "(A)" -> "A", but "(A); (B)" -> No change (let chain handler deal with it)
+        while cmd.startswith("(") and cmd.endswith(")"):
+            depth = 0
+            is_wrapped = True
+            for i, char in enumerate(cmd):
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+
+                # If depth hits 0 before the very last character, it's not a single wrapped block
+                # e.g. (cmd1) | (cmd2)
+                if depth == 0 and i < len(cmd) - 1:
+                    is_wrapped = False
+                    break
+
+            if is_wrapped and depth == 0:
+                log.debug(f"[CMD_TRACE] Stripping outer subshell parenthesis: {cmd}")
+                cmd = cmd[1:-1].strip()
+            else:
+                # Balanced but not wrapping the whole thing e.g. (A); (B)
+                break
+
+        log.debug(f"[CMD_TRACE] Post-Subshell cmd: '{cmd}'")
 
         # 0.1 Busybox Dispatch
         # Global: Strip 'busybox' prefix to support "busybox <cmd>" or "/bin/busybox <cmd>"
@@ -730,6 +803,9 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             r"^([a-zA-Z_][a-zA-Z0-9_]*)\=\$\((.*)\)\s*$", cmd.strip(), re.DOTALL
         )
         if match_cmd_sub:
+            log.debug(
+                f"[CMD_TRACE] Assignment $(...) detected: VAR='{match_cmd_sub.group(1)}'"
+            )
             var_name = match_cmd_sub.group(1)
             inner_cmd = match_cmd_sub.group(2)
 
@@ -742,6 +818,10 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             # Update env
             new_env = context["env"].copy()
             new_env[var_name] = val
+
+            log.debug(
+                f"[CMD_TRACE] Assigned {var_name} = '{val[:50]}...' (Len: {len(val)})"
+            )
 
             # Return empty output, update env in context updates
             # Note: This returns control immediately, does not continue to other checks
@@ -765,7 +845,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             or (cmd.count(";") > 30)
             or (cmd.count("|") > 30)
             or (cmd.count("&&") > 30)
-            or ("||" in cmd)
+            # || is now supported locally
         )
         if is_complex and base_cmd != "echo":
             sig = hashlib.md5(cmd.encode()).hexdigest()
@@ -775,14 +855,19 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             return self.handle_generic(cmd, context)
 
         # 0. Command Chaining Support (;)
+        # Use smart split to respect quotes and parens (e.g. sed 's/;//')
         if ";" in cmd:
-            parts = [p.strip() for p in cmd.split(";") if p.strip()]
+            parts = self._smart_split(cmd, ";")
             if len(parts) > 1:
+                log.debug(f"[CMD_TRACE] Chain (;) detected. Parts: {len(parts)}")
+
                 final_out = []
                 final_updates = {}
                 current_context = context.copy()
                 for part in parts:
                     out, updates, meta = self.process_command(part, current_context)
+                    if not isinstance(out, str):
+                        out = str(out)
                     final_out.append(out)
                     if updates:
                         if updates.get("new_cwd"):
@@ -808,11 +893,15 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if "&&" in cmd:
             parts = [p.strip() for p in cmd.split("&&") if p.strip()]
             if len(parts) > 1:
+                log.debug(f"[CMD_TRACE] Chain (&&) detected. Parts: {len(parts)}")
+
                 final_out = []
                 final_updates = {}
                 current_context = context.copy()
                 for part in parts:
                     out, updates, meta = self.process_command(part, current_context)
+                    if not isinstance(out, str):
+                        out = str(out)
                     final_out.append(out)
                     if out.startswith("bash:") or "command not found" in out:
                         return (
@@ -839,6 +928,44 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     final_updates,
                     {"source": "chain", "cached": False},
                 )
+
+        # 0.2 Command Chaining Support (||)
+        if "||" in cmd:
+            parts = [p.strip() for p in cmd.split("||") if p.strip()]
+            if len(parts) > 1:
+                log.debug(f"[CMD_TRACE] Chain (||) detected. Parts: {len(parts)}")
+
+                final_out = ""
+                final_updates = {}
+                current_context = context.copy()
+
+                for i, part in enumerate(parts):
+                    out, updates, meta = self.process_command(part, current_context)
+
+                    # Heuristic for detecting failure
+                    # Standard shells use exit codes 0 vs non-0.
+                    # Here we check output text for standard error strings.
+                    is_failure = (
+                        out.strip().startswith("bash:")
+                        or "command not found" in out
+                        or "Error:" in out
+                        or "no such file" in out.lower()
+                        or "missing operand" in out
+                        or "not recognized" in out
+                        or meta.get("source") in ["denied", "error", "ratelimit"]
+                    )
+
+                    # If success, return immediately
+                    if not is_failure:
+                        # We might need to propagate environment updates if any
+                        # But typically || stops on first success.
+                        return out, updates, meta
+
+                    # If this is the last command and it failed, return it
+                    if i == len(parts) - 1:
+                        return out, updates, meta
+
+                    # Otherwise, continue loop (try next command)
 
         # 0.5 Pipe Support
         pipe_pos = -1
@@ -871,19 +998,18 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if pipe_pos != -1:
             left_cmd = cmd[:pipe_pos].strip()
             right_cmd = cmd[pipe_pos + 1 :].strip()
+
+            log.debug(
+                f"[CMD_TRACE] Pipe detected at pos {pipe_pos}. Left: '{left_cmd}', Right: '{right_cmd}'"
+            )
+
             out_text, updates, meta = self.process_command(left_cmd, context)
             right_context = context.copy()
             right_context["stdin"] = out_text
             # Use strict=False or similar if needed, but context copy is enough
             return self.process_command(right_cmd, right_context)
 
-        # 0. Variable Substitution ($VAR)
-
-        # Simple substitution for now: $VAR or ${VAR}
-        if "$" in cmd:
-            for key, val in context["env"].items():
-                cmd = cmd.replace(f"${key}", str(val))
-                cmd = cmd.replace(f"${{{key}}}", str(val))
+        # 0. Variable Substitution ($VAR) - Moved to later stage
 
         # 0. Variable Assignment
         # Detect Simple VAR=val
@@ -902,6 +1028,114 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             new_env = context["env"].copy()
             new_env[var_name] = val
             return "", {"env": new_env}, {"source": "var_assign", "cached": False}
+
+        # 0.6 Redirection Support (> and >>)
+        redirect_pos = -1
+        append_mode = False
+        in_sq = False
+        in_dq = False
+        escaped = False
+
+        for i, char in enumerate(cmd):
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+
+            if char == "'" and not in_dq:
+                in_sq = not in_sq
+            elif char == '"' and not in_sq:
+                in_dq = not in_dq
+            elif char == ">" and not in_sq and not in_dq:
+                redirect_pos = i
+                if i + 1 < len(cmd) and cmd[i + 1] == ">":
+                    append_mode = True
+                break
+
+        if redirect_pos != -1:
+            left_cmd = cmd[:redirect_pos].strip()
+            right_file = cmd[redirect_pos + 1 :].strip()
+            if append_mode:
+                right_file = cmd[redirect_pos + 2 :].strip()
+
+            # Execute command to get output
+            out_text, updates, meta = self.process_command(left_cmd, context)
+
+            # Strip target file quotes if present
+            if (right_file.startswith('"') and right_file.endswith('"')) or (
+                right_file.startswith("'") and right_file.endswith("'")
+            ):
+                right_file = right_file[1:-1]
+
+            # Resolve path
+            # Manual tilde expansion using context
+            if right_file.startswith("~"):
+                user = context.get("user", "root")
+                home = "/root" if user == "root" else f"/home/{user}"
+                if right_file == "~":
+                    right_file = home
+                elif right_file.startswith("~/"):
+                    right_file = os.path.join(home, right_file[2:])
+                # ~user/path expansion not supported yet
+
+            abs_path = resolve_path(cwd, right_file)
+
+            if not self._is_modification_allowed(abs_path):
+                return (
+                    f"bash: {right_file}: Permission denied\n",
+                    {},
+                    {"source": "local", "cached": False},
+                )
+
+            # Handle Write
+            # We need client_ip and user from context
+            user = context.get("user")
+
+            # Content to write
+            new_content = out_text
+
+            # If append, read existing (from DB first, then check LLM fallback or assume empty?)
+            # For simplicity, we only append if file exists in DB.
+            if append_mode:
+                node = self.db.get_user_node(client_ip, user, abs_path)
+                if node and node.get("type") == "file":
+                    existing = node.get("content", "")
+                    new_content = existing + new_content
+
+            # Write to DB
+            self.db.update_user_file(
+                client_ip,
+                user,
+                abs_path,
+                os.path.dirname(abs_path),
+                "file",
+                {
+                    "size": len(new_content),
+                    "permissions": "-rw-r--r--",
+                    "owner": user,
+                    "group": user,
+                    "created": datetime.datetime.now().isoformat(),
+                },
+                new_content,
+            )
+
+            # Return empty output (redirected)
+            # Merge updates? Yes.
+            if "file_modifications" not in updates:
+                updates["file_modifications"] = []
+            updates["file_modifications"].append({"action": "create", "path": abs_path})
+
+            return "", updates, {"source": "redirection", "cached": False}
+
+        # 0. Variable Substitution ($VAR) - LATE BINDING
+        # Performed AFTER structural parsing (pipes, chains) to mimic shell behavior
+        # where expansion happens but results are args, not new operators.
+        if "$" in cmd:
+            for key, val in context["env"].items():
+                cmd = cmd.replace(f"${key}", str(val))
+                cmd = cmd.replace(f"${{{key}}}", str(val))
 
         is_safe, reason = self.security.validate_input(cmd)
         if not is_safe:
@@ -959,43 +1193,65 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             # Strict Authentication
             if client_ip not in ignored_ips:
                 # Stealth: Do not reveal that this command exists to unauthorized IPs.
-                # Fall through to standard processing (LLM or "command not found").
-                pass
+                # Explicitly return "command not found" to mimic standard shell behavior
+                # and avoid LLM hallucinations (or empty responses).
+                op = cmd.split()[0]
+                return (
+                    f"bash: {op}: command not found\n",
+                    {},
+                    {"source": "stealth_block", "cached": False},
+                )
             else:
                 parts = cmd.split()
                 op = parts[0]
 
                 if op == "debug_vfs":
-                    # Usage: debug_vfs [path] (file ordir)
-                    path = parts[1] if len(parts) > 1 else context.get("cwd", "/")
+                    try:
+                        # Usage: debug_vfs [path] (file ordir)
+                        path = parts[1] if len(parts) > 1 else context.get("cwd", "/")
 
-                    # Resolve path
-                    abs_path = resolve_path(context.get("cwd", "/"), path)
+                        # Resolve path
+                        abs_path = resolve_path(context.get("cwd", "/"), path)
 
-                    # Determine if it's a directory check or path check
-                    # Heuristic: If it looks like a dir or is CWD
+                        # Determine if it's a directory check or path check
+                        # Heuristic: If it looks like a dir or is CWD
 
-                    # Let's try inspect_path first.
-                    # Actually, inspect_dir is richer for "ls -la" style debugging.
-                    # inspect_path is "stat" style.
+                        # Let's try inspect_path first.
+                        # Actually, inspect_dir is richer for "ls -la" style debugging.
+                        # inspect_path is "stat" style.
 
-                    # If no arg provided -> inspect_dir(CWD)
-                    if len(parts) == 1:
-                        report = self.db.inspect_dir(
+                        # If no arg provided -> inspect_dir(CWD)
+                        if len(parts) == 1:
+                            report = self.db.inspect_dir(
+                                client_ip, context.get("user"), abs_path
+                            )
+                            if isinstance(report, list):
+                                report = "\n".join(report)
+
+                            return (
+                                report + "\n",
+                                {},
+                                {"source": "debug", "cached": False},
+                            )
+
+                        # If arg provided
+                        report = self.db.inspect_path(
                             client_ip, context.get("user"), abs_path
                         )
+                        if isinstance(report, list):
+                            report = "\n".join(report)
+
                         return report + "\n", {}, {"source": "debug", "cached": False}
+                    except Exception as e:
+                        log.error(f"Error in debug_vfs: {e}")
+                        import traceback
 
-                    # If arg provided, check what it is via DB?
-                    # Or just run both?
-                    # Let's run inspect_path.
-                    report = self.db.inspect_path(
-                        client_ip, context.get("user"), abs_path
-                    )
-
-                    # If inspect_path says "ACTIVE directory", maybe show dir listing too?
-                    # For now simple path inspection is fine.
-                    return report + "\n", {}, {"source": "debug", "cached": False}
+                        traceback.print_exc()
+                        return (
+                            f"Error executing debug_vfs: {e}\n",
+                            {},
+                            {"source": "debug", "cached": False},
+                        )
 
                 elif op == "debug_vfs_ls":
                     # Explicit Dir List
@@ -1030,96 +1286,6 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                         {},
                         {"source": "debug", "cached": False},
                     )
-
-        # 0.6 Redirection Support (> and >>)
-        redirect_pos = -1
-        append_mode = False
-        in_sq = False
-        in_dq = False
-        escaped = False
-
-        for i, char in enumerate(cmd):
-            if escaped:
-                escaped = False
-                continue
-            if char == "\\":
-                escaped = True
-                continue
-
-            if char == "'" and not in_dq:
-                in_sq = not in_sq
-            elif char == '"' and not in_sq:
-                in_dq = not in_dq
-            elif char == ">" and not in_sq and not in_dq:
-                redirect_pos = i
-                if i + 1 < len(cmd) and cmd[i + 1] == ">":
-                    append_mode = True
-                break
-
-        if redirect_pos != -1:
-            left_cmd = cmd[:redirect_pos].strip()
-            right_file = cmd[redirect_pos + 1 :].strip()
-            if append_mode:
-                right_file = cmd[redirect_pos + 2 :].strip()
-
-            # Execute command to get output
-            out_text, updates, meta = self.process_command(left_cmd, context)
-
-            # Strip target file quotes if present
-            if (right_file.startswith('"') and right_file.endswith('"')) or (
-                right_file.startswith("'") and right_file.endswith("'")
-            ):
-                right_file = right_file[1:-1]
-
-            # Resolve path
-            abs_path = resolve_path(cwd, right_file)
-
-            if not self._is_modification_allowed(abs_path):
-                return (
-                    f"bash: {right_file}: Permission denied\n",
-                    {},
-                    {"source": "local", "cached": False},
-                )
-
-            # Handle Write
-            # We need client_ip and user from context
-            user = context.get("user")
-
-            # Content to write
-            new_content = out_text
-
-            # If append, read existing (from DB first, then check LLM fallback or assume empty?)
-            # For simplicity, we only append if file exists in DB.
-            if append_mode:
-                node = self.db.get_user_node(client_ip, user, abs_path)
-                if node and node.get("type") == "file":
-                    existing = node.get("content", "")
-                    new_content = existing + new_content
-
-            # Write to DB
-            self.db.update_user_file(
-                client_ip,
-                user,
-                abs_path,
-                os.path.dirname(abs_path),
-                "file",
-                {
-                    "size": len(new_content),
-                    "permissions": "-rw-r--r--",
-                    "owner": user,
-                    "group": user,
-                    "created": datetime.datetime.now().isoformat(),
-                },
-                new_content,
-            )
-
-            # Return empty output (redirected)
-            # Merge updates? Yes.
-            if "file_modifications" not in updates:
-                updates["file_modifications"] = []
-            updates["file_modifications"].append({"action": "create", "path": abs_path})
-
-            return "", updates, {"source": "redirection", "cached": False}
 
         # 0.7 Execution Simulation (Malware/Script Execution)
         # Check if the command refers to a local file (uploaded or generated)
@@ -1214,7 +1380,9 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         ):
             handler_name = None  # Force fallback to generic (LLM) which will simulate Cisco behavior
         else:
-            handler_name = f"handle_{base_cmd}"
+            # Normalize command name (replace - with _)
+            safe_base_cmd = base_cmd.replace("-", "_")
+            handler_name = f"handle_{safe_base_cmd}"
 
         import sys
 
@@ -1236,7 +1404,8 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         else:
             # Fallback: Try basename (e.g. /bin/ls -> ls, /bin/./uname -> uname)
             normalized_base = os.path.basename(base_cmd)
-            handler_name_norm = f"handle_{normalized_base}"
+            safe_normalized_base = normalized_base.replace("-", "_")
+            handler_name_norm = f"handle_{safe_normalized_base}"
 
             # Skip fallback too if Cisco
             use_fallback = True
@@ -1612,9 +1781,10 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if user_node:
             if user_node.get("type") == "file":
                 return f"bash: cd: {target_path}: Not a directory\n", {}
-            elif (
-                user_node.get("type") == "dir"
-            ):  # 'dir' or 'directory'? standardized to 'dir' in mkdir but 'directory' in fs_seeder?
+            elif user_node.get("type") in [
+                "dir",
+                "directory",
+            ]:  # 'dir' or 'directory'? standardized to 'dir' in mkdir but 'directory' in fs_seeder?
                 # mkdir uses 'dir'. fs_seeder seems to use 'directory'?
                 # Let's support both or check strict.
                 # If it IS a directory, success.
@@ -1767,7 +1937,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if "notes.txt" in target_path:
             return "Hint: RudolphsRedNose2025!", "local"
 
-        print(
+        log.debug(
             f"[Session: {session_id}] [{cmd_name}] DB MISS for {abs_path}. Calling LLM."
         )
 
@@ -1806,7 +1976,9 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 {},
                 content_str,
             )
-            print(f"[Session: {session_id}] [{cmd_name}] Persisted content to UserFS.")
+            log.debug(
+                f"[Session: {session_id}] [{cmd_name}] Persisted content to UserFS."
+            )
             return content_str, "llm"
 
         return t, "llm"
@@ -1816,68 +1988,142 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
     def handle_tr(self, cmd, context):
         """
-        Handle 'tr' command (simple transliterate/delete)
+        Handle 'tr' command (transliterate/delete/squeeze)
         Supports:
         tr 'set1' 'set2'
         tr -d 'set'
-        Stdin is required (usually piped)
+        tr -s 'set'
+        Ranges a-z, 0-9, \n, \t
         """
-        parts = shlex.split(cmd)
-        input_text = context.get("stdin", "")
+        import shlex
 
+        input_text = context.get("stdin", "")
+        # If no stdin, tr hangs (in real unix). Here we explicitly require it or return empty
         if not input_text:
             return "", {}
+
+        try:
+            parts = shlex.split(cmd)
+        except:
+            return "tr: parse error\n", {}
 
         args = parts[1:]
         if not args:
             return "tr: missing operand\n", {}
 
-        # Handle Options
         delete_mode = False
-        if args[0] == "-d":
-            delete_mode = True
-            args = args[1:]
+        squeeze_mode = False
+        complement_mode = False  # NOT IMPLEMENTED full
 
-        if not args:
+        # Argument Parsing
+        idx = 0
+        while idx < len(args):
+            arg = args[idx]
+            if arg.startswith("-"):
+                if "d" in arg:
+                    delete_mode = True
+                if "s" in arg:
+                    squeeze_mode = True
+                if "c" in arg:
+                    complement_mode = True
+                idx += 1
+            else:
+                break
+
+        sets = args[idx:]
+        if not sets:
             return "tr: missing operand\n", {}
 
-        set1 = args[0]
-        # Unescape common sequences
-        set1 = set1.replace("\\n", "\n").replace("\\t", "\t")
+        def expand_set(s):
+            # Simple range expansion [a-z] or a-z
+            # Also handle escapes if still present (shlex handles quotes, but \n might be literal char if single quoted?)
+            # shlex usually resolves basic escapes unless raw string in python.
+            # But let's handle explicit '\n' -> newline if not resolved
+            s = s.replace("\\n", "\n").replace("\\r", "\r").replace("\\t", "\t")
+
+            # Ranges a-z
+            # Naive expansion
+            out = []
+            i = 0
+            while i < len(s):
+                if i + 2 < len(s) and s[i + 1] == "-":
+                    start = s[i]
+                    end = s[i + 2]
+                    # expand direct ascii range
+                    try:
+                        for c_code in range(ord(start), ord(end) + 1):
+                            out.append(chr(c_code))
+                        i += 3
+                        continue
+                    except:
+                        pass  # Valid range err?
+                out.append(s[i])
+                i += 1
+            return "".join(out)
+
+        set1_raw = sets[0]
+        set1 = expand_set(set1_raw)
 
         if delete_mode:
-            # Delete chars in set1 from input
-            out = input_text
-            for char in set1:
-                out = out.replace(char, "")
-            return out, {}
+            # Delete chars in set1
+            trans_table = str.maketrans("", "", set1)
+            return input_text.translate(trans_table), {}
 
-        if len(args) < 2:
-            return "tr: missing operand after '{}'\n".format(set1), {}
+        if squeeze_mode and not sets[1:]:
+            # Squeeze repeats of chars in set1
+            # tr -s '\n'
+            import itertools
 
-        set2 = args[1]
-        set2 = (
-            set2.replace("\\n", "\n")
-            .replace("\\t", "\t")
-            .replace("\\r", "\r")
-            .replace("\\0", "\0")
-        )
+            return "".join(
+                c for c, _ in itertools.groupby(input_text) if c not in set1
+            ) + "".join(
+                c for c in input_text if c not in set1
+            )  # Logic?
+            # Wait, squeeze reduces repeats of X to single X.
+            # Logic: Iterate chars, if char in set1 and same as prev, skip.
+            out = []
+            last = None
+            for c in input_text:
+                if c in set1 and c == last:
+                    continue
+                out.append(c)
+                last = c
+            return "".join(out), {}
 
         # Transliterate
-        # If set2 is shorter than set1, last char is repeated (standard tr)
-        # But python translate needs equal length
+        if len(sets) < 2:
+            return f"tr: missing operand after '{set1_raw}'\n", {}
 
-        # Build translation table mapping
-        trans_map = {}
-        len2 = len(set2)
-        if len2 == 0:
-            return input_text, {}  # Should error?
+        set2_raw = sets[1]
+        set2 = expand_set(set2_raw)
 
-        for i, char in enumerate(set1):
-            repl = set2[i] if i < len2 else set2[-1]
-            input_text = input_text.replace(char, repl)
+        # Padding
+        if len(set2) < len(set1):
+            if len(set2) > 0:
+                set2 += set2[-1] * (len(set1) - len(set2))
 
-        return input_text, {}
+        # Squeeze with replace? tr -s set1 set2 replaces then squeezes set2?
+        # For this task, standard replace is priority
+        try:
+            trans_table = str.maketrans(set1, set2[: len(set1)])
+            res = input_text.translate(trans_table)
+
+            if squeeze_mode:
+                # Squeeze repeats of chars in SET2 (output set)
+                out = []
+                last = None
+                s_set = set(set2)
+                for c in res:
+                    if c in s_set and c == last:
+                        continue
+                    out.append(c)
+                    last = c
+                res = "".join(out)
+
+            return res, {}
+
+        except Exception as e:
+            return f"tr: execution error {e}\n", {}
 
     def handle_head(self, cmd, context):
         return self.head_handler.handle(cmd, context)
@@ -3238,90 +3484,14 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
     def handle_perl(self, cmd, context):
         return self._handle_interpreter(cmd, context, "perl")
 
+    def handle_pkill(self, cmd, context):
+        return self.handle_killall(cmd, context)
+
+    def handle_sed(self, cmd, context):
+        return self.sed_handler.handle(cmd, context)
+
     def handle_awk(self, cmd, context):
-        import shlex
-        import hashlib
-
-        # AWK is complex. We want to simulate execution on a file.
-        # Try to identify input file.
-        try:
-            parts = shlex.split(cmd)
-        except:
-            return "awk: syntax error\n", {}
-
-        if len(parts) < 2:
-            return "awk: usage error\n", {}
-
-        # Heuristic: Find last argument that doesn't start with '-' and isn't the program string (if quoted)
-        # Simplified: If -f is used, next arg is script.
-        # If no -f, first non-flag arg is program. Next args are files.
-
-        files = []
-        args = parts[1:]
-        skip_next = False
-        program_found = False
-
-        for i, arg in enumerate(args):
-            if skip_next:
-                skip_next = False
-                continue
-
-            if arg.startswith("-f"):
-                if arg == "-f":
-                    skip_next = True
-                continue
-
-            if arg.startswith("-F"):
-                if len(arg) == 2:
-                    skip_next = True
-                continue
-
-            if arg.startswith("-v"):
-                if len(arg) == 2:
-                    skip_next = True
-                continue
-
-            if arg.startswith("-"):
-                continue
-
-            # Non-flag
-            if not program_found and "-f" not in cmd:
-                program_found = True
-                continue
-
-            files.append(arg)
-
-        if not files:
-            return self.handle_generic(cmd, context)
-
-        target_path = files[0]
-        content, source = self._generate_or_get_content(
-            "awk_data", target_path, context
-        )
-
-        content_hash = hashlib.md5(content.encode("utf-8", "ignore")).hexdigest()
-        cache_key = f"{cmd}::data_hash={content_hash}"
-
-        print(f"[AWK] Executing with data file: {target_path}")
-
-        cached = self.db.get_cached_response(cache_key, context.get("cwd"))
-        if cached:
-            # reuse
-            j, t = self._extract_json_or_text(cached)
-            r, u = self._process_llm_json(j, t)
-            return r, u, {"source": "cache", "cached": True}
-
-        # LLM
-        prompt = f"Command: {cmd}\n\nInput File ({target_path}) Content:\n```\n{content[:5000]}\n```\n\n(INSTRUCTION: Execute the awk command on the provided file content. Return ONLY stdout.)"
-
-        resp = self.llm.generate_response(
-            prompt, context.get("cwd"), context.get("history", []), [], []
-        )
-
-        self.db.cache_response(cache_key, context.get("cwd"), resp)
-        j, t = self._extract_json_or_text(resp)
-        r, u = self._process_llm_json(j, t)
-        return r, u, {"source": "llm", "cached": False}
+        return self.awk_handler.handle(cmd, context)
 
     def handle_chmod(self, cmd, context):
         parts = cmd.split()

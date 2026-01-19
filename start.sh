@@ -29,7 +29,13 @@ else
 fi
 
 # Source .env if present (to support shell environment variables)
-# This allows usage without python-dotenv if needed, or overriding
+# Cascading load: Parent first, then Local (overrides)
+if [ -f "../.env" ]; then
+    set -a
+    source ../.env
+    set +a
+fi
+
 if [ -f ".env" ]; then
     set -a
     source .env
@@ -38,25 +44,42 @@ fi
 
 # Parse Arguments
 FOREGROUND=false
-for arg in "$@"; do
-    case $arg in
+RESTART=false
+ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
         --foreground|-f|--help|-h|--create-persona)
             FOREGROUND=true
+            ARGS+=("$1")
+            shift
+            ;;
+        --restart)
+            RESTART=true
+            shift
+            ;;
+        --persona)
+            ARGS+=("$1")
+            shift
+            if [[ $# -gt 0 ]]; then
+                ARGS+=("$1")
+                PERSONA_REQ="$1"
+                shift
+            fi
+            ;;
+        *)
+            ARGS+=("$1")
+            shift
             ;;
     esac
 done
 
+# Set args back for python
+set -- "${ARGS[@]}"
+
 # --- Robust Startup Logic ---
 # 1. Determine Requested Persona
-PERSONA_REQ=""
-# Extract --persona arg if present (simple parse)
-for ((i=1; i<=$#; i++)); do
-    if [[ "${!i}" == "--persona" ]]; then
-        j=$((i+1))
-        PERSONA_REQ="${!j}"
-        break
-    fi
-done
+# (Already captured PERSONA_REQ if passed)
 
 # 2. Env Var Priority
 if [ -z "$PERSONA_REQ" ] && [ -n "$SSH_PERSONA" ]; then
@@ -65,7 +88,16 @@ fi
 
 # 3. Fallback to Last Used
 DATA_ROOT="${FAUXSSH_DATA_DIR:-$PROJECT_ROOT/data}"
-LAST_FILE="$DATA_ROOT/.last_persona"
+# Ensure we set DATA_DIR consistently for PID check too
+if [ -n "${FAUXSSH_DATA_DIR:-}" ]; then
+    DATA_DIR="$FAUXSSH_DATA_DIR"
+elif [ -d "$PROJECT_ROOT/../data" ]; then
+    DATA_DIR="$(readlink -f "$PROJECT_ROOT/../data")"
+else
+    DATA_DIR="$PROJECT_ROOT/data"
+fi
+LAST_FILE="$DATA_DIR/.last_persona"
+
 if [ -z "$PERSONA_REQ" ] && [ -f "$LAST_FILE" ]; then
     PERSONA_REQ=$(cat "$LAST_FILE" | tr -d '[:space:]')
 fi
@@ -87,7 +119,7 @@ if [ -d "$PROJECT_ROOT/personas/$PERSONA_REQ" ]; then
 fi
 
 # Check Dynamic
-if [ "$VALID" = false ] && [ -d "$DATA_ROOT/personas/$PERSONA_REQ" ]; then
+if [ "$VALID" = false ] && [ -d "$DATA_DIR/personas/$PERSONA_REQ" ]; then
     VALID=true
     echo "[INFO] Found Dynamic Persona: $PERSONA_REQ"
 fi
@@ -99,11 +131,7 @@ if [ "$VALID" = false ]; then
     if [ "$PERSONA_REQ" != "$DEFAULT_PERSONA" ]; then
         echo "[INFO] Attempting fallback to Default: $DEFAULT_PERSONA"
         if [ -d "$PROJECT_ROOT/personas/$DEFAULT_PERSONA" ]; then
-             # Remove stale state if it pointed to a missing persona
              rm -f "$LAST_FILE"
-             # We don't change arguments passed to python, main.py handles fallback too, 
-             # but this check ensures we don't crash silently or confusingly.
-             # Ideally we should probably warn user.
              echo "[INFO] Fallback successful. Launching..."
         else
              echo "[CRITICAL] Default Persona '$DEFAULT_PERSONA' is MISSING! Reinstall application."
@@ -116,24 +144,69 @@ if [ "$VALID" = false ]; then
 fi
 # --------------------------
 
+# --- Database Check ---
+DB_TYPE="sqlite" # Default
+echo "[DEBUG] Checking for config.yaml..."
+if [ -f "config.yaml" ]; then
+    echo "[DEBUG] config.yaml found. Parsing..."
+    # Use python to safely parse yaml if possible, suppressing errors
+    DB_CHECK=$(python3 -c "import yaml; print(yaml.safe_load(open('config.yaml')).get('database', {}).get('type', 'sqlite'))" 2>/dev/null)
+    echo "[DEBUG] Python check finished. Result: '$DB_CHECK'"
+    if [ -n "$DB_CHECK" ]; then
+        DB_TYPE="$DB_CHECK"
+    fi
+else
+    echo "[DEBUG] config.yaml NOT found."
+fi
+
+# Env Var Override
+if [ -n "$DATABASE_TYPE" ]; then
+    DB_TYPE="$DATABASE_TYPE"
+fi
+
+echo "[INFO] Database Mode: $DB_TYPE"
+# ----------------------
+
 if [ "$FOREGROUND" = true ]; then
     # Run in foreground (for Systemd or debugging)
     exec python3 -m ssh_honeypot.main "$@"
 else
     # Run in background (Default)
-    if [ -n "${FAUXSSH_DATA_DIR:-}" ]; then
-        DATA_DIR="$FAUXSSH_DATA_DIR"
-    elif [ -d "$PROJECT_ROOT/../data" ]; then
-        # Auto-detect sibling (Production layout)
-        DATA_DIR="$(readlink -f "$PROJECT_ROOT/../data")"
-    else
-        DATA_DIR="$PROJECT_ROOT/data"
-    fi
-    
     mkdir -p "$DATA_DIR"
     LOG_FILE="$DATA_DIR/server_startup.log"
     PID_FILE="$DATA_DIR/server.pid"
     
+    # Check if running
+    if [ -f "$PID_FILE" ]; then
+        OLD_PID=$(cat "$PID_FILE")
+        if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+            if [ "$RESTART" = true ]; then
+                echo "[INFO] Service already running (PID: $OLD_PID). Restart requested. Killing..."
+                kill "$OLD_PID"
+                # Wait for it to die
+                for i in {1..10}; do
+                    if ! kill -0 "$OLD_PID" 2>/dev/null; then
+                        break
+                    fi
+                    sleep 0.5
+                done
+                # Force kill if needed?
+                if kill -0 "$OLD_PID" 2>/dev/null; then
+                    echo "[WARN] Forced kill..."
+                    kill -9 "$OLD_PID"
+                fi
+                rm -f "$PID_FILE"
+            else
+                echo "[INFO] Service is already running (PID: $OLD_PID). Use --restart to force restart."
+                exit 0
+            fi
+        else
+            # Stale PID file
+            echo "[INFO] Removing stale PID file."
+            rm -f "$PID_FILE"
+        fi
+    fi
+
     echo "[INFO] Starting FauxSSH in background..."
     echo "[INFO] logs: $LOG_FILE"
     
@@ -142,3 +215,8 @@ else
     echo "$PID" > "$PID_FILE"
     echo "[OK] Started. PID: $PID"
 fi
+
+# Post-Startup Verification
+echo "Verifying service status..."
+sleep 2
+python3 tools/analytics/analyze.py --limit 5

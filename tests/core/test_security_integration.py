@@ -46,7 +46,8 @@ class TestSecurityIntegration(unittest.TestCase):
             cls.server_thread = threading.Thread(target=server_main, args=([],))
             cls.server_thread.daemon = True
             cls.server_thread.start()
-            time.sleep(2)
+            # Startup might be slower due to database cache purge or initialization
+            time.sleep(5)
 
     def test_injection_block(self):
         import paramiko

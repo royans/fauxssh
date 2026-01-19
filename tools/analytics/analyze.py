@@ -8,7 +8,7 @@ import json
 import shutil
 import textwrap
 from datetime import datetime
-from dateutil import tz
+from dateutil import tz, parser
 
 
 from rich.console import Console, Group
@@ -42,35 +42,73 @@ except ImportError:
 try:
     from ssh_honeypot.core.utils import get_data_dir, get_ignored_ips
     from ssh_honeypot.core.config import config
-
-    # Use the DB_PATH from core database to match app exactly
-    from ssh_honeypot.core.database import DB_PATH
+    from ssh_honeypot.core.database import get_db_backend
 except ImportError as e:
     console.print(f"[bold red][!] Import Error: {e}[/bold red]")
-    # Fallback/Debug
-    DB_PATH = os.path.join(PROJECT_ROOT, "data", "honeypot.sqlite")
+    sys.exit(1)
 
 
 def get_db_connection(db_path_override=None):
-    path = db_path_override if db_path_override else DB_PATH
-    if not os.path.exists(path):
-        console.print(f"[bold red][!] Database not found at {path}[/bold red]")
-        sys.exit(1)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    return conn
+    # If path override is provided, assume SQLite for backward compat or manual file checks
+    if db_path_override:
+        conn = sqlite3.connect(db_path_override)
+        conn.row_factory = sqlite3.Row
+        return conn, "?"
+
+    # Use central factory
+    db = get_db_backend()
+    conn = db._get_conn()
+
+    # If using psycopg2 (Postgres), we might need to set row_factory or equivalent if not using RealDictCursor.
+    # PostgresBackend._get_conn returns raw connection.
+    # psycopg2 needs extras.RealDictCursor for dictionary-like access.
+    # Let's inspect connection type or just handle it.
+
+    # Check for placeholder
+    ph = getattr(db, "placeholder", "?")
+
+    # If wrapper needed for Row-like access?
+    # SSHPot logic usually uses tuples for fetching unless row_factory set.
+    # But analyze.py heavily uses r["column"] access.
+    # So we MUST ensure the cursor yields dict-like objects.
+
+    # Robustness: Force Row/Cursor Factory based on connection type
+    conn_type = str(type(conn))
+    if "sqlite3" in conn_type:
+        conn.row_factory = sqlite3.Row
+        ph = "?"  # Force SQLite placeholder
+    elif "psycopg2" in conn_type:
+        import psycopg2.extras
+
+        conn.cursor_factory = psycopg2.extras.RealDictCursor
+        ph = "%s"
+
+    return conn, ph
 
 
 def to_local_time(ts_str):
     try:
         if not ts_str:
             return "-"
-        dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-        dt = dt.replace(tzinfo=tz.tzutc())
+        if isinstance(ts_str, datetime):
+            dt = ts_str
+        else:
+            # parsing with dateutil is more robust (handles microseconds, T, etc)
+            dt = parser.parse(str(ts_str))
+
+        # If naive, assume it's already local (since Postgres/SQLite defaults often stick to server time)
+        # We ensure it's timezone-aware for consistency if needed, or just return formatted string.
+        # But to be safe if it *was* UTC, we'd need to know source.
+        # Given user request, we assume stored time = local time or user wants to see stored time as is.
+        if dt.tzinfo is None:
+            # Assume local system time (since DB seems to store local naive)
+            dt = dt.replace(tzinfo=tz.tzlocal())
+
+        # Convert to local (no-op if already matching local)
         local_dt = dt.astimezone(tz.tzlocal())
         return local_dt.strftime("%Y-%m-%d %H:%M:%S")
-    except:
-        return ts_str
+    except Exception:
+        return str(ts_str)
 
 
 def clean_ip(ip, anon=False):
@@ -147,10 +185,13 @@ def list_sessions(
     ip_filter=None,
     protocol_filter=None,
 ):
-    conn = get_db_connection(db_path)
+    conn, ph = get_db_connection(db_path)
     c = conn.cursor()
 
-    query = """
+    # Dialect-specific aggregation
+    agg_func = "STRING_AGG" if ph == "%s" else "group_concat"
+
+    query = f"""
         SELECT 
             s.session_id, 
             s.remote_ip, 
@@ -161,8 +202,10 @@ def list_sessions(
             s.client_version,
             s.client_version,
             s.fingerprint,
+            s.fingerprint,
             s.protocol,
             (SELECT COUNT(*) FROM interactions i WHERE i.session_id = s.session_id) as cmd_count,
+            (SELECT COUNT(*) FROM interactions i WHERE i.session_id = s.session_id AND i.source = 'llm') as llm_count,
             (SELECT MIN(timestamp) FROM interactions i WHERE i.session_id = s.session_id) as first_cmd,
             (SELECT MAX(timestamp) FROM interactions i WHERE i.session_id = s.session_id) as last_cmd,
             (
@@ -171,7 +214,7 @@ def list_sessions(
                 JOIN command_analysis ca ON i.request_md5 = ca.command_hash 
                 WHERE i.session_id = s.session_id
             ) as avg_risk,
-            (SELECT group_concat(command, '|||') FROM interactions i WHERE i.session_id = s.session_id) as all_commands,
+            (SELECT {agg_func}(command, '|||') FROM interactions i WHERE i.session_id = s.session_id) as all_commands,
             s.summary,
             s.risk_score,
             ii.country,
@@ -185,7 +228,7 @@ def list_sessions(
     params = []
 
     if protocol_filter:
-        query += " AND s.protocol = ?"
+        query += f" AND s.protocol = {ph}"
         params.append(protocol_filter)
 
     # Filter Ignored IPs
@@ -195,17 +238,27 @@ def list_sessions(
         ignored = []
 
     if ignored:
-        placeholders = ",".join(["?"] * len(ignored))
+        placeholders = ",".join([ph] * len(ignored))
         query += f" AND s.remote_ip NOT IN ({placeholders})"
         params.extend(ignored)
 
     if ip_filter:
-        query += " AND (s.remote_ip = ? OR s.remote_ip = ?)"
+        query += f" AND (s.remote_ip = {ph} OR s.remote_ip = {ph})"
         params.append(ip_filter)
         if not ip_filter.startswith("::ffff:"):
             params.append(f"::ffff:{ip_filter}")
         else:
             params.append(ip_filter)
+
+    # Filter 0-Command Sessions (Connection Checks) by default
+    # User can override with FAUXSSH_ANALYTICS_SHOW_EMPTY=true
+    show_empty = (
+        str(os.getenv("FAUXSSH_ANALYTICS_SHOW_EMPTY", "false")).lower() == "true"
+    )
+    if not show_empty:
+        # Filter based on interactions count using a subquery in WHERE
+        # HAVING requires GROUP BY in SQLite, so we must repeat the subquery condition
+        query += " AND (SELECT COUNT(*) FROM interactions i WHERE i.session_id = s.session_id) > 0"
 
     # Sorting
     # Maps: User Field -> SQL Column
@@ -222,24 +275,32 @@ def list_sessions(
 
     order_clause = parse_sort_param(sort_param, sort_map)
     if order_clause:
-        query += f" ORDER BY {order_clause} LIMIT ?"
+        query += f" ORDER BY {order_clause} LIMIT {ph}"
     else:
-        query += " ORDER BY s.start_time DESC LIMIT ?"
+        query += f" ORDER BY s.start_time DESC LIMIT {ph}"
 
     params.append(limit)
 
-    c.execute(query, params)
+    if ph == "%s":
+        import psycopg2.extras
+
+        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    else:
+        c = conn.cursor()
+
+    c.execute(query, tuple(params))
     rows = c.fetchall()
     conn.close()
 
     table = Table(title=f"Recent Sessions (Last {limit})", box=box.SIMPLE)
     table.add_column("Time", style="cyan", no_wrap=True)
     table.add_column("IP", style="magenta")
-    table.add_column("User", style="green")
-    table.add_column("Passwd", style="dim")
+    table.add_column("User / HTTP Request", style="green")
+    # table.add_column("Passwd", style="dim")  # Hidden by request
     table.add_column("Proto", style="cyan")
     table.add_column("Client", style="dim")
     table.add_column("Cmds", justify="right")
+    table.add_column("LLMs", justify="right", style="cyan")
     table.add_column("Dur", justify="right", style="yellow")
     table.add_column("Geo", style="blue")
     table.add_column("ISP/Type", style="dim")
@@ -253,10 +314,29 @@ def list_sessions(
         user = r["username"]
         proto = r["protocol"] or "ssh"
 
-        # Truncate Password
+        # Special handling for HTTP to show Method+URL
+        if proto == "http":
+            all_cmds = r["all_commands"]
+            if all_cmds:
+                # Take the first command
+                first_req = all_cmds.split("|||")[0]
+                # If it's pure GET, strip it to save space? User asked for "Method if not Get".
+                # But "Show URL in User including Method if its not Get".
+                if " GET " in first_req:
+                    # Strip "HTTP GET " prefix if present or similar
+                    # Format is "HTTP GET /path" usually from server.py logic
+                    user = first_req.replace("HTTP GET ", "").strip()
+                else:
+                    user = first_req.replace("HTTP ", "").strip()  # Keep Method
+
+                # Truncate
+                if len(user) > 50:
+                    user = user[:47] + "..."
+
+        # Truncate Password (unused now but kept variable if needed)
         pwd = r["password"] or ""
-        if len(pwd) > 15:
-            pwd = pwd[:12] + "..."
+        # if len(pwd) > 15:
+        #     pwd = pwd[:12] + "..."
 
         # Truncate Client
         ver = (r["client_version"] or "").replace("SSH-2.0-", "")
@@ -264,13 +344,20 @@ def list_sessions(
             ver = ver[:12] + "..."
 
         cmds = str(r["cmd_count"])
+        llms = str(r["llm_count"])
 
         # Calculate Duration
         duration_str = "-"
         if r["first_cmd"] and r["last_cmd"] and r["cmd_count"] > 1:
             try:
-                t1 = datetime.strptime(r["first_cmd"], "%Y-%m-%d %H:%M:%S")
-                t2 = datetime.strptime(r["last_cmd"], "%Y-%m-%d %H:%M:%S")
+                t1 = r["first_cmd"]
+                t2 = r["last_cmd"]
+
+                if not isinstance(t1, datetime):
+                    t1 = datetime.strptime(t1, "%Y-%m-%d %H:%M:%S")
+                if not isinstance(t2, datetime):
+                    t2 = datetime.strptime(t2, "%Y-%m-%d %H:%M:%S")
+
                 delta = t2 - t1
                 total_seconds = int(delta.total_seconds())
                 if total_seconds < 60:
@@ -310,10 +397,11 @@ def list_sessions(
             start,
             ip,
             user,
-            pwd,
+            # pwd, # Passwd hidden
             proto,
             ver,
             cmds,
+            llms,
             duration_str,
             geo,
             isp,
@@ -335,20 +423,50 @@ def list_commands(
     protocol_filter=None,
     show_output=False,
 ):
-    conn = get_db_connection(db_path)
-    c = conn.cursor()
+    conn, ph = get_db_connection(db_path)
+    # Ensure cursor factory
+    if ph == "%s":
+        import psycopg2.extras
+
+        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    else:
+        c = conn.cursor()
 
     # 1. Get Total Unique IPs for Unique% Calculation
     try:
         c.execute("SELECT COUNT(DISTINCT remote_ip) FROM sessions")
-        total_ips = c.fetchone()[0] or 1  # Avoid div by zero
+        total_ips = c.fetchone()["count"] if ph == "%s" else c.fetchone()[0]
+        # Postgres returns dict with RealDictCursor, SQLite returns Row (indexable) or tuple?
+        # Row is indexable by name too.
+        # But wait, fetchone()[0] works for Row if it behaves like tuple.
+        # RealDictCursor returns dict, so [0] fails.
+        # Safe way: list(row.values())[0] or use alias?
+        # Let's fix the query to have an alias.
     except:
         total_ips = 1
 
-    query = """
+    # Fix query to have alias
+    try:
+        c.execute("SELECT COUNT(DISTINCT remote_ip) as cnt FROM sessions")
+        row = c.fetchone()
+        if row:
+            if isinstance(row, dict):
+                total_ips = row["cnt"]
+            else:
+                total_ips = row[0]  # SQLite Row supports index or name
+        else:
+            total_ips = 1
+    except:
+        total_ips = 1
+
+    if not total_ips:
+        total_ips = 1
+
+    query = f"""
         SELECT 
             i.timestamp,
             s.remote_ip,
+            s.protocol,
             s.username,
             i.command,
             i.response,
@@ -370,19 +488,18 @@ def list_commands(
 
     params = []
 
-    # Filter Ignored IPs
     try:
         ignored = get_ignored_ips()
     except:
         ignored = []
 
     if ignored:
-        placeholders = ",".join(["?"] * len(ignored))
+        placeholders = ",".join([ph] * len(ignored))
         query += f" AND s.remote_ip NOT IN ({placeholders})"
         params.extend(ignored)
 
     if ip_filter:
-        query += " AND (s.remote_ip = ? OR s.remote_ip = ?)"
+        query += f" AND (s.remote_ip = {ph} OR s.remote_ip = {ph})"
         params.append(ip_filter)
         if not ip_filter.startswith("::ffff:"):
             params.append(f"::ffff:{ip_filter}")
@@ -390,39 +507,38 @@ def list_commands(
             params.append(ip_filter)
 
     if session_filter:
-        query += " AND i.session_id LIKE ?"
+        query += f" AND i.session_id LIKE {ph}"
         params.append(f"{session_filter}%")
 
     if protocol_filter:
-        query += " AND s.protocol = ?"
+        query += f" AND s.protocol = {ph}"
         params.append(protocol_filter)
 
-    # Sorting
     sort_map = {
         "time": "i.timestamp",
         "ip": "s.remote_ip",
         "user": "s.username",
-        "unique": "cmd_ip_count",  # Logic handled in parse_sort_param
+        "unique": "cmd_ip_count",
         "risk": "ca.risk_score",
         "src": "i.source",
     }
-
     order_clause = parse_sort_param(sort_param, sort_map)
 
     if order_clause:
-        query += f" ORDER BY {order_clause} LIMIT ?"
+        query += f" ORDER BY {order_clause} LIMIT {ph}"
     else:
-        query += " ORDER BY i.id DESC LIMIT ?"
+        query += f" ORDER BY i.id DESC LIMIT {ph}"
 
     params.append(limit)
 
-    c.execute(query, params)
+    c.execute(query, tuple(params))
     rows = c.fetchall()
     conn.close()
 
     table = Table(title=f"Recent Commands (Last {limit})", box=box.ROUNDED)
     table.add_column("Time", style="dim", no_wrap=True)
     table.add_column("IP", style="magenta")
+    table.add_column("Proto", style="cyan")
     table.add_column("User", style="green")
     table.add_column("Command", style="white", overflow="fold")  # Enable wrapping
     table.add_column("Size", justify="right", style="dim")
@@ -434,6 +550,7 @@ def list_commands(
     for r in rows:
         ts = to_local_time(r["timestamp"])
         ip = clean_ip(r["remote_ip"], anon=anon) or "-"
+        proto = r["protocol"] or "-"
         user = r["username"] or "-"
         src = r["source"] or "-"
 
@@ -454,7 +571,14 @@ def list_commands(
         risk_str = f"{risk_val}" if risk_val is not None else "-"
         risk_style = get_risk_style(risk_val)
 
-        cmd_cell = Text(r["command"] or "")
+        cmd_text = r["command"] or ""
+        cmd_styled = Text(cmd_text)
+
+        # Highlight Non-GET HTTP Requests
+        if cmd_text.startswith("HTTP ") and " GET " not in cmd_text:
+            cmd_styled.stylize("bold magenta")
+
+        cmd_cell = cmd_styled
 
         # Append Output Snippet if requested
         if show_output:
@@ -476,6 +600,7 @@ def list_commands(
         table.add_row(
             ts,
             ip,
+            proto,
             user,
             cmd_cell,
             size_str,
@@ -489,17 +614,31 @@ def list_commands(
 
 
 def list_top_ips(limit=50, anon=False, db_path=None):
-    conn = get_db_connection(db_path)
-    c = conn.cursor()
+    conn, ph = get_db_connection(db_path)
+    # Ensure cursor factory
+    if ph == "%s":
+        import psycopg2.extras
 
-    # 1. Total Unique IPs
+        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    else:
+        c = conn.cursor()
+
+    # Get total unique IPs for stats
     try:
-        c.execute("SELECT COUNT(DISTINCT remote_ip) FROM sessions")
-        total_unique_ips = c.fetchone()[0]
+        c.execute("SELECT COUNT(DISTINCT remote_ip) as cnt FROM sessions")
+        row = c.fetchone()
+        if hasattr(row, "keys") and "cnt" in row:
+            total_unique_ips = row["cnt"]
+        elif isinstance(row, dict) and "cnt" in row:
+            total_unique_ips = row["cnt"]
+        elif row:
+            total_unique_ips = row[0]
+        else:
+            total_unique_ips = 0
     except:
         total_unique_ips = 0
 
-    query = """
+    query = f"""
         SELECT 
             s.remote_ip,
             COUNT(DISTINCT s.session_id) as total_sessions,
@@ -518,13 +657,34 @@ def list_top_ips(limit=50, anon=False, db_path=None):
              JOIN sessions s2 ON i.session_id = s2.session_id 
              WHERE s2.remote_ip = s.remote_ip 
              AND i.timestamp > datetime('now', '-1 hour')) as recent_cmds_1h,
-
-            -- Estimated Current RPM (Last 1 Minute) -> Proxy for Suspension Risk
+             -- Note: datetime('now') is SQLite specific. 
+             -- Postgres uses NOW() or CURRENT_TIMESTAMP.
+             -- Fixed below via regex or replacement if needed? 
+             -- Actually, PostgresBackend might need to install 'datetime' function/compatibility?
+             -- Or we blindly replace datetime usage.
+             
+            -- Estimated Current RPM
             (SELECT COUNT(*) 
              FROM interactions i 
              JOIN sessions s2 ON i.session_id = s2.session_id 
              WHERE s2.remote_ip = s.remote_ip 
              AND i.timestamp > datetime('now', '-1 minute')) as current_rpm,
+
+            -- LLM Usage 1h
+            (SELECT COUNT(*) 
+             FROM interactions i 
+             JOIN sessions s2 ON i.session_id = s2.session_id 
+             WHERE s2.remote_ip = s.remote_ip 
+             AND i.source = 'llm'
+             AND i.timestamp > datetime('now', '-1 hour')) as llm_1h,
+
+            -- LLM Usage 24h
+            (SELECT COUNT(*) 
+             FROM interactions i 
+             JOIN sessions s2 ON i.session_id = s2.session_id 
+             WHERE s2.remote_ip = s.remote_ip 
+             AND i.source = 'llm'
+             AND i.timestamp > datetime('now', '-24 hours')) as llm_24h,
 
              ii.country,
              ii.org
@@ -532,10 +692,27 @@ def list_top_ips(limit=50, anon=False, db_path=None):
         FROM sessions s
         LEFT JOIN ip_intelligence ii ON s.remote_ip = ii.ip
         WHERE 1=1
-        GROUP BY s.remote_ip
+        GROUP BY s.remote_ip, ii.country, ii.org
+        -- Group By must include all non-agg columns in standard SQL (Postgres strictness)
         ORDER BY current_rpm DESC, total_sessions DESC
-        LIMIT ?
+        LIMIT {ph}
     """
+
+    # Postgres Compatibility Fixes
+    if ph == "%s":
+        # Replace SQLite datetime calls with Postgres equivalent
+        # SQLite: datetime('now', '-1 hour')
+        # Postgres: NOW() - INTERVAL '1 hour'
+        query = query.replace(
+            "datetime('now', '-1 hour')", "(NOW() - INTERVAL '1 hour')"
+        )
+        query = query.replace(
+            "datetime('now', '-24 hours')", "(NOW() - INTERVAL '24 hours')"
+        )
+        query = query.replace(
+            "datetime('now', '-1 minute')", "(NOW() - INTERVAL '1 minute')"
+        )
+        # Ensure 'current_rpm' and others are usable in ORDER BY (standard SQL supports alias in ORDER BY, but GROUP BY requirements are strict)
 
     c.execute(query, (limit,))
     rows = c.fetchall()
@@ -549,6 +726,7 @@ def list_top_ips(limit=50, anon=False, db_path=None):
     table.add_column("IP", style="magenta")
     table.add_column("Sessions", justify="right", style="green")
     table.add_column("Total Cmds", justify="right")
+    table.add_column("LLM (1h/24h)", justify="right", style="cyan")
     table.add_column(
         "Latest Cmds", justify="right", style="yellow"
     )  # Renamed for space
@@ -563,6 +741,8 @@ def list_top_ips(limit=50, anon=False, db_path=None):
         sessions = r["total_sessions"]
         cmds = r["total_cmds"]
         recent_1h = r["recent_cmds_1h"]
+        llm_1h = r["llm_1h"]
+        llm_24h = r["llm_24h"]
         rpm = r["current_rpm"]
         last_seen = to_local_time(r["last_seen"])
 
@@ -601,6 +781,7 @@ def list_top_ips(limit=50, anon=False, db_path=None):
             ip,
             str(sessions),
             str(cmds),
+            f"{llm_1h}/{llm_24h}",
             str(recent_1h),
             f"[{rpm_style}]{rpm}[/{rpm_style}]",
             loc,
@@ -615,11 +796,18 @@ def list_top_ips(limit=50, anon=False, db_path=None):
     )
 
 
-def list_payloads(limit=50, anon=False, db_path=None):
-    conn = get_db_connection(db_path)
-    c = conn.cursor()
+def list_payloads(limit=50, anon=False, db_path=None, show_all=False):
+    conn, ph = get_db_connection(db_path)
+    # conn.row_factory set in get_db_connection if SQLite, else RealDictCursor for PG
+    # Ensure cursor factory
+    if ph == "%s":
+        import psycopg2.extras
 
-    query = """
+        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    else:
+        c = conn.cursor()
+
+    query = f"""
         SELECT 
             p.id,
             p.timestamp,
@@ -630,10 +818,14 @@ def list_payloads(limit=50, anon=False, db_path=None):
             p.file_path,
             p.ip,
             p.session_id,
-            p.error_message
+            p.session_id,
+            p.error_message,
+            p.virustotal_result,
+            p.vt_last_scanned
         FROM malicious_payloads p
+
         ORDER BY p.timestamp DESC
-        LIMIT ?
+        LIMIT {ph}
     """
 
     c.execute(query, (limit,))
@@ -644,10 +836,10 @@ def list_payloads(limit=50, anon=False, db_path=None):
     table.add_column("Time", style="dim", no_wrap=True)
     table.add_column("Status", justify="center")
     table.add_column("URL", style="blue underline", overflow="fold")
-    table.add_column("MD5 / Error", style="dim", overflow="fold")
+    table.add_column("Score", style="bold")
+    table.add_column("Details", style="dim", overflow="fold")
     table.add_column("Size", justify="right")
     table.add_column("IP", style="magenta")
-    table.add_column("Local File", style="green", overflow="fold")
 
     for r in rows:
         ts = to_local_time(r["timestamp"])
@@ -664,15 +856,70 @@ def list_payloads(limit=50, anon=False, db_path=None):
         elif status == "downloading":
             status_style = "cyan blink"
 
-        # MD5 or Error
+        if not show_all:
+            if status == "failed":
+                continue
+            if r["payload_size"] and r["payload_size"] < 500:
+                continue
+
+        # VirusTotal Info
+        vt_score_str = "-"
         details = r["payload_md5"] or ""
+
+        vt_res = r["virustotal_result"]
+        if vt_res and vt_res.startswith("{"):
+            try:
+                import json
+
+                j = json.loads(vt_res)
+                if "error" in j:
+                    # Handle fallback error JSON from PayloadManager
+                    vt_score_str = "[bold red]Err[/bold red]"
+                    details = f"[red]{j.get('error')}[/red]"
+                else:
+                    stats = j.get("stats")
+                    if stats:
+                        malicious = stats.get("malicious", 0)
+                        tot = sum(stats.values())
+
+                        color = "green"
+                        if malicious > 0:
+                            color = "yellow"
+                        if malicious > 5:
+                            color = "red"
+                        if malicious > 20:
+                            color = "bold red"
+
+                        vt_score_str = f"[{color}]{malicious}/{tot}[/{color}]"
+
+                    tags = j.get("tags", [])
+
+                # Details Priority: Error > Code Insights > Meaningful Name > Threat Label > Tags > MD5
+                m_name = j.get("meaningful_name")
+                code_insights = j.get("code_insights")
+
+                classification = j.get("classification", {})
+                t_label = classification.get("suggested_threat_label")
+
+                if code_insights:
+                    # Truncate insight if too long
+                    if len(code_insights) > 80:
+                        code_insights = code_insights[:77] + "..."
+                    details = f"[bold cyan]{code_insights}[/bold cyan]"
+                elif m_name:
+                    details = f"[bold red]{m_name}[/bold red]"
+                elif t_label:
+                    details = f"[red]{t_label}[/red]"
+                elif tags:
+                    details = f"{', '.join(tags[:3])}"
+
+            except:
+                pass
+        elif vt_res == "skipped_size":
+            vt_score_str = "[dim]Too Small[/dim]"
+
         if r["error_message"]:
             details = f"[red]{r['error_message']}[/red]"
-
-        # File Path (shorten)
-        fpath = r["file_path"] or ""
-        if fpath:
-            fpath = os.path.basename(fpath)  # Just show filename
 
         size_str = "-"
         if r["payload_size"]:
@@ -686,10 +933,10 @@ def list_payloads(limit=50, anon=False, db_path=None):
             ts,
             f"[{status_style}]{status.upper()}[/{status_style}]",
             r["url"],
+            vt_score_str,
             details,
             size_str,
             ip,
-            fpath,
         )
 
     console.print(table)
@@ -734,6 +981,9 @@ def main():
     group.add_argument(
         "--payloads", action="store_true", help="List captured malicious payloads"
     )
+    parser.add_argument(
+        "--all", action="store_true", help="Show all payloads (include failed/small)"
+    )
 
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--no-failed", action="store_true")
@@ -752,6 +1002,13 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Log Database Info
+    try:
+        db = get_db_backend()
+        console.print(f"[bold blue]Database:[/bold blue] {db.get_connection_info()}")
+    except:
+        pass
 
     if args.sessions:
         list_sessions(
@@ -779,7 +1036,10 @@ def main():
     elif args.top_ips:
         list_top_ips(limit=args.limit, anon=args.anon, db_path=args.db)
     elif args.payloads:
-        list_payloads(limit=args.limit, anon=args.anon, db_path=args.db)
+        list_payloads(
+            limit=args.limit, anon=args.anon, db_path=args.db, show_all=args.all
+        )
+
     else:
         if args.ip or args.session_id:
             list_commands(

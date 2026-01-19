@@ -69,6 +69,10 @@ class DoSProtector:
         now = time.time()
         record = self.tracking[ip]
 
+        # 0. Allow Localhost (Safe for tests/admin)
+        if ip in ["127.0.0.1", "::1"]:
+            return True
+
         # 1. Check if Banned
         if record["banned_until"] > now:
             return False
@@ -116,4 +120,15 @@ class DoSProtector:
 
 
 # Global Instance
-dos_protector = DoSProtector()
+# Initialize with config values
+from ssh_honeypot.core.config import config
+
+try:
+    dos_rpm = config.get("throttling", "dos", "rpm") or 12
+    # Ensure sane minimum to prevent self-lockout during config errors
+    if dos_rpm < 1:
+        dos_rpm = 12
+except:
+    dos_rpm = 12
+
+dos_protector = DoSProtector(limit_rpm=dos_rpm)

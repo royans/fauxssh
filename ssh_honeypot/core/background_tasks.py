@@ -58,6 +58,15 @@ def analysis_loop(
     if alert_manager_instance is None:
         alert_manager_instance = AlertManager()
 
+    # Generic Payload Manager for extraction
+    try:
+        from ssh_honeypot.core.payload_manager import PayloadManager
+
+        payload_manager = PayloadManager(db_instance)
+    except ImportError:
+        payload_manager = None
+        log.warning("[Analysis] PayloadManager not available. URL extraction disabled.")
+
     log.info("[Analysis] Starting Threat Analysis Loop...")
     while True:
         try:
@@ -85,6 +94,16 @@ def analysis_loop(
                 session_id = cmd_row["session_id"]
                 ip = cmd_row["remote_ip"]
 
+                # 1. URL Extraction (Real-time)
+                if payload_manager:
+                    try:
+                        urls = payload_manager.extract_urls(cmd_text)
+                        for url in urls:
+                            payload_manager.queue_payload(url, session_id, ip)
+                    except Exception as pe:
+                        log.error(f"[Analysis] Payload Extraction Failed: {pe}")
+
+                # 2. LLM Analysis
                 analysis = results.get(cmd_hash)
 
                 if analysis:
@@ -205,4 +224,23 @@ def payload_download_loop(db_instance):
 
         except Exception as e:
             log.error(f"[PayloadWorker] Error: {e}")
+            time.sleep(60)
+
+
+def payload_analysis_loop(db_instance):
+    """
+    Background thread to analyze downloaded payloads with VirusTotal.
+    """
+    log.info("[Background] Starting Payload Analysis Loop...")
+    # Delayed import to avoid circular dependency
+    from ssh_honeypot.core.payload_manager import PayloadManager
+
+    manager = PayloadManager(db_instance)
+
+    while True:
+        try:
+            manager.process_analysis_queue()
+            time.sleep(15)  # Enforce conservative polling interval
+        except Exception as e:
+            log.error(f"[Background] Error in payload analysis loop: {e}")
             time.sleep(60)

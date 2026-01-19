@@ -64,7 +64,7 @@ class TestMoreHandlers:
         # Mock cache miss for first call
         handler.db.get_cached_response.return_value = None
 
-        cmd = "awk '{print $1}' data.txt"
+        cmd = "awk 'BEGIN { print \"start\" } { print $1 }' data.txt"
         resp, _, _ = handler.handle_awk(cmd, context)
 
         assert "val1" in resp

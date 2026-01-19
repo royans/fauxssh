@@ -97,8 +97,8 @@ def configure_console():
 
 def test_list_all_files(mock_db, capsys):
     """Verify listing all files works."""
-    conn = fs_inspector.get_db_connection(mock_db)
-    fs_inspector.list_user_files(conn)
+    conn, ph = fs_inspector.get_db_connection(mock_db)
+    fs_inspector.list_user_files(conn, ph)
     conn.close()
 
     captured = capsys.readouterr()
@@ -110,8 +110,8 @@ def test_list_all_files(mock_db, capsys):
 
 def test_filter_by_ip(mock_db, capsys):
     """Verify filtering by IP."""
-    conn = fs_inspector.get_db_connection(mock_db)
-    fs_inspector.list_user_files(conn, ip="192.168.1.100")
+    conn, ph = fs_inspector.get_db_connection(mock_db)
+    fs_inspector.list_user_files(conn, ph, ip="192.168.1.100")
     conn.close()
 
     captured = capsys.readouterr()
@@ -121,8 +121,8 @@ def test_filter_by_ip(mock_db, capsys):
 
 def test_filter_by_user(mock_db, capsys):
     """Verify filtering by Username."""
-    conn = fs_inspector.get_db_connection(mock_db)
-    fs_inspector.list_user_files(conn, username="guest")
+    conn, ph = fs_inspector.get_db_connection(mock_db)
+    fs_inspector.list_user_files(conn, ph, username="guest")
     conn.close()
 
     captured = capsys.readouterr()
@@ -132,8 +132,10 @@ def test_filter_by_user(mock_db, capsys):
 
 def test_cat_content(mock_db, capsys):
     """Verify showing file content."""
-    conn = fs_inspector.get_db_connection(mock_db)
-    fs_inspector.show_file_content(conn, "192.168.1.100", "attacker", "/tmp/malware.sh")
+    conn, ph = fs_inspector.get_db_connection(mock_db)
+    fs_inspector.show_file_content(
+        conn, ph, "192.168.1.100", "attacker", "/tmp/malware.sh"
+    )
     conn.close()
 
     captured = capsys.readouterr()
@@ -142,8 +144,10 @@ def test_cat_content(mock_db, capsys):
 
 def test_cat_missing_file(mock_db, capsys):
     """Verify cat on missing file handles gracefully."""
-    conn = fs_inspector.get_db_connection(mock_db)
-    fs_inspector.show_file_content(conn, "192.168.1.100", "attacker", "/tmp/missing")
+    conn, ph = fs_inspector.get_db_connection(mock_db)
+    fs_inspector.show_file_content(
+        conn, ph, "192.168.1.100", "attacker", "/tmp/missing"
+    )
     conn.close()
 
     captured = capsys.readouterr()
@@ -152,8 +156,8 @@ def test_cat_missing_file(mock_db, capsys):
 
 def test_tree_view(mock_db, capsys):
     """Verify tree view output."""
-    conn = fs_inspector.get_db_connection(mock_db)
-    fs_inspector.list_user_files(conn, tree_view=True)
+    conn, ph = fs_inspector.get_db_connection(mock_db)
+    fs_inspector.list_user_files(conn, ph, tree_view=True)
     conn.close()
 
     captured = capsys.readouterr()
@@ -164,10 +168,10 @@ def test_tree_view(mock_db, capsys):
 
 def test_delete_confirmed(mock_db, capsys):
     """Verify deletion works when confirmed."""
-    conn = fs_inspector.get_db_connection(mock_db)
+    conn, ph = fs_inspector.get_db_connection(mock_db)
     # Mocking Confirm.ask inside fs_inspector module
     with patch("tools.analytics.fs_inspector.Confirm.ask", return_value=True):
-        fs_inspector.delete_user_files(conn, ip="192.168.1.100")
+        fs_inspector.delete_user_files(conn, ph, ip="192.168.1.100")
 
     captured = capsys.readouterr()
     assert "Successfully deleted 2 files" in captured.out
@@ -181,9 +185,9 @@ def test_delete_confirmed(mock_db, capsys):
 
 def test_delete_cancelled(mock_db, capsys):
     """Verify deletion aborts when cancelled."""
-    conn = fs_inspector.get_db_connection(mock_db)
+    conn, ph = fs_inspector.get_db_connection(mock_db)
     with patch("tools.analytics.fs_inspector.Confirm.ask", return_value=False):
-        fs_inspector.delete_user_files(conn, ip="192.168.1.100")
+        fs_inspector.delete_user_files(conn, ph, ip="192.168.1.100")
 
     captured = capsys.readouterr()
     assert "Deletion cancelled" in captured.out
@@ -197,8 +201,8 @@ def test_delete_cancelled(mock_db, capsys):
 
 def test_delete_skip_confirm(mock_db, capsys):
     """Verify deletion works with skip_confirm."""
-    conn = fs_inspector.get_db_connection(mock_db)
-    fs_inspector.delete_user_files(conn, ip="192.168.1.100", skip_confirm=True)
+    conn, ph = fs_inspector.get_db_connection(mock_db)
+    fs_inspector.delete_user_files(conn, ph, ip="192.168.1.100", skip_confirm=True)
 
     captured = capsys.readouterr()
     assert "Successfully deleted 2 files" in captured.out
@@ -211,12 +215,16 @@ def test_delete_skip_confirm(mock_db, capsys):
 
 def test_delete_specific_file(mock_db, capsys):
     """Verify deleting a specific file works."""
-    conn = fs_inspector.get_db_connection(mock_db)
+    conn, ph = fs_inspector.get_db_connection(mock_db)
 
     # Target /root/secrets.txt specifically
     with patch("tools.analytics.fs_inspector.Confirm.ask", return_value=True):
         fs_inspector.delete_user_files(
-            conn, ip="192.168.1.100", username="attacker", filepath="/root/secrets.txt"
+            conn,
+            ph,
+            ip="192.168.1.100",
+            username="attacker",
+            filepath="/root/secrets.txt",
         )
 
     captured = capsys.readouterr()

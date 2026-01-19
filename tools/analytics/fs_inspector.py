@@ -5,7 +5,7 @@ import os
 import sys
 import json
 from datetime import datetime
-from dateutil import tz
+from dateutil import tz, parser
 
 from rich.console import Console
 from rich.table import Table
@@ -16,56 +16,98 @@ from rich.prompt import Confirm
 # Helper imports for path resolution (borrowed from analyze.py pattern)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(BASE_DIR))
-sys.path.append(os.path.join(PROJECT_ROOT, "ssh_honeypot"))
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
 
 try:
-    from config_manager import get_data_dir
+    from ssh_honeypot.core.utils import get_data_dir
+    from ssh_honeypot.core.database import get_db_backend
+except ImportError as e:
+    # Fallback
+    import traceback
 
-    DEFAULT_DB_PATH = os.path.join(get_data_dir(), "honeypot.sqlite")
-except ImportError:
+    traceback.print_exc()
+    error_msg = str(e)
     DEFAULT_DB_PATH = os.path.join(PROJECT_ROOT, "data", "honeypot.sqlite")
+
+    def get_db_backend():
+        raise ImportError(f"Core modules not found: {error_msg}")
+
 
 console = Console()
 
 
-def get_db_connection(db_path):
-    if not os.path.exists(db_path):
-        console.print(f"[bold red][!] Database not found at {db_path}[/bold red]")
+def get_db_connection(db_path_override=None):
+    if db_path_override:
+        if not os.path.exists(db_path_override):
+            console.print(
+                f"[bold red][!] Database not found at {db_path_override}[/bold red]"
+            )
+            sys.exit(1)
+        conn = sqlite3.connect(db_path_override)
+        conn.row_factory = sqlite3.Row
+        return conn, "?"
+
+    # Central Config
+    try:
+        db = get_db_backend()
+        conn = db._get_conn()
+        ph = getattr(db, "placeholder", "?")
+
+        # Robustness: Force Row/Cursor Factory based on connection type
+        conn_type = str(type(conn))
+        if "sqlite3" in conn_type:
+            conn.row_factory = sqlite3.Row
+            ph = "?"
+        elif "psycopg2" in conn_type:
+            import psycopg2.extras
+
+            conn.cursor_factory = psycopg2.extras.RealDictCursor
+            ph = "%s"
+
+        return conn, ph
+    except Exception as e:
+        console.print(f"[bold red][!] DB Connection Failed: {e}[/bold red]")
         sys.exit(1)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 
 def to_local_time(ts_str):
     try:
         if not ts_str:
             return "-"
-        dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-        dt = dt.replace(tzinfo=tz.tzutc())
+        if isinstance(ts_str, datetime):
+            dt = ts_str
+        else:
+            # parsing with dateutil is more robust
+            dt = parser.parse(str(ts_str))
+
+        if dt.tzinfo is None:
+            # Assume local system time if naive
+            dt = dt.replace(tzinfo=tz.tzlocal())
+
         local_dt = dt.astimezone(tz.tzlocal())
         return local_dt.strftime("%Y-%m-%d %H:%M:%S")
-    except:
-        return ts_str
+    except Exception as e:
+        return str(ts_str)
 
 
-def list_user_files(conn, ip=None, username=None, tree_view=False):
+def list_user_files(conn, ph, ip=None, username=None, tree_view=False):
     c = conn.cursor()
 
     query = "SELECT * FROM user_filesystem WHERE 1=1"
     params = []
 
     if ip:
-        query += " AND ip = ?"
+        query += f" AND ip = {ph}"
         params.append(ip)
 
     if username:
-        query += " AND username = ?"
+        query += f" AND username = {ph}"
         params.append(username)
 
     query += " ORDER BY ip, username, path"
 
-    c.execute(query, params)
+    c.execute(query, tuple(params))
     rows = c.fetchall()
 
     if not rows:
@@ -92,7 +134,10 @@ def list_user_files(conn, ip=None, username=None, tree_view=False):
                 ftype = "📂" if f["type"] == "directory" else "📄"
                 meta = {}
                 try:
-                    meta = json.loads(f["metadata"])
+                    if isinstance(f["metadata"], dict):
+                        meta = f["metadata"]
+                    else:
+                        meta = json.loads(f["metadata"])
                 except:
                     pass
 
@@ -126,7 +171,9 @@ def list_user_files(conn, ip=None, username=None, tree_view=False):
 
             is_deleted = False
             # Check if column exists (backward compat) but we know it does
-            if "is_deleted" in r.keys() and r["is_deleted"]:
+            # Row supports keys logic
+            keys = r.keys() if hasattr(r, "keys") else []
+            if "is_deleted" in keys and r["is_deleted"]:
                 is_deleted = True
 
             status_val = "DELETED" if is_deleted else "ACTIVE"
@@ -137,7 +184,10 @@ def list_user_files(conn, ip=None, username=None, tree_view=False):
 
             meta = {}
             try:
-                meta = json.loads(r["metadata"])
+                if isinstance(r["metadata"], dict):
+                    meta = r["metadata"]
+                else:
+                    meta = json.loads(r["metadata"])
             except:
                 pass
 
@@ -161,10 +211,10 @@ def list_user_files(conn, ip=None, username=None, tree_view=False):
         console.print(table)
 
 
-def show_file_content(conn, ip, username, path):
+def show_file_content(conn, ph, ip, username, path):
     c = conn.cursor()
     c.execute(
-        "SELECT content, type FROM user_filesystem WHERE ip=? AND username=? AND path=?",
+        f"SELECT content, type FROM user_filesystem WHERE ip={ph} AND username={ph} AND path={ph}",
         (ip, username, path),
     )
     row = c.fetchone()
@@ -181,11 +231,20 @@ def show_file_content(conn, ip, username, path):
     if content is None:
         console.print("[dim](Empty content)[/dim]")
     else:
+        # Handle bytes content if Postgres returns memoryview or bytes?
+        if isinstance(content, memoryview) or isinstance(content, bytes):
+            try:
+                content = content.decode("utf-8")
+            except:
+                content = str(content)
+
         console.print(f"[bold]Content of {path}:[/bold]")
         console.print(content)
 
 
-def delete_user_files(conn, ip=None, username=None, filepath=None, skip_confirm=False):
+def delete_user_files(
+    conn, ph, ip=None, username=None, filepath=None, skip_confirm=False
+):
     c = conn.cursor()
 
     # 1. Fetch Candidates
@@ -193,18 +252,18 @@ def delete_user_files(conn, ip=None, username=None, filepath=None, skip_confirm=
     params = []
 
     if ip:
-        query += " AND ip = ?"
+        query += f" AND ip = {ph}"
         params.append(ip)
 
     if username:
-        query += " AND username = ?"
+        query += f" AND username = {ph}"
         params.append(username)
 
     if filepath:
-        query += " AND path = ?"
+        query += f" AND path = {ph}"
         params.append(filepath)
 
-    c.execute(query, params)
+    c.execute(query, tuple(params))
     rows = c.fetchall()
 
     if not rows:
@@ -233,14 +292,14 @@ def delete_user_files(conn, ip=None, username=None, filepath=None, skip_confirm=
     # 3. Execute
     del_query = "DELETE FROM user_filesystem WHERE 1=1"
     if ip:
-        del_query += " AND ip = ?"
+        del_query += f" AND ip = {ph}"
     if username:
-        del_query += " AND username = ?"
+        del_query += f" AND username = {ph}"
     if filepath:
-        del_query += " AND path = ?"
+        del_query += f" AND path = {ph}"
 
     try:
-        c.execute(del_query, params)
+        c.execute(del_query, tuple(params))
         conn.commit()
         console.print(f"[green]Successfully deleted {c.rowcount} files.[/green]")
     except Exception as e:
@@ -249,7 +308,7 @@ def delete_user_files(conn, ip=None, username=None, filepath=None, skip_confirm=
 
 def main():
     parser = argparse.ArgumentParser(description="FauxSSH Filesystem Inspector")
-    parser.add_argument("--db", help="Path to SQLite database", default=DEFAULT_DB_PATH)
+    parser.add_argument("--db", help="Path to SQLite database (Optional override)")
     parser.add_argument("--ip", help="Filter by IP address")
     parser.add_argument("--user", help="Filter by Username")
     parser.add_argument(
@@ -266,7 +325,7 @@ def main():
 
     args = parser.parse_args()
 
-    conn = get_db_connection(args.db)
+    conn, ph = get_db_connection(args.db)
 
     try:
         # Handle Aliases
@@ -287,6 +346,7 @@ def main():
 
             delete_user_files(
                 conn,
+                ph,
                 ip=args.ip,
                 username=args.user,
                 filepath=target_file,
@@ -300,11 +360,13 @@ def main():
                     "[red]Error: --cat/--file requires --ip and --user to uniquely identify the file.[/red]"
                 )
                 sys.exit(1)
-            show_file_content(conn, args.ip, args.user, target_file)
+            show_file_content(conn, ph, args.ip, args.user, target_file)
 
         else:
             # List Mode
-            list_user_files(conn, ip=args.ip, username=args.user, tree_view=args.tree)
+            list_user_files(
+                conn, ph, ip=args.ip, username=args.user, tree_view=args.tree
+            )
 
     finally:
         conn.close()

@@ -30,6 +30,12 @@ access_control:
   quotas:
       max_upload_mb: 100
 
+http:
+  server_header: "nginx/1.22.1"
+  headers:
+    X-Content-Type-Options: "nosniff"
+    Server: "nginx/1.22.1"
+
 filesystem:
   user_home_mapping: true
   default_home_owner: true

@@ -7,26 +7,35 @@ import time
 from datetime import datetime, timedelta
 
 # Find DB path relative to this script
-# Find DB path relative to this script
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(BASE_DIR))
-sys.path.append(os.path.join(PROJECT_ROOT, "ssh_honeypot"))
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
 
 
 try:
-    from config_manager import get_data_dir, get_ignored_ips
+    from ssh_honeypot.core.utils import get_data_dir, get_ignored_ips
 
-    DB_PATH = os.path.join(get_data_dir(), "honeypot.sqlite")
-except ImportError:
-    DB_PATH = os.path.join(PROJECT_ROOT, "data", "honeypot.sqlite")
+    # New centralized backend
+    from ssh_honeypot.core.database import get_db_backend
+except ImportError as e:
+    # Fallback only for testing/dev environments not set up correctly
+    import traceback
+
+    traceback.print_exc()
+    error_msg = str(e)
+
+    def get_ignored_ips():
+        return []
+
+    def get_db_backend():
+        raise ImportError(f"Failed to import core modules: {error_msg}")
 
 
 def anonymize_ip(ip):
     if not ip:
         return "unknown"
     if ":" in ip:
-        # IPv6: Truncate to first 4 segments? Or just generic mask.
-        # Simple approach: keep first 3 words if possible, or just masked
         return "xxxx:xxxx:xxxx:xxxx::200"
     parts = ip.split(".")
     if len(parts) == 4:
@@ -35,16 +44,24 @@ def anonymize_ip(ip):
 
 
 def get_db():
-    if not os.path.exists(DB_PATH):
-        print(f"Error: Database not found at {DB_PATH}", file=sys.stderr)
+    try:
+        db = get_db_backend()
+        conn = db._get_conn()
+        ph = getattr(db, "placeholder", "?")
+
+        if ph == "%s":  # Postgres
+            import psycopg2.extras
+
+            conn.cursor_factory = psycopg2.extras.RealDictCursor
+
+        return conn, ph
+    except Exception as e:
+        print(f"Error connecting to DB: {e}", file=sys.stderr)
         sys.exit(1)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 
 def generate_report():
-    conn = get_db()
+    conn, ph = get_db()
     cursor = conn.cursor()
 
     report = {"generated_at": datetime.now().isoformat(), "status": {}, "activity": {}}
@@ -61,43 +78,55 @@ def generate_report():
         params = []
 
         if ignored:
-            placeholders = ",".join(["?"] * len(ignored))
+            placeholders = ",".join([ph] * len(ignored))
             sess_filter = f" AND remote_ip NOT IN ({placeholders})"
             auth_filter = f" AND client_ip NOT IN ({placeholders})"
             params = ignored
 
         # 1. General Stats
         cursor.execute(
-            f"SELECT COUNT(*) FROM sessions WHERE username != 'royans'{sess_filter}",
+            f"SELECT COUNT(*) as count FROM sessions WHERE username != 'royans'{sess_filter}",
             params,
         )
-        total_sessions = cursor.fetchone()[0]
+        row = cursor.fetchone()
+        if hasattr(row, "keys"):  # Dict-like (RealDictCursor or Row)
+            total_sessions = row["count"] if "count" in row else list(row.values())[0]
+        else:
+            total_sessions = row[0]
 
         cursor.execute(
             f"""
-            SELECT COUNT(*) FROM interactions i
+            SELECT COUNT(*) as count FROM interactions i
             JOIN sessions s ON i.session_id = s.session_id
             WHERE s.username != 'royans' {sess_filter.replace('remote_ip', 's.remote_ip')}
         """,
             params,
         )
-        total_commands = cursor.fetchone()[0]
+        row = cursor.fetchone()
+        if hasattr(row, "keys"):
+            total_commands = row["count"] if "count" in row else list(row.values())[0]
+        else:
+            total_commands = row[0]
 
         cursor.execute(
-            f"SELECT MIN(start_time) FROM sessions WHERE username != 'royans'{sess_filter}",
+            f"SELECT MIN(start_time) as first_seen FROM sessions WHERE username != 'royans'{sess_filter}",
             params,
         )
-        row_min = cursor.fetchone()  # returns (None,) if no sessions
-        first_seen = row_min[0] if row_min else None
+        row_min = cursor.fetchone()
+        if hasattr(row_min, "keys"):
+            first_seen = row_min["first_seen"]
+        elif row_min:
+            first_seen = row_min[0]
+        else:
+            first_seen = None
 
         report["status"] = {
             "total_sessions": total_sessions,
             "total_commands": total_commands,
-            "tracking_since": first_seen,
+            "tracking_since": str(first_seen) if first_seen else None,
         }
 
         # 2. Top Requesters (IPs)
-        # We look at sessions for unique IPs
         cursor.execute(
             f"""
             SELECT remote_ip, COUNT(*) as count 
@@ -165,7 +194,11 @@ def generate_report():
         )
         top_clients = []
         for row in cursor.fetchall():
-            top_clients.append({"client": row["client_version"], "count": row["count"]})
+            client = row["client_version"]
+            # Handle potential None or missing keys if row isn't standard
+            if not client and hasattr(row, "keys") and "client_version" not in row:
+                client = list(row.values())[0]  # Fallback
+            top_clients.append({"client": client, "count": row["count"]})
         report["activity"]["top_clients"] = top_clients
 
         # 6. Recent Sessions
@@ -181,9 +214,13 @@ def generate_report():
         )
         recent_sessions = []
         for row in cursor.fetchall():
+            start_t = row["start_time"]
+            if isinstance(start_t, datetime):
+                start_t = start_t.isoformat()
+
             recent_sessions.append(
                 {
-                    "time": row["start_time"],
+                    "time": start_t,
                     "ip": anonymize_ip(row["remote_ip"]),
                     "user": row["username"],
                     "client": row["client_version"],
@@ -191,7 +228,7 @@ def generate_report():
             )
         report["activity"]["recent_sessions"] = recent_sessions
 
-        # 7. Threat Stats [NEW]
+        # 7. Threat Stats
         report["threat_stats"] = {}
 
         # 7a. Activity Type Distribution
@@ -214,7 +251,8 @@ def generate_report():
             SELECT command_text, risk_score, activity_type, COUNT(*) as count
             FROM command_analysis
             WHERE risk_score >= 7
-            GROUP BY command_text
+            GROUP BY command_text, risk_score, activity_type
+            -- Group By updated for Postgres strictness
             ORDER BY risk_score DESC, count DESC
             LIMIT 5
         """
@@ -235,7 +273,9 @@ def generate_report():
     finally:
         conn.close()
 
-    print(json.dumps(report, indent=2))
+    print(
+        json.dumps(report, indent=2, default=str)
+    )  # default=str handles datetime serialization
 
 
 if __name__ == "__main__":

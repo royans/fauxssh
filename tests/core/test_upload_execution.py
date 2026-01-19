@@ -61,7 +61,14 @@ class TestExecSim(unittest.TestCase):
             cls.server_thread = threading.Thread(target=server_main, args=([],))
             cls.server_thread.daemon = True
             cls.server_thread.start()
-            time.sleep(2)
+            # Wait for startup (increased timeout for background startup tasks)
+            start = time.time()
+            while time.time() - start < 30:
+                if is_server_running(TEST_PORT):
+                    break
+                time.sleep(0.5)
+            else:
+                raise RuntimeError("Server failed to start")
 
     @classmethod
     def tearDownClass(cls):

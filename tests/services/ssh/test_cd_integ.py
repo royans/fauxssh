@@ -62,7 +62,7 @@ class TestCDIntegreation(unittest.TestCase):
 
             # Wait for startup
             start = time.time()
-            while time.time() - start < 10:
+            while time.time() - start < 20:
                 if is_server_running(TEST_PORT):
                     break
                 time.sleep(0.2)

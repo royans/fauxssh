@@ -22,6 +22,15 @@ def db():
         pass
 
 
+@pytest.fixture(autouse=True)
+def clean_env():
+    # Ensure FAUXSSH_TEST_MODE is filtered out for these tests
+    with patch.dict(os.environ, {}, clear=False):
+        if "FAUXSSH_TEST_MODE" in os.environ:
+            del os.environ["FAUXSSH_TEST_MODE"]
+        yield
+
+
 def test_anti_harvesting_ip_isolation():
     """
     Verifies that anti-harvesting rules for one IP do not affect another IP.

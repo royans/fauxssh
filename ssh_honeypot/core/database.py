@@ -14,16 +14,30 @@ except ImportError:
     from ssh_honeypot.core.logging_setup import log
     from config_manager import get_data_dir
 
+try:
+    from .cache import cache
+except ImportError:
+    from ssh_honeypot.core.cache import cache
+except:
+    cache = None  # Fallback
+
+
 # Use centralized data directory
 DB_PATH = os.path.join(get_data_dir(), "honeypot.sqlite")
 
 
-class HoneyDB(DatabaseBackend):
+class SQLiteBackend(DatabaseBackend):
     def __init__(self, db_path=DB_PATH):
         self.db_path = db_path
+        self.placeholder = "?"
         self._init_db()
         self.skeleton_cache = []
         self._load_skeleton()
+
+    def _get_conn(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
 
     def _load_skeleton(self):
         try:
@@ -41,6 +55,9 @@ class HoneyDB(DatabaseBackend):
                 self.skeleton_cache = get_skeleton_data()
             except:
                 log.warning("[!] Failed to load skeleton data")
+
+    def get_connection_info(self):
+        return f"SQLite Backend (Path: {self.db_path})"
 
     def _init_db(self):
         # Directory creation handled by get_data_dir()
@@ -83,6 +100,11 @@ class HoneyDB(DatabaseBackend):
 
         try:
             c.execute("ALTER TABLE sessions ADD COLUMN risk_score INTEGER")
+        except sqlite3.OperationalError:
+            pass  # Already exists
+
+        try:
+            c.execute("ALTER TABLE sessions ADD COLUMN protocol TEXT DEFAULT 'ssh'")
         except sqlite3.OperationalError:
             pass  # Already exists
 
@@ -345,7 +367,11 @@ class HoneyDB(DatabaseBackend):
             payload_size INTEGER,
             file_path TEXT,
             retry_count INTEGER DEFAULT 0,
-            error_message TEXT
+
+            error_message TEXT,
+            virustotal_result TEXT,
+            vt_last_scanned DATETIME,
+            vt_scan_id TEXT
         )"""
         )
         c.execute(
@@ -354,6 +380,23 @@ class HoneyDB(DatabaseBackend):
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_payload_md5 ON malicious_payloads(payload_md5)"
         )
+
+        try:
+            c.execute(
+                "ALTER TABLE malicious_payloads ADD COLUMN virustotal_result TEXT"
+            )
+        except:
+            pass
+        try:
+            c.execute(
+                "ALTER TABLE malicious_payloads ADD COLUMN vt_last_scanned DATETIME"
+            )
+        except:
+            pass
+        try:
+            c.execute("ALTER TABLE malicious_payloads ADD COLUMN vt_scan_id TEXT")
+        except:
+            pass
 
         conn.commit()
         conn.close()
@@ -430,30 +473,86 @@ class HoneyDB(DatabaseBackend):
         client_version,
         fingerprint=None,
         protocol="ssh",
+        start_time=None,
     ):
+        """Log the start of a new SSH session."""
         conn = self._get_conn()
         try:
-            fp_json = "{}"
-            if fingerprint:
-                fp_json = json.dumps(fingerprint)
+            # Serialize Fingerprint
+            fp_json = json.dumps(fingerprint) if fingerprint else None
 
-            conn.execute(
-                "INSERT OR IGNORE INTO sessions (session_id, remote_ip, username, password, client_version, fingerprint, protocol) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (session_id, ip, username, password, client_version, fp_json, protocol),
-            )
+            if start_time:
+                conn.execute(
+                    """INSERT INTO sessions
+                    (session_id, remote_ip, username, password, client_version, fingerprint, protocol, start_time)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_id,
+                        ip,
+                        username,
+                        password,
+                        client_version,
+                        fp_json,
+                        protocol,
+                        start_time,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO sessions
+                    (session_id, remote_ip, username, password, client_version, fingerprint, protocol)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_id,
+                        ip,
+                        username,
+                        password,
+                        client_version,
+                        fp_json,
+                        protocol,
+                    ),
+                )
             conn.commit()
 
-            # Log IP Visit for Intelligence
-            self.log_ip_visit(ip)
+            # Record IP Visit for LLM Rate Limiting / Intelligence
+            # (Optional, but good for tracking)
+            self.log_ip_visit(ip)  # Keep original log_ip_visit call
 
+        except sqlite3.IntegrityError:
+            log.warning(f"Session {session_id} already exists (Duplicate).")
         except Exception as e:
-            log.error(f"[!] DB Error start_session (Protocol: {protocol}): {e}")
+            log.error(f"Error start_session: {e}")
         finally:
             conn.close()
 
     def end_session(self, session_id):
         conn = self._get_conn()
         try:
+            # Check if we should log empty sessions
+            log_empty = (
+                str(os.getenv("FAUXSSH_LOG_EMPTY_SESSIONS", "false")).lower() == "true"
+            )
+
+            if not log_empty:
+                # Check interaction count
+                c = conn.cursor()
+                c.execute(
+                    "SELECT COUNT(*) FROM interactions WHERE session_id = ?",
+                    (session_id,),
+                )
+                count = c.fetchone()[0]
+
+                if count == 0:
+                    # Delete session entirely
+                    c.execute(
+                        "DELETE FROM sessions WHERE session_id = ?", (session_id,)
+                    )
+                    log.debug(
+                        f"[DB] Deleted empty session {session_id} (No interactions)"
+                    )
+                    conn.commit()
+                    return
+
             conn.execute(
                 "UPDATE sessions SET end_time = CURRENT_TIMESTAMP WHERE session_id = ?",
                 (session_id,),
@@ -543,47 +642,30 @@ class HoneyDB(DatabaseBackend):
         finally:
             conn.close()
 
-        # Update JSON Log
+        # Unified Logging Consolidation (Jan 16)
+        # Instead of writing to a separate ad-hoc file, we route this through the EventLogger
         try:
-            timestamp = time.time()
-            user = "unknown"
-            ip = "unknown"
-            try:
-                conn = self._get_conn()
-                c = conn.cursor()
-                c.execute(
-                    "SELECT username, remote_ip FROM sessions WHERE session_id = ?",
-                    (session_id,),
-                )
-                row = c.fetchone()
-                if row:
-                    user = row[0]
-                    ip = row[1]
-                conn.close()
-            except:
-                pass
+            from .event_logger import EventLogger
 
-            log_entry = {
-                "timestamp": timestamp,
-                "session_id": session_id,
-                "ip": ip,
-                "user": user,
-                "cwd": cwd,
-                "command": command,
-                "response_len": len(response),
-                "source": source,
-                "cached": was_cached,
-                "response_time_ms": duration_ms,
-                "request_md5": request_md5,
-            }
-
-            log_file = self.db_path.replace(".sqlite", ".json.log")
-            with open(log_file, "a") as f:
-                f.write(json.dumps(log_entry) + "\n")
+            # Reconstruct legacy fields for backward compat in the data block
+            # But mostly we want the standardized 'interaction' event
+            EventLogger().log_interaction(
+                session_id=session_id,
+                ip=ip if "ip" in locals() else "unknown",
+                input_cmd=command,
+                output_content=response,
+                protocol="ssh",  # We assume SSH here, maybe pass it in if available
+                analysis={"cached": was_cached, "response_time_ms": duration_ms},
+            )
         except Exception as e:
-            log.error(f"Error writing to JSON log: {e}")
+            log.error(f"Error logging to Unified EventLogger: {e}")
 
     def get_cached_response(self, command, cwd):
+        if cache:
+            val = cache.get_content(command, cwd)
+            if val is not None:
+                return val
+
         h = hashlib.sha256(f"{cwd}:{command}".encode()).hexdigest()
         conn = self._get_conn()
         c = conn.cursor()
@@ -605,6 +687,32 @@ class HoneyDB(DatabaseBackend):
 
         conn.close()
         return result
+
+    def save_command_analysis(
+        self, command_hash, command_text, activity_type, stage, risk_score, explanation
+    ):
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO command_analysis 
+                (command_hash, command_text, activity_type, stage, risk_score, explanation)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    command_hash,
+                    command_text,
+                    activity_type,
+                    stage,
+                    risk_score,
+                    explanation,
+                ),
+            )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[DB] Error saving command analysis: {e}")
+        finally:
+            conn.close()
 
     def list_fs_dir(self, parent_path):
         conn = self._get_conn()
@@ -726,11 +834,15 @@ class HoneyDB(DatabaseBackend):
         finally:
             conn.close()
 
-    def check_llm_rate_limit(self, ip, rpm_limit, rpd_limit):
+    def check_llm_rate_limit(self, ip, rpm_limit, rph_limit, rpd_limit):
         """
-        Checks if IP has exceeded RPM or RPD limits.
+        Checks if IP has exceeded RPM, RPH, or RPD limits.
         Returns (allowed: bool, reason: str)
         """
+        # 0. Check Cache First
+        if cache and cache.is_blocked(ip, "llm"):
+            return False, "Rate Limit Exceeded (Cached)"
+
         conn = self._get_conn()
         try:
             c = conn.cursor()
@@ -743,7 +855,20 @@ class HoneyDB(DatabaseBackend):
             )
             rpm_count = c.fetchone()[0]
             if rpm_count >= rpm_limit:
+                if cache:
+                    cache.set_block(ip, "llm", ttl=60)
                 return False, f"RPM Limit Exceeded ({rpm_count}/{rpm_limit})"
+
+            # Check RPH (Last 1 hour)
+            c.execute(
+                "SELECT COUNT(*) FROM llm_usage WHERE ip = ? AND timestamp > datetime('now', '-1 hour')",
+                (ip,),
+            )
+            rph_count = c.fetchone()[0]
+            if rph_count >= rph_limit:
+                if cache:
+                    cache.set_block(ip, "llm", ttl=3600)
+                return False, f"RPH Limit Exceeded ({rph_count}/{rph_limit})"
 
             # Check RPD (Last 24 hours)
             c.execute(
@@ -752,6 +877,8 @@ class HoneyDB(DatabaseBackend):
             )
             rpd_count = c.fetchone()[0]
             if rpd_count >= rpd_limit:
+                if cache:
+                    cache.set_block(ip, "llm", ttl=86400)
                 return False, f"RPD Limit Exceeded ({rpd_count}/{rpd_limit})"
 
             return True, "OK"
@@ -996,6 +1123,9 @@ class HoneyDB(DatabaseBackend):
         return False
 
     def cache_response(self, command, cwd, response):
+        if cache:
+            cache.set_content(command, cwd, response)
+
         h = hashlib.sha256(f"{cwd}:{command}".encode()).hexdigest()
         conn = self._get_conn()
         conn.execute(
@@ -1024,6 +1154,113 @@ class HoneyDB(DatabaseBackend):
                 pass
 
         return total_size
+
+    def cleanup_http_cache(self, web_root="/var/www/html"):
+        """
+        Removes cached HTTP responses for files that exist on the local filesystem (VFS).
+        This is typically run at startup to ensure local files override cached hallucinations.
+
+        Args:
+            web_root: The root directory to scan in the VFS (Global/User layers).
+        """
+        conn = self._get_conn()
+        deleted_count = 0
+        try:
+            c = conn.cursor()
+
+            # 1. Find all files in Global/User FS that look like web content
+            # We check Global Filesystem mostly, as User FS is session specific,
+            # but HTTP cache is currently global (HTTP_ROOT).
+            # So we scan global_filesystem for overrides.
+
+            # Note: We prioritize Global Filesystem (Persona) files.
+            # Ideally we'd scan user_fs too if we had per-user cache,
+            # but current cache key is just "HTTP <METHOD> <PATH>" + "HTTP_ROOT" cwd.
+
+            # Get list of files in VFS under web_root
+            # Using LIKE for prefix match
+            c.execute(
+                "SELECT path FROM global_filesystem WHERE path LIKE ? AND type='file'",
+                (f"{web_root}%",),
+            )
+            rows = c.fetchall()
+
+            for (path,) in rows:
+                # /var/www/html/index.html -> /index.html
+                if path.startswith(web_root):
+                    rel_path = path[len(web_root) :]
+                    if not rel_path.startswith("/"):
+                        rel_path = "/" + rel_path
+
+                    # Construct keys to invalidate
+                    # 1. Exact match (GET/POST/HEAD)
+                    # We use LIKE to match all methods: "HTTP % {rel_path}"
+                    # But cache key might have extra args for POST.
+                    # "HTTP % {rel_path}%"
+
+                    pattern = f"HTTP % {rel_path}%"
+                    c.execute(
+                        "DELETE FROM command_cache WHERE command LIKE ? AND cwd='HTTP_ROOT'",
+                        (pattern,),
+                    )
+                    deleted_count += c.rowcount
+
+                    # 2. Index Logic
+                    # If file is index.html/php/htm, also invalidate directory root
+                    # e.g. /index.html -> /
+                    filename = os.path.basename(rel_path)
+                    if filename.lower() in ["index.html", "index.php", "index.htm"]:
+                        dir_path = os.path.dirname(rel_path)
+                        # Ensure dir_path ends with / or matches exactly?
+                        # Cache key for root is usually "HTTP GET /"
+                        # If dir_path is "/", pattern is "HTTP % /%"
+
+                        # Handle Root specially
+                        if dir_path == "/":
+                            # Matches "HTTP GET /" and "HTTP GET / extra"
+                            # But be careful not to match "/other"
+                            # So we match "HTTP % /" exactly OR "HTTP % / %" (with body hash)
+                            c.execute(
+                                "DELETE FROM command_cache WHERE command LIKE 'HTTP % /' AND cwd='HTTP_ROOT'"
+                            )
+                            deleted_count += c.rowcount
+                            c.execute(
+                                "DELETE FROM command_cache WHERE command LIKE 'HTTP % / %' AND cwd='HTTP_ROOT'"
+                            )
+                            deleted_count += c.rowcount
+                        else:
+                            # For subdir /foo/index.html -> /foo/
+                            # Remove trailing slash for uniformity in basic requests?
+                            # Servers usually redirect /foo -> /foo/
+                            # Let's clean both "/foo" and "/foo/"
+
+                            # Clean "/foo"
+                            p1 = f"HTTP % {dir_path}"
+                            c.execute(
+                                "DELETE FROM command_cache WHERE command LIKE ? AND cwd='HTTP_ROOT'",
+                                (p1,),
+                            )
+                            deleted_count += c.rowcount
+
+                            # Clean "/foo/"
+                            if not dir_path.endswith("/"):
+                                p2 = f"HTTP % {dir_path}/"
+                                c.execute(
+                                    "DELETE FROM command_cache WHERE command LIKE ? AND cwd='HTTP_ROOT'",
+                                    (p2,),
+                                )
+                                deleted_count += c.rowcount
+
+            if deleted_count > 0:
+                conn.commit()
+                log.info(
+                    f"[HTTP] Startup Cache Cleanup: Invalidated {deleted_count} entries shadowing local files."
+                )
+
+        except Exception as e:
+            log.error(f"[DB] Error cleaning HTTP cache: {e}")
+        finally:
+            conn.close()
 
     def prune_uploads(self, days=30):
         cutoff_time = datetime.datetime.now() - datetime.timedelta(days=days)
@@ -1393,7 +1630,54 @@ class HoneyDB(DatabaseBackend):
 
         except Exception as e:
             log.error(f"[!] Anti-Harvesting Check Error: {e}")
-            return True, None  # Fail open
+            return True, None
+
+    def check_root_desperation(self, ip):
+        """
+        Checks for 'Root Desperation' scenario (SSH ONLY).
+        Returns:
+            - 'BLOCK': If IP has successful non-root login (SSH).
+            - 'ALLOW': If IP has exactly 2 failed root attempts (SSH) and no successes.
+            - 'NORMAL': Otherwise.
+        """
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+
+            # Check for ANY successful non-root login via SSH
+            # We treat any success as "competence" or "intent" that disqualifies desperation
+            c.execute(
+                "SELECT count(*) FROM auth_events WHERE client_ip = ? AND success = 1 AND username != 'root' AND protocol = 'ssh'",
+                (ip,),
+            )
+            if c.fetchone()[0] > 0:
+                return "BLOCK"
+
+            # Check for failed root attempts via SSH
+            # We want to enable on the 3rd attempt, so we look for exactly 2 failures
+            c.execute(
+                "SELECT count(*) FROM auth_events WHERE client_ip = ? AND username = 'root' AND success = 0 AND protocol = 'ssh'",
+                (ip,),
+            )
+            failures = c.fetchone()[0]
+
+            # Also ensure no root successes yet? (Implicitly covered by logic, but good safeguards)
+            c.execute(
+                "SELECT count(*) FROM auth_events WHERE client_ip = ? AND username = 'root' AND success = 1 AND protocol = 'ssh'",
+                (ip,),
+            )
+            root_successes = c.fetchone()[0]
+
+            if failures == 2 and root_successes == 0:
+                return "ALLOW"
+
+            return "NORMAL"
+
+        except Exception as e:
+            log.error(f"[DB] Desperation Check Error: {e}")
+            return "NORMAL"
+        finally:
+            conn.close()  # Fail open
 
     def get_recent_sessions(self, limit=20, protocol=None):
         """
@@ -1567,14 +1851,22 @@ class HoneyDB(DatabaseBackend):
         if not path or path == "/" or path == ".":
             return
 
-        # Check if exists
+        # Check if exists and status
         c = conn.cursor()
         c.execute(
-            "SELECT 1 FROM user_filesystem WHERE ip=? AND username=? AND path=?",
+            "SELECT is_deleted FROM user_filesystem WHERE ip=? AND username=? AND path=?",
             (ip, username, path),
         )
-        if c.fetchone():
-            return  # Exists
+        row = c.fetchone()
+        if row:
+            if row[0]:  # is_deleted == 1
+                # Revive it
+                c.execute(
+                    "UPDATE user_filesystem SET is_deleted=0 WHERE ip=? AND username=? AND path=?",
+                    (ip, username, path),
+                )
+                conn.commit()
+            return  # Exists (now active)
 
         # Does not exist, create it
         parent_path = os.path.dirname(path)
@@ -1773,6 +2065,9 @@ class HoneyDB(DatabaseBackend):
         Debug method to list all potential files in a directory from all layers.
         """
         report = []
+        if not directory:
+            directory = "/"
+
         report.append(f"--- VFS Directory Inspection for '{directory}' ---")
 
         # 1. User Local Files
@@ -1997,3 +2292,163 @@ class HoneyDB(DatabaseBackend):
             log.info("[HoneyDB] Cache and Session Data Cleared.")
         except Exception as e:
             log.error(f"[HoneyDB] Failed to clear cache: {e}")
+
+    def get_session(self, session_id):
+        """
+        Retrieves full session info as a dict.
+        """
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,))
+            row = c.fetchone()
+            if row:
+                columns = [col[0] for col in c.description]
+                return dict(zip(columns, row))
+            return None
+        finally:
+            conn.close()
+
+    def get_session_protocol(self, session_id):
+        """
+        Retrieves the protocol for a given session.
+        Returns: str (e.g., 'ssh', 'http') or 'unknown'
+        """
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            c.execute(
+                "SELECT protocol FROM sessions WHERE session_id = ?",
+                (session_id,),
+            )
+            row = c.fetchone()
+            if row:
+                return row[0]
+            return "unknown"
+        except Exception as e:
+            log.error(f"[DB] Error getting session protocol: {e}")
+            return "unknown"
+        finally:
+            conn.close()
+
+    def get_next_payload_for_analysis(self):
+        """Fetch one payload that hasn't been scanned by VT yet."""
+        conn = self._get_conn()
+
+        # We assume 'virustotal_result' is NULL for unanalyzed.
+        # Also ensure status is 'completed' (we have the file).
+        try:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT * FROM malicious_payloads 
+                WHERE status = 'completed' 
+                AND virustotal_result IS NULL
+                ORDER BY timestamp ASC
+                LIMIT 1
+             """
+            )
+            row = c.fetchone()
+            if row:
+                return dict(row)
+            return None
+        finally:
+            conn.close()
+
+    def update_payload_vt_status(self, payload_id, result, scan_id=None):
+        conn = self._get_conn()
+        try:
+            timestamp = datetime.datetime.now().isoformat()
+            if scan_id:
+                conn.execute(
+                    "UPDATE malicious_payloads SET virustotal_result = ?, vt_last_scanned = ?, vt_scan_id = ? WHERE id = ?",
+                    (result, timestamp, scan_id, payload_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE malicious_payloads SET virustotal_result = ?, vt_last_scanned = ? WHERE id = ?",
+                    (result, timestamp, payload_id),
+                )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[DB] Error updating VT status: {e}")
+        finally:
+            conn.close()
+
+    def iter_interactions(self, batch_size=1000):
+        """
+        Yields all interactions as dictionaries.
+        Useful for exporting data.
+        """
+        conn = self._get_conn()
+        try:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM interactions ORDER BY timestamp ASC")
+            while True:
+                rows = cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                for row in rows:
+                    yield dict(row)
+        except Exception as e:
+            log.error(f"[DB] Error iterating interactions: {e}")
+        finally:
+            conn.close()
+
+    def purge_poisoned_cache(self):
+        """Purges cached responses containing AI Core error messages."""
+        conn = self._get_conn()
+        try:
+            # Clear from command_cache
+            conn.execute(
+                "DELETE FROM command_cache WHERE response LIKE '%AI Core Offline%'"
+            )
+            # Clear from interactions
+            conn.execute(
+                "DELETE FROM interactions WHERE response LIKE '%AI Core Offline%'"
+            )
+            conn.commit()
+            log.info("[SQLite] Purged poisoned cache entries.")
+        except Exception as e:
+            log.error(f"[SQLite] Error purging cache: {e}")
+        finally:
+            conn.close()
+
+
+# Backward Compatibility
+class HoneyDB(SQLiteBackend):
+    pass
+
+
+# Factory
+_DB_INSTANCE = None
+
+
+def get_db_backend():
+    global _DB_INSTANCE
+    if _DB_INSTANCE is not None:
+        return _DB_INSTANCE
+
+    # Avoid circular imports if possible, but standard import here is fine
+    from ssh_honeypot.core.config import config
+
+    db_type = config.get("database", "type")
+    if not db_type:
+        db_type = "sqlite"
+
+    if db_type == "postgres":
+        try:
+            from .db_postgres import PostgresBackend
+
+            pg_config = config.get("database", "postgres") or {}
+            _DB_INSTANCE = PostgresBackend(pg_config)
+            return _DB_INSTANCE
+        except ImportError as e:
+            # Fallback or error? For now error is better so user knows configs are wrong
+            log.error(f"Failed to import PostgresBackend: {e}")
+            raise e
+
+    _DB_INSTANCE = SQLiteBackend()
+    return _DB_INSTANCE

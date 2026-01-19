@@ -190,6 +190,102 @@ if [ ! -f ".env" ]; then
     fi
 fi
 
+# 5.5 Gemini Setup
+echo ""
+log_info "Configuring AI Features..."
+
+# Check if key is already set
+CURRENT_KEY=$(grep "^GOOGLE_API_KEY=" .env 2>/dev/null | cut -d '=' -f2)
+# Remove potential quotes
+CURRENT_KEY=$(echo "$CURRENT_KEY" | tr -d '"' | tr -d "'")
+
+if [ -z "$CURRENT_KEY" ] || [ "$CURRENT_KEY" = "your_key_here" ]; then
+    echo "  FauxSSH uses Google Gemini for dynamic persona generation and chat."
+    echo "  (Get a key for free at https://aistudio.google.com/)"
+    echo ""
+    read -p "  Enter your Gemini API Key (or press Enter to skip): " USER_KEY
+    
+    if [ -n "$USER_KEY" ]; then
+        log_info "Validating API Key..."
+        
+        # Validation Script
+        VALIDATOR_SCRIPT=$(cat <<EOF
+import sys
+import google.generativeai as genai
+try:
+    genai.configure(api_key=sys.argv[1])
+    model = genai.GenerativeModel('gemini-pro')
+    r = model.generate_content('test', generation_config={'max_output_tokens': 1})
+    print("OK")
+except Exception as e:
+    print(f"FAIL: {e}")
+    sys.exit(1)
+EOF
+)
+        VALIDATION_OUT=$(./venv/bin/python3 -c "$VALIDATOR_SCRIPT" "$USER_KEY" 2>&1)
+        
+        if [[ "$VALIDATION_OUT" == *"OK"* ]]; then
+             log_ok "API Key is valid."
+             
+             # Save to .env
+             if grep -q "GOOGLE_API_KEY=" .env; then
+                 # Use python to replace to avoid sed escaping issues with special chars in keys
+                 REPLACE_SCRIPT="import sys; lines = open('.env').readlines(); out = [l if not l.startswith('GOOGLE_API_KEY=') else f'GOOGLE_API_KEY={sys.argv[1]}\n' for l in lines]; open('.env', 'w').writelines(out)"
+                 ./venv/bin/python3 -c "$REPLACE_SCRIPT" "$USER_KEY"
+             else
+                 echo "GOOGLE_API_KEY=$USER_KEY" >> .env
+             fi
+             
+             # Ask for Persona Generation
+             echo ""
+             read -p "  Do you want to generate a custom persona now? [y/N] " GEN_CHOICE
+             if [[ "$GEN_CHOICE" =~ ^[Yy]$ ]]; then
+                 read -p "  Describe the persona (e.g. 'Production DB Server for a bank'): " PERSONA_DESC
+                 if [ -z "$PERSONA_DESC" ]; then PERSONA_DESC="Standard enterprise linux server"; fi
+                 
+                 log_info "Generating persona via LLM (this may take 10-20s)..."
+                 
+                 # Generation Script
+                 GEN_SCRIPT=$(cat <<EOF
+import sys
+import os
+sys.path.append(os.getcwd())
+# Ensure config reloads env
+from dotenv import load_dotenv
+load_dotenv(override=True)
+try:
+    from ssh_honeypot.core.llm import LLMInterface
+    from ssh_honeypot.core.persona_generator import PersonaGenerator
+    llm = LLMInterface()
+    pg = PersonaGenerator(llm)
+    name = pg.generate_persona(sys.argv[1])
+    print(f"CREATED:{name}")
+except Exception as e:
+    print(f"FAIL:{e}")
+    sys.exit(1)
+EOF
+)
+                 GEN_OUT=$(./venv/bin/python3 -c "$GEN_SCRIPT" "$PERSONA_DESC" 2>&1)
+                 
+                 if [[ "$GEN_OUT" == *"CREATED:"* ]]; then
+                      P_NAME=$(echo "$GEN_OUT" | cut -d':' -f2)
+                      log_ok "Persona '$P_NAME' created and set active."
+                 else
+                      log_err "Generation failed: $GEN_OUT"
+                 fi
+             fi
+             
+        else
+             log_warn "API Key validation failed. Using empty key."
+             log_warn "Error: $VALIDATION_OUT"
+        fi
+    else
+        log_info "Skipping AI setup. You can configure .env later."
+    fi
+else
+    log_info "Gemini API Key already configured."
+fi
+
 # 6. Config Check
 log_info "Running system check..."
 if ./venv/bin/python3 tools/check_config.py; then

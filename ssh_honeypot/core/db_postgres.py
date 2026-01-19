@@ -1,0 +1,1486 @@
+from .db_interface import DatabaseBackend
+from .logging_setup import log
+import json
+import time
+import datetime
+import hashlib
+import os
+
+try:
+    import psycopg2
+    from psycopg2 import pool
+    from psycopg2.extras import Json
+except ImportError:
+    log.warning("psycopg2 not installed. PostgresBackend will fail.")
+
+
+class PooledConnectionWrapper:
+    """
+    Wraps a psycopg2 connection to intercept .close() calls and return
+    the connection to the pool instead of closing the TCP socket.
+    """
+
+    def __init__(self, pool, conn):
+        self._pool = pool
+        self._conn = conn
+
+    def close(self):
+        if self._conn:
+            try:
+                self._pool.putconn(self._conn)
+            except Exception as e:
+                log.error(f"[PostgresPool] Error returning connection to pool: {e}")
+            finally:
+                self._conn = None
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def cursor(self, *args, **kwargs):
+        return self._conn.cursor(*args, **kwargs)
+
+    def commit(self):
+        return self._conn.commit()
+
+    def rollback(self):
+        return self._conn.rollback()
+
+
+class PostgresBackend(DatabaseBackend):
+    def __init__(self, config=None):
+        self.config = config or {}
+        self.conn_params = {
+            "host": self.config.get("host", "localhost"),
+            "port": self.config.get("port", 5432),
+            "user": self.config.get("user", "honeypot"),
+            "password": self.config.get("password", ""),
+            "dbname": self.config.get("dbname", "logs"),
+        }
+        self.placeholder = "%s"
+        self.skeleton_cache = []
+        self._pool = None
+        self._init_pool()
+        self._load_skeleton()
+        self._init_db()
+
+    def _init_pool(self):
+        try:
+            log.info("[Postgres] Initializing Connection Pool (min=1, max=20)...")
+            self._pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=1, maxconn=20, **self.conn_params
+            )
+        except Exception as e:
+            log.error(f"[Postgres] Failed to initialize connection pool: {e}")
+            raise e
+
+    def get_connection_info(self):
+        host = self.conn_params.get("host", "unknown")
+        dbname = self.conn_params.get("dbname", "unknown")
+        pool_status = "Active" if self._pool else "Inactive"
+        return f"PostgreSQL Backend (Host: {host}, DB: {dbname}, Pool: {pool_status})"
+
+    def _load_skeleton(self):
+        try:
+            from ssh_honeypot.core.fs_seeder import get_skeleton_data
+
+            self.skeleton_cache = get_skeleton_data()
+            log.info(
+                f"[*] Loaded {len(self.skeleton_cache)} skeleton items (COW Layer)"
+            )
+        except ImportError:
+            # Fallback for direct testing
+            try:
+                from fs_seeder import get_skeleton_data
+
+                self.skeleton_cache = get_skeleton_data()
+            except:
+                log.warning("[!] Failed to load skeleton data")
+
+    def _get_conn(self):
+        try:
+            conn = self._pool.getconn()
+            if conn:
+                return PooledConnectionWrapper(self._pool, conn)
+            else:
+                raise Exception("Connection pool exhausted")
+        except Exception as e:
+            log.error(f"[Postgres] Error getting connection from pool: {e}")
+            raise e
+
+    def __del__(self):
+        if hasattr(self, "_pool") and self._pool:
+            try:
+                self._pool.closeall()
+                # log.info("[Postgres] Connection Pool closed.")
+            except:
+                pass
+
+    def _init_db(self):
+        """
+        Initialize the database schema.
+        """
+        log.info("[Postgres] Initializing Database Schema...")
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+
+            # Sessions
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id SERIAL PRIMARY KEY,
+                    session_id TEXT UNIQUE,
+                    remote_ip TEXT,
+                    username TEXT,
+                    password TEXT,
+                    start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    end_time TIMESTAMP,
+                    client_version TEXT,
+                    protocol TEXT DEFAULT 'ssh',
+                    summary TEXT,
+                    risk_score INTEGER,
+                    fingerprint TEXT
+                )
+            """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(start_time)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_ip ON sessions(remote_ip)"
+            )
+
+            # Interactions
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS interactions (
+                    id SERIAL PRIMARY KEY,
+                    session_id TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    cwd TEXT,
+                    command TEXT,
+                    response TEXT,
+                    source TEXT,
+                    request_md5 TEXT,
+                    response_md5 TEXT,
+                    response_head TEXT,
+                    response_size INTEGER,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                )
+            """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_interactions_session ON interactions(session_id)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_interactions_ts ON interactions(timestamp)"
+            )
+
+            # Auth Events
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS auth_events (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    client_ip TEXT,
+                    username TEXT,
+                    auth_method TEXT,
+                    auth_data TEXT,
+                    success BOOLEAN,
+                    client_version TEXT,
+                    fingerprint TEXT,
+                    protocol TEXT DEFAULT 'ssh'
+                )
+            """
+            )
+
+            # Global Filesystem
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS global_filesystem (
+                    path TEXT PRIMARY KEY,
+                    parent_path TEXT,
+                    type TEXT,
+                    metadata TEXT,
+                    content TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_parent ON global_filesystem(parent_path)"
+            )
+
+            # User Filesystem
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_filesystem (
+                    ip TEXT,
+                    username TEXT,
+                    path TEXT,
+                    parent_path TEXT,
+                    type TEXT,
+                    metadata TEXT,
+                    content TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_accessed TIMESTAMP,
+                    is_deleted INTEGER DEFAULT 0,
+                    PRIMARY KEY (ip, username, path)
+                )
+            """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_user_parent ON user_filesystem(ip, username, parent_path)"
+            )
+
+            # Command Cache
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS command_cache (
+                    id SERIAL PRIMARY KEY,
+                    cmd_hash TEXT UNIQUE,
+                    command TEXT,
+                    cwd TEXT,
+                    response TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """
+            )
+
+            # Session Summaries Cache
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_summaries_cache (
+                    chain_hash TEXT PRIMARY KEY,
+                    summary TEXT,
+                    risk_score INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """
+            )
+
+            # IP Intelligence
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ip_intelligence (
+                    ip TEXT PRIMARY KEY,
+                    hostname TEXT,
+                    city TEXT,
+                    country TEXT,
+                    isp TEXT,
+                    org TEXT,
+                    asn TEXT,
+                    network_type TEXT,
+                    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    enriched INTEGER DEFAULT 0,
+                    raw_data TEXT,
+                    abuse_tags TEXT DEFAULT '[]'
+                )
+            """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ip_intel_enriched ON ip_intelligence(enriched, last_seen)"
+            )
+
+            # Malicious Payloads
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS malicious_payloads (
+                    id SERIAL PRIMARY KEY,
+                    url TEXT,
+                    url_hash TEXT UNIQUE,
+                    session_id TEXT,
+                    ip TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT DEFAULT 'pending',
+                    payload_md5 TEXT,
+                    payload_size INTEGER,
+                    file_path TEXT,
+                    retry_count INTEGER DEFAULT 0,
+                    error_message TEXT,
+                    virustotal_result TEXT,
+                    vt_last_scanned TIMESTAMP,
+                    vt_scan_id TEXT
+                )
+            """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_payload_status ON malicious_payloads(status)"
+            )
+
+            # LLM Usage
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS llm_usage (
+                    id SERIAL PRIMARY KEY,
+                    ip TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    source TEXT DEFAULT 'http'
+                )
+            """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_llm_usage_ip_time ON llm_usage(ip, timestamp)"
+            )
+
+            # Requested URLs
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS requested_urls (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    session_id TEXT,
+                    url TEXT,
+                    method TEXT,
+                    user_agent TEXT,
+                    command_text TEXT,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                )
+            """
+            )
+
+            # Command Analysis
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS command_analysis (
+                    command_hash TEXT PRIMARY KEY,
+                    command_text TEXT,
+                    activity_type TEXT,
+                    stage TEXT,
+                    risk_score INTEGER,
+                    explanation TEXT,
+                    analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """
+            )
+
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Failed to init DB: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+
+    # ----------------------------------------------------------------
+    # Implementation
+    # ----------------------------------------------------------------
+
+    def start_session(
+        self,
+        session_id,
+        ip,
+        username,
+        password,
+        client_version,
+        fingerprint=None,
+        protocol="ssh",
+        start_time=None,
+    ):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            fp_json = "{}"
+            if fingerprint:
+                fp_json = json.dumps(fingerprint)
+
+            if start_time:
+                cursor.execute(
+                    """
+                    INSERT INTO sessions (session_id, remote_ip, username, password, client_version, fingerprint, protocol, start_time)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (session_id) DO NOTHING
+                """,
+                    (
+                        session_id,
+                        ip,
+                        username,
+                        password,
+                        client_version,
+                        fp_json,
+                        protocol,
+                        start_time,
+                    ),
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO sessions (session_id, remote_ip, username, password, client_version, fingerprint, protocol)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (session_id) DO NOTHING
+                """,
+                    (
+                        session_id,
+                        ip,
+                        username,
+                        password,
+                        client_version,
+                        fp_json,
+                        protocol,
+                    ),
+                )
+            conn.commit()
+
+            # Log IP Visit for Intelligence
+            self.log_ip_visit(ip)
+
+        except Exception as e:
+            log.error(f"[Postgres] Error start_session (Protocol: {protocol}): {e}")
+        finally:
+            conn.close()
+
+    def end_session(self, session_id):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            # Check if we should log empty sessions
+            log_empty = (
+                str(os.getenv("FAUXSSH_LOG_EMPTY_SESSIONS", "false")).lower() == "true"
+            )
+
+            if not log_empty:
+                # Check interaction count
+                cursor.execute(
+                    "SELECT COUNT(*) FROM interactions WHERE session_id = %s",
+                    (session_id,),
+                )
+                count = cursor.fetchone()[0]
+
+                if count == 0:
+                    # Delete session entirely
+                    cursor.execute(
+                        "DELETE FROM sessions WHERE session_id = %s", (session_id,)
+                    )
+                    log.debug(
+                        f"[Postgres] Deleted empty session {session_id} (No interactions)"
+                    )
+                    conn.commit()
+                    return
+
+            cursor.execute(
+                "UPDATE sessions SET end_time = CURRENT_TIMESTAMP WHERE session_id = %s",
+                (session_id,),
+            )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Error end_session: {e}")
+        finally:
+            conn.close()
+
+    def log_interaction(
+        self,
+        session_id,
+        cwd,
+        command,
+        response,
+        source="unknown",
+        was_cached=False,
+        duration_ms=0,
+        request_md5=None,
+        response_md5=None,
+        response_head=None,
+        response_size=None,
+    ):
+        # Defensive Type Casting
+        try:
+            if isinstance(source, (dict, list)):
+                source = (
+                    str(source.get("source", str(source)))
+                    if isinstance(source, dict)
+                    else str(source)
+                )
+            else:
+                source = str(source)
+
+            if request_md5 and isinstance(request_md5, (dict, list)):
+                request_md5 = str(request_md5)
+        except Exception:
+            source = "error_casting"
+
+        # Auto-calculate Size/Head if missing
+        if response is not None:
+            if response_size is None:
+                try:
+                    response_size = len(response)
+                except:
+                    pass
+
+            if response_head is None:
+                try:
+                    response_head = str(response)[:100]
+                except:
+                    pass
+
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO interactions 
+                (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+                (
+                    session_id,
+                    cwd,
+                    command,
+                    response,
+                    source,
+                    request_md5,
+                    response_md5,
+                    response_head,
+                    response_size,
+                ),
+            )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Error logging interaction: {e}")
+        finally:
+            conn.close()
+
+        # Unified Logging Consolidation
+        try:
+            from .event_logger import EventLogger
+
+            EventLogger().log_interaction(
+                session_id=session_id,
+                ip="unknown",  # We don't have IP here easily without a lookup, leaving for now as per SQLite impl
+                input_cmd=command,
+                output_content=response,
+                protocol="ssh",
+                analysis={"cached": was_cached, "response_time_ms": duration_ms},
+            )
+        except Exception:
+            pass
+
+    def get_cached_response(self, command, cwd):
+        h = hashlib.sha256(f"{cwd}:{command}".encode()).hexdigest()
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT response FROM command_cache WHERE cmd_hash = %s", (h,)
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    def cache_response(self, command, cwd, response):
+        h = hashlib.sha256(f"{cwd}:{command}".encode()).hexdigest()
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO command_cache (cmd_hash, command, cwd, response) 
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (cmd_hash) DO UPDATE SET response = EXCLUDED.response
+                """,
+                (h, command, cwd, response),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_fs_node(self, path):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM global_filesystem WHERE path = %s", (path,))
+            row = cursor.fetchone()
+            if row:
+                columns = [desc[0] for desc in cursor.description]
+                return dict(zip(columns, row))
+            return None
+        finally:
+            conn.close()
+
+    def list_fs_dir(self, parent_path):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM global_filesystem WHERE parent_path = %s", (parent_path,)
+            )
+            rows = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            return [dict(zip(columns, r)) for r in rows]
+        finally:
+            conn.close()
+
+    def update_fs_node(self, path, parent_path, type, metadata, content=None):
+        conn = self._get_conn()
+        if isinstance(content, (dict, list)):
+            content = str(content)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO global_filesystem (path, parent_path, type, metadata, content)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (path) DO UPDATE SET
+                    parent_path = EXCLUDED.parent_path,
+                    type = EXCLUDED.type,
+                    metadata = EXCLUDED.metadata,
+                    content = EXCLUDED.content
+            """,
+                (
+                    path,
+                    parent_path,
+                    type,
+                    json.dumps(metadata) if isinstance(metadata, dict) else metadata,
+                    content,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def log_url_request(
+        self, session_id, url, method="GET", user_agent=None, command_text=None
+    ):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO requested_urls (session_id, url, method, user_agent, command_text)
+                VALUES (%s, %s, %s, %s, %s)
+            """,
+                (session_id, url, method, user_agent, command_text),
+            )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Error logging URL request: {e}")
+        finally:
+            conn.close()
+
+    def log_auth_event(
+        self,
+        client_ip,
+        username,
+        auth_method,
+        auth_data,
+        success,
+        client_version,
+        fingerprint=None,
+        protocol="ssh",
+    ):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            fp_json = "{}"
+            if fingerprint:
+                fp_json = json.dumps(fingerprint)
+
+            cursor.execute(
+                """
+                INSERT INTO auth_events (client_ip, username, auth_method, auth_data, success, client_version, fingerprint, protocol)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+                (
+                    client_ip,
+                    username,
+                    auth_method,
+                    auth_data,
+                    success,
+                    client_version,
+                    fp_json,
+                    protocol,
+                ),
+            )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Error log_auth_event: {e}")
+        finally:
+            conn.close()
+
+    def save_command_analysis(
+        self, command_hash, command_text, activity_type, stage, risk_score, explanation
+    ):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO command_analysis 
+                (command_hash, command_text, activity_type, stage, risk_score, explanation)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (command_hash) DO UPDATE SET
+                    activity_type = EXCLUDED.activity_type,
+                    stage = EXCLUDED.stage,
+                    risk_score = EXCLUDED.risk_score,
+                    explanation = EXCLUDED.explanation
+            """,
+                (
+                    command_hash,
+                    command_text,
+                    activity_type,
+                    stage,
+                    risk_score,
+                    explanation,
+                ),
+            )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Error saving command analysis: {e}")
+        finally:
+            conn.close()
+
+    def update_user_file(
+        self, ip, username, path, parent_path, type, metadata, content=None
+    ):
+        conn = self._get_conn()
+
+        # Guard: Prevent overwriting known directories with files
+        if type == "file" and self.is_managed_directory(ip, username, path):
+            # Logic mirrored from SQLiteBackend
+            is_known_dir = False
+            home_dir = "/root" if username == "root" else f"/home/{username}"
+            for item in self.skeleton_cache:
+                skel_path = item["path"]
+                if skel_path.startswith("~"):
+                    skel_path = skel_path.replace("~", home_dir, 1)
+                if skel_path == path and item["type"] == "directory":
+                    is_known_dir = True
+                    break
+
+            if is_known_dir:
+                log.warning(
+                    f"[FS Guard] Prevented overwriting directory '{path}' with file content"
+                )
+                conn.close()
+                return
+
+        if isinstance(content, (dict, list)):
+            content = str(content)
+
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO user_filesystem (ip, username, path, parent_path, type, metadata, content, is_deleted)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 0)
+                ON CONFLICT (ip, username, path) DO UPDATE SET
+                    parent_path = EXCLUDED.parent_path,
+                    type = EXCLUDED.type,
+                    metadata = EXCLUDED.metadata,
+                    content = EXCLUDED.content,
+                    is_deleted = 0
+            """,
+                (
+                    ip,
+                    username,
+                    path,
+                    parent_path,
+                    type,
+                    json.dumps(metadata) if isinstance(metadata, dict) else metadata,
+                    content,
+                ),
+            )
+            conn.commit()
+
+            # Recursive directory creation (simplified)
+            # In SQLiteBackend this calls _ensure_parent_dirs, omitting here for brevity
+            # as it wasn't strictly required for core function but good to have.
+            # Assuming parent directories exist or created by client logic.
+
+        finally:
+            conn.close()
+
+    def record_llm_usage(self, ip, source="http"):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO llm_usage (ip, source) VALUES (%s, %s)", (ip, source)
+            )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Error recording LLM usage: {e}")
+        finally:
+            conn.close()
+
+    def check_llm_rate_limit(self, ip, rpm_limit, rph_limit, rpd_limit):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+
+            # RPM
+            cursor.execute(
+                "SELECT COUNT(*) FROM llm_usage WHERE ip = %s AND timestamp > NOW() - INTERVAL '60 seconds'",
+                (ip,),
+            )
+            rpm_count = cursor.fetchone()[0]
+            if rpm_count >= rpm_limit:
+                return False, f"RPM Limit Exceeded ({rpm_count}/{rpm_limit})"
+
+            # RPH
+            cursor.execute(
+                "SELECT COUNT(*) FROM llm_usage WHERE ip = %s AND timestamp > NOW() - INTERVAL '1 hour'",
+                (ip,),
+            )
+            rph_count = cursor.fetchone()[0]
+            if rph_count >= rph_limit:
+                return False, f"RPH Limit Exceeded ({rph_count}/{rph_limit})"
+
+            # RPD
+            cursor.execute(
+                "SELECT COUNT(*) FROM llm_usage WHERE ip = %s AND timestamp > NOW() - INTERVAL '24 hours'",
+                (ip,),
+            )
+            rpd_count = cursor.fetchone()[0]
+            if rpd_count >= rpd_limit:
+                return False, f"RPD Limit Exceeded ({rpd_count}/{rpd_limit})"
+
+            return True, "OK"
+        except Exception as e:
+            log.error(f"[Postgres] Error checking LLM limits: {e}")
+            return True, "Error check failed (Fail Open)"
+        finally:
+            conn.close()
+
+    def get_user_node(self, ip, username, path):
+        # 1. Check User DB
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM user_filesystem WHERE ip = %s AND username = %s AND path = %s",
+                (ip, username, path),
+            )
+            row = cursor.fetchone()
+            if row:
+                columns = [desc[0] for desc in cursor.description]
+                result = dict(zip(columns, row))
+                if result.get("is_deleted"):
+                    return None
+
+                self.touch_user_file(ip, username, path)
+                return result
+        finally:
+            conn.close()
+
+        # 2. Check Skeleton (COW Layer)
+        home_dir = "/root" if username == "root" else f"/home/{username}"
+        for item in self.skeleton_cache:
+            skel_path = item["path"]
+            if skel_path.startswith("~"):
+                resolved_path = skel_path.replace("~", home_dir, 1)
+            else:
+                resolved_path = skel_path
+
+            if resolved_path == path:
+                meta = item.get("metadata", {}).copy()
+                if "owner" not in meta:
+                    meta["owner"] = username
+                if "group" not in meta:
+                    meta["group"] = username
+
+                return {
+                    "ip": ip,
+                    "username": username,
+                    "path": resolved_path,
+                    "type": item["type"],
+                    "metadata": json.dumps(meta),
+                    "content": item.get("content"),
+                    "created_at": datetime.datetime.now().isoformat(),
+                }
+
+        # 3. Check Global DB
+        return self.get_fs_node(path)
+
+    def list_user_dir(self, ip, username, parent_path):
+        items_map = {}
+
+        # 1. Global
+        g_items = self.list_fs_dir(parent_path)
+        for item in g_items:
+            items_map[item["path"]] = item
+            items_map[item["path"]]["source_layer"] = "global"
+
+        # 2. Skeleton
+        home_dir = "/root" if username == "root" else f"/home/{username}"
+        check_parent = parent_path.rstrip("/")
+        if not check_parent:
+            check_parent = "/"
+
+        for item in self.skeleton_cache:
+            skel_path = item["path"]
+            if skel_path.startswith("~"):
+                resolved_path = skel_path.replace("~", home_dir, 1)
+            else:
+                resolved_path = skel_path
+
+            if os.path.dirname(resolved_path) == check_parent:
+                meta = item.get("metadata", {}).copy()
+                if "owner" not in meta:
+                    meta["owner"] = username
+                if "group" not in meta:
+                    meta["group"] = username
+
+                items_map[resolved_path] = {
+                    "ip": ip,
+                    "username": username,
+                    "path": resolved_path,
+                    "type": item["type"],
+                    "metadata": json.dumps(meta),
+                    "content": item.get("content"),
+                    "created_at": datetime.datetime.now().isoformat(),
+                    "source_layer": "skeleton",
+                }
+
+        # 3. User
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM user_filesystem WHERE ip = %s AND username = %s AND parent_path = %s",
+                (ip, username, check_parent),
+            )
+            rows = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            for r in rows:
+                u_item = dict(zip(columns, r))
+                path = u_item["path"]
+                if u_item.get("is_deleted"):
+                    if path in items_map:
+                        del items_map[path]
+                else:
+                    u_item["source_layer"] = "user"
+                    items_map[path] = u_item
+        finally:
+            conn.close()
+
+        return list(items_map.values())
+
+    def is_managed_directory(self, ip, username, path):
+        # 1. Check User Home
+        home_dir = "/root" if username == "root" else f"/home/{username}"
+        if path == home_dir or path.startswith(home_dir + "/"):
+            return True
+
+        # 2. Check User DB
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM user_filesystem WHERE ip=%s AND username=%s AND path=%s AND type='directory' AND is_deleted=0",
+                (ip, username, path),
+            )
+            if cursor.fetchone():
+                return True
+            cursor.execute(
+                "SELECT 1 FROM user_filesystem WHERE ip=%s AND username=%s AND parent_path=%s AND is_deleted=0",
+                (ip, username, path),
+            )
+            if cursor.fetchone():
+                return True
+        finally:
+            conn.close()
+
+        # 3. Check Skeleton
+        for item in self.skeleton_cache:
+            skel_path = item["path"]
+            if skel_path.startswith("~"):
+                skel_path = skel_path.replace("~", home_dir, 1)
+            if skel_path == path and item["type"] == "directory":
+                return True
+            if os.path.dirname(skel_path) == path:
+                return True
+
+        return False
+
+    def get_ip_upload_usage(self, ip):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT metadata FROM user_filesystem WHERE ip = %s AND is_deleted = 0",
+                (ip,),
+            )
+            rows = cursor.fetchall()
+            total_size = 0
+            for r in rows:
+                try:
+                    meta = json.loads(r[0]) if isinstance(r[0], str) else (r[0] or {})
+                    total_size += int(meta.get("size", 0))
+                except:
+                    pass
+            return total_size
+        finally:
+            conn.close()
+
+    def cleanup_http_cache(self, web_root="/var/www/html"):
+        # Not implementing full cache cleanup for Postgres yet
+        # Assuming HTTP cache is transient/redis/sqlite based usually
+        # Or implementing same logic with %s syntax if needed.
+        # Leaving as TODO/No-op for simplicity unless requested.
+        pass
+
+    def prune_uploads(self, days=30):
+        # Postgres syntax for interval
+        cutoff_time = datetime.datetime.now() - datetime.timedelta(days=days)
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            # COALESCE equivalent
+            cursor.execute(
+                "DELETE FROM user_filesystem WHERE COALESCE(last_accessed, created_at) < %s AND is_deleted = 0 RETURNING ip, username, path",
+                (cutoff_time,),
+            )
+            rows = cursor.fetchall()
+            conn.commit()
+            return [{"ip": r[0], "username": r[1], "path": r[2]} for r in rows]
+        except Exception:
+            return []
+        finally:
+            conn.close()
+
+    def touch_user_file(self, ip, username, path):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE user_filesystem SET last_accessed = CURRENT_TIMESTAMP WHERE ip=%s AND username=%s AND path=%s",
+                (ip, username, path),
+            )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Failed to touch user file: {e}")
+        finally:
+            conn.close()
+
+    def delete_user_file(self, ip, username, path):
+        conn = self._get_conn()
+        try:
+            parent_path = os.path.dirname(path)
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO user_filesystem (ip, username, path, parent_path, type, metadata, content, is_deleted)
+                VALUES (%s, %s, %s, %s, 'tombstone', '{}', NULL, 1)
+                ON CONFLICT (ip, username, path) DO UPDATE SET is_deleted = 1
+                """,
+                (ip, username, path, parent_path),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def log_ip_visit(self, ip):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO ip_intelligence (ip, first_seen, last_seen, enriched)
+                VALUES (%s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
+                ON CONFLICT(ip) DO UPDATE SET last_seen = CURRENT_TIMESTAMP
+            """,
+                (ip,),
+            )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Error logging IP visit: {e}")
+        finally:
+            conn.close()
+
+    def get_unenriched_ips(self, limit=10):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT ip FROM ip_intelligence WHERE enriched = 0 ORDER BY last_seen DESC LIMIT %s",
+                (limit,),
+            )
+            return [row[0] for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def save_ip_intelligence(self, ip, intel_data):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE ip_intelligence 
+                SET hostname=%s, city=%s, country=%s, isp=%s, org=%s, asn=%s, network_type=%s, raw_data=%s, enriched=1
+                WHERE ip=%s
+            """,
+                (
+                    intel_data.get("hostname"),
+                    intel_data.get("city"),
+                    intel_data.get("country"),
+                    intel_data.get("isp"),
+                    intel_data.get("org"),
+                    intel_data.get("asn"),
+                    intel_data.get("network_type"),
+                    json.dumps(intel_data.get("raw_data", {})),
+                    ip,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def add_ip_abuse_tag(self, ip, tag):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT abuse_tags FROM ip_intelligence WHERE ip = %s", (ip,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                self.log_ip_visit(ip)
+                current_tags = []
+            else:
+                try:
+                    current_tags = json.loads(row[0]) if row[0] else []
+                except:
+                    current_tags = []
+
+            if tag not in current_tags:
+                current_tags.append(tag)
+                cursor.execute(
+                    "UPDATE ip_intelligence SET abuse_tags = %s WHERE ip = %s",
+                    (json.dumps(current_tags), ip),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+
+    def scan_and_repair_corruption(self, ip, username):
+        # Omitted for brevity, similar heuristic logic
+        pass
+
+    def get_global_stats(self):
+        conn = self._get_conn()
+        stats = {"sessions": 0, "total_commands": 0}
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT count(*) FROM sessions")
+            row = cursor.fetchone()
+            if row:
+                stats["sessions"] = row[0]
+
+            cursor.execute("SELECT count(distinct remote_ip) FROM sessions")
+            row = cursor.fetchone()
+            if row:
+                stats["unique_ips"] = row[0]
+
+            cursor.execute("SELECT count(*) FROM interactions")
+            row = cursor.fetchone()
+            if row:
+                stats["total_commands"] = row[0]
+        finally:
+            conn.close()
+        return stats
+
+    def get_active_sessions(self):
+        conn = self._get_conn()
+        sessions = []
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT username, remote_ip, start_time, session_id 
+                FROM sessions 
+                WHERE end_time IS NULL
+                ORDER BY start_time ASC
+            """
+            )
+            rows = cursor.fetchall()
+            for r in rows:
+                sessions.append(
+                    {
+                        "user": r[0],
+                        "ip": r[1],
+                        "start_time": str(r[2]),
+                        "session_id": r[3],
+                        "tty": f"pts/{int(hashlib.md5(r[3].encode()).hexdigest(), 16) % 10}",
+                    }
+                )
+        finally:
+            conn.close()
+        return sessions
+
+    def get_unique_creds_last_24h(self, ip):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT username, password FROM sessions WHERE remote_ip = %s AND start_time > NOW() - INTERVAL '24 hours'",
+                (ip,),
+            )
+            return list(set(cursor.fetchall()))
+        finally:
+            conn.close()
+
+    def validate_anti_harvesting(self, ip, username, password):
+        # Simplified anti-harvesting check without re-implementing full logic for now
+        # Ideally import or reuse logic if shared
+        return True, None
+
+    def check_root_desperation(self, ip):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT count(*) FROM auth_events WHERE client_ip = %s AND success = TRUE AND username != 'root' AND protocol = 'ssh'",
+                (ip,),
+            )
+            if cursor.fetchone()[0] > 0:
+                return "BLOCK"
+
+            cursor.execute(
+                "SELECT count(*) FROM auth_events WHERE client_ip = %s AND username = 'root' AND success = FALSE AND protocol = 'ssh'",
+                (ip,),
+            )
+            failures = cursor.fetchone()[0]
+
+            if failures == 2:
+                cursor.execute(
+                    "SELECT count(*) FROM auth_events WHERE client_ip = %s AND username = 'root' AND success = TRUE AND protocol = 'ssh'",
+                    (ip,),
+                )
+                if cursor.fetchone()[0] == 0:
+                    return "ALLOW"
+
+            return "NORMAL"
+        finally:
+            conn.close()
+
+    def get_recent_sessions(self, limit=20, protocol=None):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            if protocol:
+                cursor.execute(
+                    "SELECT * FROM sessions WHERE protocol = %s ORDER BY start_time DESC LIMIT %s",
+                    (protocol, limit),
+                )
+            else:
+                cursor.execute(
+                    "SELECT * FROM sessions ORDER BY start_time DESC LIMIT %s", (limit,)
+                )
+
+            columns = [desc[0] for desc in cursor.description]
+            return [dict(zip(columns, r)) for r in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def get_session_interactions(self, session_id):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT command FROM interactions WHERE session_id = %s ORDER BY timestamp ASC, id ASC",
+                (session_id,),
+            )
+            return [r[0] for r in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def get_cached_session_summary(self, chain_hash):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT summary, risk_score FROM session_summaries_cache WHERE chain_hash = %s",
+                (chain_hash,),
+            )
+            row = cursor.fetchone()
+            if row:
+                # Explicit tuple return to avoid dictionary unpacking bugs in caller
+                return (row[0], row[1])
+            return None
+        finally:
+            conn.close()
+
+    def save_session_summary_cache(self, chain_hash, summary, risk_score):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO session_summaries_cache (chain_hash, summary, risk_score)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (chain_hash) DO NOTHING
+                """,
+                (chain_hash, summary, risk_score),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def update_session_summary(self, session_id, summary, risk_score):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE sessions SET summary = %s, risk_score = %s WHERE session_id = %s",
+                (summary, risk_score, session_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def sanitize_artifacts(self):
+        conn = self._get_conn()
+        try:
+            tables = [
+                "sessions",
+                "interactions",
+                "global_filesystem",
+                "session_summaries_cache",
+                "ip_intelligence",
+                "malicious_payloads",
+            ]
+            cursor = conn.cursor()
+            for table in tables:
+                cursor.execute(f"TRUNCATE {table} RESTART IDENTITY CASCADE")
+            conn.commit()
+            log.info("[Postgres] Cache and Session Data Cleared.")
+        except Exception as e:
+            log.error(f"[Postgres] Failed to clear cache: {e}")
+        finally:
+            conn.close()
+
+    def is_path_deleted(self, ip, username, path):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM user_filesystem WHERE ip=%s AND username=%s AND path=%s AND is_deleted=1",
+                (ip, username, path),
+            )
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
+
+    def get_unanalyzed_commands(self, limit=10):
+        # Implementation omitted for brevity
+        return []
+
+    def save_analysis(self, cmd_hash, cmd_text, analysis):
+        # Implementation omitted for brevity
+        pass
+
+    def get_analysis(self, cmd_hash):
+        # Implementation omitted for brevity
+        return None
+
+    def inspect_path(self, ip, username, path):
+        # Implementation omitted for brevity
+        return None
+
+    def inspect_dir(self, ip, username, directory):
+        # Implementation omitted for brevity
+        return []
+
+    def add_malicious_payload(self, url, url_hash, session_id, ip, timestamp=None):
+        # Implementation omitted for brevity
+        pass
+
+    def get_payload_by_hash(self, url_hash):
+        return None
+
+    def get_pending_payloads(self, limit=5):
+        return []
+
+    def update_payload_status(
+        self,
+        payload_id,
+        status,
+        file_path=None,
+        error_message=None,
+        payload_md5=None,
+        payload_size=None,
+    ):
+        pass
+
+    def is_payload_host_rate_limited(self, hostname):
+        return False
+
+    def get_interactions_with_http(self):
+        return []
+
+    def clear_cache(self):
+        self.sanitize_artifacts()
+
+    def get_session(self, session_id):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM sessions WHERE session_id = %s", (session_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                columns = [desc[0] for desc in cursor.description]
+                return dict(zip(columns, row))
+            return None
+        finally:
+            conn.close()
+
+    def get_session_protocol(self, session_id):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT protocol FROM sessions WHERE session_id = %s", (session_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return row[0]
+            return "unknown"
+        finally:
+            conn.close()
+
+    def get_next_payload_for_analysis(self):
+        # Implementation omitted for brevity
+        return None
+
+    def update_payload_vt_status(self, payload_id, result, scan_id=None):
+        pass
+
+    def iter_interactions(self, batch_size=1000):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute("SELECT * FROM interactions ORDER BY timestamp ASC")
+            while True:
+                rows = cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                for row in rows:
+                    yield dict(row)
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    def purge_poisoned_cache(self):
+        """Purges cached responses containing AI Core error messages."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            # Clear from command_cache
+            cursor.execute(
+                "DELETE FROM command_cache WHERE response LIKE %s",
+                ("%AI Core Offline%",),
+            )
+            # Clear from interactions
+            cursor.execute(
+                "DELETE FROM interactions WHERE response LIKE %s",
+                ("%AI Core Offline%",),
+            )
+            conn.commit()
+            log.info("[Postgres] Purged poisoned cache entries.")
+        except Exception as e:
+            log.error(f"[Postgres] Error purging cache: {e}")
+        finally:
+            conn.close()

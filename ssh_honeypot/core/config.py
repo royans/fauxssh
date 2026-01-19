@@ -1,7 +1,7 @@
 # config.py
 import yaml
-import yaml
 import os
+import copy
 from ssh_honeypot.core.utils import (
     PROJECT_ROOT,
     BASE_DIR,
@@ -16,6 +16,14 @@ except ImportError:
     # Bootstrap
     pass
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+
+    def load_dotenv(*args, **kwargs):
+        pass
+
+
 DEFAULT_CONFIG_DICT = {
     "server": {
         "host_key_file": os.path.join(get_data_dir(), "host.key"),
@@ -27,17 +35,43 @@ DEFAULT_CONFIG_DICT = {
         "port": 8080,
         "enabled": True,
         "server_header": "Apache/2.4.52 (Ubuntu)",
+        "web_root": "/var/www/html",
         "llm_rpm": 4,
         "llm_rpd": 20,
+        "headers": {"X-Content-Type-Options": "nosniff"},
     },
     "llm": {
         "model_name": "gemma-3-27b-it",
+        "api_key": "",
         "max_tokens": 2048,
         "temperature": 1.0,
         "timeout": 60,
     },
+    "virustotal": {
+        "enabled": False,
+        "api_key": "",
+        "upload_files": True,
+        "min_file_size": 500,
+    },
+    "analytics": {"ignore_ips": [], "show_empty_sessions": False},
+    "alerting": {
+        "webhook_url": "",
+        "notify_threshold": 6,
+        "session_threshold": 7,
+        "ip_threshold": 9,
+        "keywords": [],
+    },
+    "telnet": {"enabled": True, "port": 2323},
+    "redis": {"enabled": True, "port": 6379},
+    "mysql": {"enabled": True, "port": 3306},
+    "mcp": {
+        "enabled": True,
+        "port": 8000,
+        "max_llm_calls": 20,
+        "throttle_delay": 2.0,
+    },
     "logging": {
-        "json_log_file": os.path.join(get_data_dir(), "honeypot.json.log"),
+        "json_log_file": os.path.join(get_data_dir(), "events.json.log"),
         "enable_session_replay": False,
     },
     "upload": {
@@ -45,18 +79,24 @@ DEFAULT_CONFIG_DICT = {
         "max_quota_per_ip": 1048576,
         "cleanup_days": 30,
     },
-    "alerting": {
-        "webhook_url": None,
-        "notify_threshold": 6,
-        "session_threshold": 7,
-        "ip_threshold": 9,
-        "keywords": [],
-    },
-    "mcp": {"max_llm_calls": 20, "throttle_delay": 2.0},
     "security": {"max_input_length": 50000, "max_input_tokens": 4000, "max_rpm": 60},
     "persona": {
         "system": {"hostname": "fallback-system"},
         "prompts": {"system_prompt": "Error: Persona failed to load."},
+    },
+    "throttling": {
+        "dos": {"rpm": 120, "rph": 3600, "rpd": 20000},
+        "llm": {"rpm": 5, "rph": 60, "rpd": 200},
+    },
+    "database": {
+        "type": "sqlite",
+        "postgres": {
+            "host": "localhost",
+            "port": 5432,
+            "user": "honeypot",
+            "password": "",
+            "dbname": "logs",
+        },
     },
 }
 
@@ -64,8 +104,11 @@ DEFAULT_CONFIG_DICT = {
 class ConfigManager:
     def __init__(self, config_path="config.yaml"):
         self.config_path = config_path
-        # Start with defaults as a simple dict
-        self._raw_config = DEFAULT_CONFIG_DICT.copy()
+        # Use deepcopy to ensure we don't mutate the global default
+        self._raw_config = copy.deepcopy(DEFAULT_CONFIG_DICT)
+
+        # 0. Load .env (Project Root or Parent)
+        self._load_env()
 
         # 1. Load User Config (config.yaml)
         self.load_config_file()
@@ -92,6 +135,13 @@ class ConfigManager:
             self._config = self._raw_config
 
     def load_config_file(self):
+        # 1. Try provided path (relative to CWD)
+        if os.path.exists(self.config_path):
+            pass
+        # 2. Try Project Root (if CWD is different)
+        elif os.path.exists(os.path.join(PROJECT_ROOT, self.config_path)):
+            self.config_path = os.path.join(PROJECT_ROOT, self.config_path)
+
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, "r") as f:
@@ -100,36 +150,118 @@ class ConfigManager:
                         self._deep_merge(self._raw_config, user_config)
             except Exception as e:
                 print(f"[!] Error loading config yaml: {e}")
+            except Exception as e:
+                print(f"[!] Error loading config yaml: {e}")
+
+    def _load_env(self):
+        """Robustly load .env from project root or parent."""
+        env_files = [
+            os.path.join(PROJECT_ROOT, ".env"),
+            os.path.join(os.path.dirname(PROJECT_ROOT), ".env"),
+        ]
+        for env_path in env_files:
+            if os.path.exists(env_path):
+                load_dotenv(env_path)
 
     def load_env_overrides(self):
-        if os.getenv("WEBHOOK_URL"):
-            if "alerting" not in self._raw_config:
-                self._raw_config["alerting"] = {}
+        """
+        Recursively overrides config values with environment variables.
+        Schema: SECTION_SUB_KEY -> section.sub.key (e.g. LLM_MODEL_NAME -> llm.model_name)
+        """
+        self._apply_env_recursive(self._raw_config)
+
+        # Legacy / Special Mappings (Backward Compatibility)
+        if os.getenv("WEBHOOK_URL") and not os.getenv("ALERTING_WEBHOOK_URL"):
             self._raw_config["alerting"]["webhook_url"] = os.getenv("WEBHOOK_URL")
 
-        # Integers
-        for env_key, conf_sec, conf_key in [
-            ("ALERT_THRESHOLD_NOTIFY", "alerting", "notify_threshold"),
-            ("ALERT_THRESHOLD_SESSION", "alerting", "session_threshold"),
-            ("ALERT_THRESHOLD_IP", "alerting", "ip_threshold"),
-            ("FAUXSSH_MCP_PORT", "mcp", "port"),
-            ("FAUXSSH_HTTP_PORT", "http", "port"),
-            ("HTTP_LLM_RPM", "http", "llm_rpm"),
-            ("HTTP_LLM_RPD", "http", "llm_rpd"),
-        ]:
-            val = os.getenv(env_key)
-            if val:
-                try:
-                    if conf_sec not in self._raw_config:
-                        self._raw_config[conf_sec] = {}
-                    self._raw_config[conf_sec][conf_key] = int(val)
-                except:
-                    pass
+        if os.getenv("FAUXSSH_VIRUSTOTAL_API_KEY") and not os.getenv(
+            "VIRUSTOTAL_API_KEY"
+        ):
+            self._raw_config["virustotal"]["api_key"] = os.getenv(
+                "FAUXSSH_VIRUSTOTAL_API_KEY"
+            )
+            self._raw_config["virustotal"]["enabled"] = True
 
-        if os.getenv("ALERT_KEYWORDS"):
+        if os.getenv("GOOGLE_API_KEY") and not os.getenv("LLM_API_KEY"):
+            self._raw_config["llm"]["api_key"] = os.getenv("GOOGLE_API_KEY")
+
+        # Config Lists from Strings
+        # ALERT_KEYWORDS -> alerting.keywords
+        if os.getenv("ALERT_KEYWORDS") and not os.getenv("ALERTING_KEYWORDS"):
             self._raw_config["alerting"]["keywords"] = [
                 k.strip() for k in os.getenv("ALERT_KEYWORDS").split("|") if k.strip()
             ]
+
+        # Service-Specific Risk Thresholds (Format: "ssh:50,70,90;http:60,80,95")
+        if os.getenv("FAUXSSH_RISK_THRESHOLDS"):
+            service_thresholds = {}
+            raw_str = os.getenv("FAUXSSH_RISK_THRESHOLDS", "")
+            pairs = raw_str.split(";")
+            for pair in pairs:
+                if ":" in pair:
+                    svc, vals = pair.split(":", 1)
+                    svc = svc.strip().lower()
+                    try:
+                        thresholds = [int(x.strip()) for x in vals.split(",")]
+                        if len(thresholds) == 3:
+                            service_thresholds[svc] = {
+                                "notify_threshold": thresholds[0],
+                                "session_threshold": thresholds[1],
+                                "ip_threshold": thresholds[2],
+                            }
+                    except Exception as e:
+                        print(
+                            f"[!] config: Failed to parse risk threshold for '{svc}': {e}"
+                        )
+
+            if service_thresholds:
+                self._raw_config["alerting"]["service_thresholds"] = service_thresholds
+
+        # Final Pass: Auto-enable services based on presence of secrets
+        # specific to VirusTotal (as per test_config_sanity requirements)
+        vt = self._raw_config.get("virustotal")
+        if vt and vt.get("api_key") and len(vt.get("api_key")) > 5:
+            if not self._raw_config.get("virustotal"):
+                self._raw_config["virustotal"] = {}
+            self._raw_config["virustotal"]["enabled"] = True
+
+    def _apply_env_recursive(self, current_dict, prefix=""):
+        for key, value in current_dict.items():
+            # Calculate Env Var Name
+            # e.g. prefix="LLM", key="model_name" -> LLM_MODEL_NAME
+            # e.g. prefix="", key="server" -> SERVER
+            env_key = f"{prefix}_{key}".upper() if prefix else key.upper()
+
+            if isinstance(value, dict):
+                self._apply_env_recursive(value, prefix=env_key)
+            else:
+                # Leaf Node - Check Env
+                env_val = os.getenv(env_key)
+                if env_val is not None:
+                    try:
+                        # Type Casting
+                        if isinstance(value, bool):
+                            current_dict[key] = str(env_val).lower() in (
+                                "true",
+                                "1",
+                                "yes",
+                                "on",
+                            )
+                        elif isinstance(value, int):
+                            current_dict[key] = int(env_val)
+                        elif isinstance(value, float):
+                            current_dict[key] = float(env_val)
+                        elif isinstance(value, list):
+                            # Comma separated list
+                            current_dict[key] = [
+                                x.strip() for x in env_val.split(",") if x.strip()
+                            ]
+                        else:
+                            current_dict[key] = str(env_val)
+                    except Exception as e:
+                        print(
+                            f"[!] Config: Error casting env var {env_key}='{env_val}': {e}"
+                        )
 
     def load_persona(self, override_name=None):
         base_name = "CentOS7_Legacy_Compute"
@@ -255,6 +387,42 @@ class ConfigManager:
             if val is None:
                 return None
         return val
+
+    def get_rate_limit(self, service, type_, metric):
+        """
+        Resolves rate limit with layered precedence:
+        1. Service Override (e.g. ssh.throttling.llm_rpm OR ssh.throttling.llm.rpm)
+        2. Global Throttling (e.g. throttling.llm.rpm)
+        3. Hardcoded Default fallback
+        """
+        metric = metric.lower()
+        type_ = type_.lower()
+
+        # 1. Service Override
+        # Check flat key first (e.g. ssh.throttling.llm_rpm)
+        svc_config = self.get(service, "throttling")
+        if svc_config:
+            # Try flat key "llm_rpm"
+            val = svc_config.get(f"{type_}_{metric}")
+            if val is not None:
+                return int(val)
+            # Try nested key "llm" -> "rpm"
+            if type_ in svc_config and isinstance(svc_config[type_], dict):
+                val = svc_config[type_].get(metric)
+                if val is not None:
+                    return int(val)
+
+        # 2. Global Throttling
+        val = self.get("throttling", type_, metric)
+        if val is not None:
+            return int(val)
+
+        # 3. Fallback (Safe Defaults if config is borked)
+        defaults = {
+            "dos": {"rpm": 120, "rph": 3600, "rpd": 20000},
+            "llm": {"rpm": 5, "rph": 60, "rpd": 200},
+        }
+        return defaults.get(type_, {}).get(metric, 100)
 
 
 config = ConfigManager()

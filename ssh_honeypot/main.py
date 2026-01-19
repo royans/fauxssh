@@ -4,18 +4,23 @@ import threading
 import time
 import socket
 import sys
+import asyncio
 
 # Imports from Core
-from ssh_honeypot.core.database import HoneyDB
+from ssh_honeypot.core.database import HoneyDB, get_db_backend
 from ssh_honeypot.core.llm import LLMInterface
 from ssh_honeypot.core.config import config
+from ssh_honeypot.core.utils import get_data_dir
 from ssh_honeypot.core.logging_setup import log
 from ssh_honeypot.core.persona_validator import validate_active_persona
 from ssh_honeypot.core.background_tasks import (
     cleanup_loop,
     analysis_loop,
     ip_enrichment_loop,
+    analysis_loop,
+    ip_enrichment_loop,
     payload_download_loop,
+    payload_analysis_loop,
 )
 from ssh_honeypot.core import fs_seeder
 
@@ -101,7 +106,7 @@ def main(argv=None):
         try:
             # We need to initialize DB temp to check if it has valuable data?
             # Or just assume if file exists.
-            db_path = os.path.join(config.get_data_dir(), "honeypot.sqlite")
+            db_path = os.path.join(get_data_dir(), "honeypot.sqlite")
             if os.path.exists(db_path):
                 print(
                     "\n[?] Persona change detected. Do you want to clear previous session/filesystem cache?"
@@ -131,19 +136,40 @@ def main(argv=None):
         exit(1)
 
     # Initialize DB and Core
-    db = HoneyDB()
-    db.sanitize_artifacts()
+    db = get_db_backend()
+    log.info(f"[*] Database: {db.get_connection_info()}")
+    # db.sanitize_artifacts() - REMOVED: This wipes the DB on every restart!
 
     # Initialize LLM
-    api_key = os.getenv("GOOGLE_API_KEY")
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("LLM_API_KEY")
     if not api_key:
         try:
             from dotenv import load_dotenv, find_dotenv
 
             load_dotenv(find_dotenv())
-            api_key = os.getenv("GOOGLE_API_KEY")
+            api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("LLM_API_KEY")
         except:
             pass
+
+    if not api_key:
+        # High Visibility Warning
+        print("\033[1;31m" + "=" * 60 + "\033[0m")
+        print("\033[1;31mCRITICAL WARNING: GOOGLE_API_KEY IS MISSING!\033[0m")
+        print(
+            "\033[1;31mAI-powered content generation and analysis will be disabled.\033[0m"
+        )
+        print("\033[1;31m" + "=" * 60 + "\033[0m")
+        log.error("GOOGLE_API_KEY not found. AI Core is OFFLINE.")
+
+    # Clear any previously "poisoned" cache entries in background
+    # This ensures "AI Core Offline" doesn't stick around without blocking startup
+    def background_purge():
+        try:
+            db.purge_poisoned_cache()
+        except Exception as e:
+            log.warning(f"Failed to purge poisoned cache: {e}")
+
+    threading.Thread(target=background_purge, daemon=True).start()
 
     llm_version = os.getenv("FAUXSSH_LLM_VERSION", "v1").lower()
     if llm_version == "v2":
@@ -158,14 +184,17 @@ def main(argv=None):
     # Seed Filesystem
     fs_seeder.seed_filesystem(db)
 
-    # Backfill Malicious Payloads (Temporary - Jan 10)
-    try:
-        from ssh_honeypot.core.payload_manager import PayloadManager
+    # Backfill Malicious Payloads in background
+    def background_backfill():
+        try:
+            from ssh_honeypot.core.payload_manager import PayloadManager
 
-        log.info("[PayloadManager] Triggering startup backfill scan...")
-        PayloadManager(db).backfill_from_interactions()
-    except Exception as e:
-        log.error(f"[PayloadManager] Startup backfill failed: {e}")
+            log.info("[PayloadManager] Triggering startup backfill scan...")
+            PayloadManager(db).backfill_from_interactions()
+        except Exception as e:
+            log.error(f"[PayloadManager] Startup backfill failed: {e}")
+
+    threading.Thread(target=background_backfill, daemon=True).start()
 
     # TEST MODE
     if args.test_analysis:
@@ -192,6 +221,11 @@ def main(argv=None):
     )
     payload_thread.start()
 
+    payload_analysis_thread = threading.Thread(
+        target=payload_analysis_loop, args=(db,), daemon=True
+    )
+    payload_analysis_thread.start()
+
     # Determine Ports
     ssh_port = int(os.getenv("FAUXSSH_PORT", config.get("server", "port") or 2222))
 
@@ -216,6 +250,42 @@ def main(argv=None):
         )
         redis_thread.daemon = True
         redis_thread.start()
+
+    # Start MySQL Server (Optional, Enabled by default)
+    if str(os.getenv("FAUXSSH_ENABLE_MYSQL", "true")).lower() == "true":
+        # Check config first, then env default
+        m_port = int(
+            os.getenv("FAUXSSH_MYSQL_PORT", config.get("mysql", "port") or 3306)
+        )
+        try:
+            from ssh_honeypot.services.mysql.server import HoneyMySQLHandler
+
+            # MySQL handler is an asyncio server, needs a wrapper for threading
+            def start_mysql_wrapper(port, db, llm, cfg):
+                # Creating new loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+                handler = HoneyMySQLHandler(db, llm, cfg)
+                # We need to run the Start logic
+                loop.run_until_complete(handler.serve(port=port))
+                log.info(f"[*] MySQL Service running on port {port}")
+                loop.run_forever()
+
+            mysql_thread = threading.Thread(
+                target=start_mysql_wrapper, args=(m_port, db, llm, config)
+            )
+            mysql_thread.daemon = True
+            mysql_thread.start()
+        except ImportError:
+            log.error("[!] MySQL Service Dependencies missing (mysql-mimic). Skipping.")
+        except OSError as e:
+            if "Address already in use" in str(e) or e.errno == 98:
+                log.warning(f"[!] MySQL Port {m_port} is busy. MySQL service DISABLED.")
+            else:
+                log.error(f"[!] MySQL Service Failed to Start (OSError): {e}")
+        except Exception as e:
+            log.error(f"[!] MySQL Service Failed to Start: {e}")
 
     # Start MCP Server (Optional)
     if str(os.getenv("FAUXSSH_ENABLE_MCP", "true")).lower() == "true":

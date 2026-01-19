@@ -40,6 +40,12 @@ class TestRealismHandlers(unittest.TestCase):
             ssh_honeypot.services.ssh.server.llm = MagicMock()
         ssh_honeypot.services.ssh.server.llm.api_key = ""
 
+        os.environ["FAUXSSH_ENABLE_TELNET"] = "false"
+        os.environ["FAUXSSH_ENABLE_MYSQL"] = "false"
+        os.environ["FAUXSSH_ENABLE_REDIS"] = "false"
+        os.environ["FAUXSSH_ENABLE_HTTP"] = "false"
+        os.environ["FAUXSSH_ENABLE_MCP"] = "false"
+
         if not is_server_running(TEST_PORT):
             print(f"[*] Starting Test Server on {TEST_PORT}")
             os.environ["FAUXSSH_PORT"] = str(TEST_PORT)
@@ -49,7 +55,7 @@ class TestRealismHandlers(unittest.TestCase):
 
             # Wait for startup
             start = time.time()
-            while time.time() - start < 10:
+            while time.time() - start < 20:
                 if is_server_running(TEST_PORT):
                     break
                 time.sleep(0.2)

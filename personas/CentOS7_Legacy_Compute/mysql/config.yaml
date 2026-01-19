@@ -1,0 +1,17 @@
+enabled: true
+version_string: "5.7.33-0ubuntu0.18.04.1"
+server_capabilities:
+  - "LONG_PASSWORD"
+  - "FOUND_ROWS"
+  - "LONG_FLAG"
+  - "CONNECT_WITH_DB"
+  - "PLUGIN_AUTH"
+  - "PROTOCOL_41"
+auth:
+  allow_root_no_password: false
+  weak_passwords:
+    - "root:password"
+    - "admin:admin"
+    - "root:123456"
+  allow_any: false
+  allow_any_rate: 0.0 # Disabled for now

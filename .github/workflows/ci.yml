@@ -26,6 +26,7 @@ jobs:
         
     - name: Run Tests
       run: |
+        export PYTHONPATH=$PYTHONPATH:.
         pytest
     
     - name: Enforce Code Style (Black)

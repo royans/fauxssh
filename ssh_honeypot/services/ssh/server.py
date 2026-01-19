@@ -24,6 +24,8 @@ from ssh_honeypot.core.persona_validator import validate_active_persona
 # SERVER_BANNER is now dynamic
 HOST_KEY_FILE = os.path.join(get_data_dir(), "host.key")
 
+from ssh_honeypot.core.event_logger import EventLogger
+
 
 # --- Logging Filter for Paramiko Noise ---
 class ParamikoFilter(logging.Filter):
@@ -141,6 +143,8 @@ class HoneypotServer(paramiko.ServerInterface):
             return None
 
     def check_auth_password(self, username, password):
+        from ssh_honeypot.core.utils import get_ignored_ips
+
         self.username = username
         self.password = password
 
@@ -157,6 +161,26 @@ class HoneypotServer(paramiko.ServerInterface):
         allow_root = config.get("persona", "access_control", "allow_root")
         if allow_root is None:
             allow_root = False
+
+        # Bypass for Trusted IPs (Analytics Ignored IPs)
+        ignored_ips = get_ignored_ips()
+        if self.client_ip in ignored_ips:
+            allow_root = True
+            log.info(f"[Auth] Allowing root login from Trusted IP: {self.client_ip}")
+
+        # Root Desperation Check
+        if username == "root":
+            desperation = db.check_root_desperation(self.client_ip)
+            if desperation == "BLOCK":
+                log.info(
+                    f"[Auth] Root Blocked (Desperation Rule): {self.client_ip} has prior non-root access."
+                )
+                allow_root = False
+            elif desperation == "ALLOW":
+                log.info(
+                    f"[Auth] Root Allowed (Desperation Rule): {self.client_ip} 3rd attempt granted."
+                )
+                allow_root = True
 
         if username == "root" and not allow_root:
             success = False
@@ -177,6 +201,17 @@ class HoneypotServer(paramiko.ServerInterface):
             client_version,
             fingerprint=fp,
             protocol="ssh",
+        )
+
+        EventLogger().log_auth(
+            session_id="pre-auth",
+            ip=self.client_ip,
+            username=username,
+            password=password,
+            success=success,
+            method="password",
+            client_version=client_version,
+            fingerprint=fp,
         )
 
         if not success:
@@ -318,6 +353,48 @@ def handle_tab_completion(chan, command_buffer, vfs, cwd, prompt, logger):
     return command_buffer
 
 
+def stream_output(chan, text, logger=None):
+    """
+    Simulates realistic terminal output by streaming lines with micro-delays.
+    """
+    if not text:
+        return
+
+    # Heuristic: If short, dump immediately
+    if len(text) < 500 and text.count("\r\n") < 10:
+        chan.send(text)
+        if logger:
+            logger.log_event("o", text)
+        return
+
+    # Long output: Stream line by line (or chunk by chunk)
+    lines = text.split("\r\n")
+    # split removes the delimiter, so we must add it back except for maybe the last one if original didn't have it?
+    # Actually, fmt_resp usually has newlines converted to \r\n
+
+    # Safest: Use a chunking generator or just split and rejoin with limits
+    # Let's simple split by lines for visual effect
+
+    for i, line in enumerate(lines):
+        # Determine chunk to send
+        chunk = line
+        if i < len(lines) - 1:
+            chunk += "\r\n"
+
+        # Send
+        try:
+            chan.send(chunk)
+            if logger:
+                logger.log_event("o", chunk)
+        except:
+            break
+
+        # Delay (Micro-jitter)
+        # 0.005 to 0.05 seconds (Simulates fast scrolling but visible)
+        if len(chunk) > 0:
+            time.sleep(random.uniform(0.005, 0.03))
+
+
 from ssh_honeypot.core.dos_protection import dos_protector
 
 
@@ -352,7 +429,10 @@ def handle_connection(client, addr, db_inst, llm_inst):
         ip_connection_counts[ip] += 1
 
     try:
-        _handle_connection_logic(client, addr, db_inst, llm_inst)
+        try:
+            _handle_connection_logic(client, addr, db_inst, llm_inst)
+        except Exception as e:
+            log.error(f"Handle Connection Error: {e}")
     finally:
         with active_sessions_lock:
             active_sessions -= 1
@@ -533,23 +613,33 @@ def _handle_connection_logic(client, addr, db, llm):
         )
 
         if resp_text:
-            chan.send(resp_text)
-            if not resp_text.endswith("\n"):
-                chan.send("\n")
+            try:
+                chan.send(resp_text)
+                if not resp_text.endswith("\n"):
+                    chan.send("\n")
+            except (OSError, socket.error):
+                pass  # Socket closed by client
 
         chan.send_exit_status(0)
         chan.close()
         return
 
     # Shell Mode
-    prompt = f"\r\n{user}@{hostname}:{cwd}$ "
+    if user == "root":
+        prompt_symbol = "#"
+    else:
+        prompt_symbol = "$"
+    prompt = f"\r\n{user}@{hostname}:{cwd}{prompt_symbol} "
     chan.send(
         f"Linux {hostname} 3.16.0-6-amd64 #1 SMP Debian 3.16.56-1+deb8u1 (2018-04-23) x86_64\r\n"
     )
     chan.send(
         f"The programs included with the Debian GNU/Linux system are free software.\r\n"
     )
-    chan.send(f"Last login: {time.ctime()} from 10.0.0.5\r\n")
+
+    # Randomize Last Login IP
+    rand_ip = f"{random.randint(1, 255)}.{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(1, 254)}"
+    chan.send(f"Last login: {time.ctime()} from {rand_ip}\r\n")
     chan.send(prompt)
 
     command_buffer = ""
@@ -618,6 +708,22 @@ def _handle_connection_logic(client, addr, db, llm):
                         "protocol": "ssh",
                     }
 
+                    # Rate Limit Judge
+                    rpm = config.get_rate_limit("ssh", "llm", "rpm")
+                    rph = config.get_rate_limit("ssh", "llm", "rph")
+                    rpd = config.get_rate_limit("ssh", "llm", "rpd")
+
+                    allowed, reason = db.check_llm_rate_limit(ip, rpm, rph, rpd)
+                    if not allowed:
+                        log.warning(f"[SSH] Rate Limit {ip}: {reason}")
+                        chan.send(
+                            f"\r\nSystem: Resource quota exceeded ({reason}). Please wait.\r\n".encode(
+                                "utf-8"
+                            )
+                        )
+                        chan.send(prompt.encode("utf-8"))
+                        continue
+
                     start_time = time.time()
                     resp_text, updates, metadata = handler.process_command(cmd, context)
                     duration_ms = round((time.time() - start_time) * 1000, 2)
@@ -635,6 +741,7 @@ def _handle_connection_logic(client, addr, db, llm):
                                 vfs[cwd] = []
                         if updates.get("env"):
                             context["env"].update(updates["env"])
+
                         if updates.get("file_modifications"):
                             for mod in updates.get("file_modifications"):
                                 action = mod.get("action")
@@ -662,12 +769,12 @@ def _handle_connection_logic(client, addr, db, llm):
 
                     fmt_resp = resp_text.replace("\n", "\r\n")
 
-                    # Inject Jitter before output
+                    # Inject Jitter before output (Network Latency)
                     latency_jitter()
 
-                    chan.send(fmt_resp)
-                    if logger:
-                        logger.log_event("o", fmt_resp)
+                    # Stream Output (Typing Effect)
+                    stream_output(chan, fmt_resp, logger)
+
                     if fmt_resp and not fmt_resp.endswith("\r\n"):
                         chan.send(b"\r\n")
                         if logger:
@@ -684,6 +791,17 @@ def _handle_connection_logic(client, addr, db, llm):
                         request_md5=str(cmd_hash),
                     )
 
+                    analysis_result = None
+                    EventLogger().log_interaction(
+                        session_id=session_id,
+                        ip=addr[0],
+                        input_cmd=cmd,
+                        output_content=resp_text,
+                        protocol="ssh",
+                        analysis=analysis_result,
+                        user_agent=None,
+                    )
+
                     try:
                         alert_manager.handle_interaction(session_id, ip, cmd, resp_text)
                     except Exception as e:
@@ -691,7 +809,11 @@ def _handle_connection_logic(client, addr, db, llm):
 
                     history.append((cmd, resp_text))
 
-                prompt = f"{user}@{hostname}:{cwd}$ "
+                if user == "root":
+                    prompt_symbol = "#"
+                else:
+                    prompt_symbol = "$"
+                prompt = f"{user}@{hostname}:{cwd}{prompt_symbol} "
                 chan.send(prompt)
                 if logger:
                     logger.log_event("o", prompt)

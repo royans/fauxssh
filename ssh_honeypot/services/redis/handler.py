@@ -2,6 +2,7 @@ import hashlib
 import json
 import time
 from ssh_honeypot.core.utils import random_response_delay
+from ssh_honeypot.core.event_logger import EventLogger
 
 
 class RedisHandler:
@@ -29,6 +30,22 @@ class RedisHandler:
         Input: Plain text command string (e.g. "GET key")
         Output: Bytes (RESP formatted response)
         """
+        response = self._handle_command_internal(command, client_ip)
+
+        # Log Interaction
+        # Unified JSON Log
+        EventLogger().log_interaction(
+            session_id="redis-session",  # Redis is stateless in this handler context
+            ip=client_ip,
+            input_cmd=command,
+            output_content=str(response),  # Convert bytes to str representation
+            protocol="redis",
+            analysis=None,
+            user_agent=None,
+        )
+        return response
+
+    def _handle_command_internal(self, command, client_ip):
         parts = command.split()
         if not parts:
             return b""
@@ -43,18 +60,12 @@ class RedisHandler:
 
         # 2. Cache Check (LLM Fallback)
         # Use MD5 of command as cache key
-        cmd_hash = hashlib.md5(command.encode("utf-8")).hexdigest()
-        cached = self.db.get_cached_response(cmd_hash)
+        cached = self.db.get_cached_response(command, "REDIS_ROOT")
         if cached:
-            # We assume cached content is the "text" content, we need to wrap it?
-            # Or did we cache the raw RESP?
-            # Storing raw bytes in DB TEXT field is risky.
-            # Let's assume we store the "result text" and default to Bulk String wrapping.
-            # UNLESS we explicitly store metadata about type.
-            # For now: We store text, and wrap as Bulk String.
             return self._encode_bulk_string(cached)
 
-        # 3. LLM Fallback
+        # 3. LLM Fallback (Needs to calculate hash first)
+        cmd_hash = hashlib.md5(command.encode("utf-8")).hexdigest()
         return self.llm_fallback(command, client_ip, cmd_hash)
 
     # --- Local Handlers ---

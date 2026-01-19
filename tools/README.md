@@ -78,7 +78,22 @@ python3 tools/analytics/enrich_ips.py --all
 - **`setup_service.sh`**: Installs FauxSSH as a Systemd User Service.
 - **`validate_persona.py`**: Validator for persona YAML files.
 
-## 3. Internal Developer Tools (`tools/internal/`)
+## 3. Data Management (`tools/`)
+
+### Log Importer (`import_logs.py`)
+Import JSON-formatted legacy logs or exported archives into the live database (SQLite or Postgres).
+```bash
+python3 tools/import_logs.py backup.json.log
+```
+
+### Log Exporter (`export_logs.py`)
+Export all interactions from the current database to a JSON stream. Useful for migrations or backups.
+```bash
+python3 tools/export_logs.py export.json.log
+```
+
+## 4. Internal Developer Tools (`tools/internal/`)
+
 Scripts for debugging, filesystem seeding, and legacy references (e.g., `legacy_startup.sh`) have been moved to `tools/internal/` to reduce clutter.
 
 

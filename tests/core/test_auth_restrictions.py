@@ -177,37 +177,45 @@ class TestAuthRestrictions(unittest.TestCase):
 
         # Verify DB
         # Access the global DB instance from server module
-        conn = ssh_honeypot.services.ssh.server.db._get_conn()
+        db_instance = ssh_honeypot.services.ssh.server.db
+        conn = db_instance._get_conn()
         c = conn.cursor()
 
+        # Determine placeholder based on backend type
+        # If it's Postgres, use %s, else ?
+        is_postgres = "PostgresBackend" in type(db_instance).__name__
+        ph = "%s" if is_postgres else "?"
+
         # Check Success
-        c.execute(
-            "SELECT auth_data, success, client_version FROM auth_events WHERE username=? AND auth_method='password' ORDER BY id DESC",
-            (username,),
-        )
+        query = f"SELECT auth_data, success, client_version FROM auth_events WHERE username={ph} AND auth_method='password' ORDER BY id DESC"
+        c.execute(query, (username,))
         row = c.fetchone()
         self.assertIsNotNone(row)
         self.assertEqual(row[0], password)
-        self.assertEqual(row[1], 1)  # Success implies 1 (sqlite stores bool as 0/1)
+
+        # Handle Boolean vs Integer
+        success_val = row[1]
+        if hasattr(success_val, "real"):  # check if number-like
+            if success_val == 1:
+                success_val = True
+            elif success_val == 0:
+                success_val = False
+
+        self.assertEqual(success_val, True)
         self.assertIn("SSH", row[2])  # Client version should be logged
 
-        # Check Failure (Skipped due to root connection instability)
-        # c.execute("SELECT auth_data, success FROM auth_events WHERE username='root' AND auth_method='password' ORDER BY id DESC")
-        # row = c.fetchone()
-        # self.assertIsNotNone(row)
-        # self.assertEqual(row[0], 'rootpassword')
-        # self.assertEqual(row[1], 0)
-
         # Check Session Fingerprint (New Feature)
-        c.execute(
-            "SELECT fingerprint FROM sessions WHERE username=? ORDER BY id DESC",
-            (username,),
+        query_fp = (
+            f"SELECT fingerprint FROM sessions WHERE username={ph} ORDER BY id DESC"
         )
+        c.execute(query_fp, (username,))
         row = c.fetchone()
         self.assertIsNotNone(row)
         fp_json = row[0]
-        self.assertIn("cipher", fp_json)
-        self.assertIn("mac", fp_json)
+        # In Postgres fp_json might already be a dict if adapter does it,
+        # usually text unless jsonb. But let's check str inclusion.
+        self.assertIn("cipher", str(fp_json))
+        self.assertIn("mac", str(fp_json))
 
         conn.close()
 

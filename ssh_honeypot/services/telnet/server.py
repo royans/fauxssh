@@ -113,13 +113,53 @@ class TelnetHelper:
                 self.sock.sendall(char)
 
 
+# Telnet Session Limits
+MAX_CONCURRENT_TELNET_SESSIONS = 20
+MAX_TELNET_SESSIONS_PER_IP = 3
+
+active_telnet_sessions = 0
+active_telnet_lock = threading.Lock()
+telnet_ip_counts = {}
+
+
 def handle_telnet_session(client_sock, addr, db, llm):
+    global active_telnet_sessions
     ip = addr[0]
     session_id = os.urandom(8).hex()
 
-    log.info(f"[*] New Telnet Connection from {ip}")
+    # 1. DoS Protection
+    from ssh_honeypot.core.dos_protection import dos_protector
+
+    if not dos_protector.is_allowed(ip, "Telnet"):
+        # dos_protector logs the ban
+        client_sock.close()
+        return
+
+    # 2. Concurrency Limits
+    should_drop = False
+    with active_telnet_lock:
+        ip_count = telnet_ip_counts.get(ip, 0)
+
+        if active_telnet_sessions >= MAX_CONCURRENT_TELNET_SESSIONS:
+            log.warning(
+                f"[Telnet] Max sessions reached ({MAX_CONCURRENT_TELNET_SESSIONS}). Dropping {ip}"
+            )
+            should_drop = True
+        elif ip_count >= MAX_TELNET_SESSIONS_PER_IP:
+            log.warning(
+                f"[Telnet] Max sessions per IP reached ({MAX_TELNET_SESSIONS_PER_IP}) for {ip}"
+            )
+            should_drop = True
+        else:
+            active_telnet_sessions += 1
+            telnet_ip_counts[ip] = ip_count + 1
+
+    if should_drop:
+        client_sock.close()
+        return
 
     try:
+        log.info(f"[*] New Telnet Connection from {ip}")
         # 1. Basic Telnet Negotiation
         # Load Cisco IOS Persona
         persona_config = config.get_persona_by_name("cisco_ios")
@@ -567,6 +607,13 @@ def handle_telnet_session(client_sock, addr, db, llm):
     except Exception as e:
         log.error(f"[Telnet] Session Error: {e}")
     finally:
+        with active_telnet_lock:
+            active_telnet_sessions -= 1
+            if ip in telnet_ip_counts:
+                telnet_ip_counts[ip] -= 1
+                if telnet_ip_counts[ip] <= 0:
+                    del telnet_ip_counts[ip]
+
         try:
             client_sock.close()
         except:

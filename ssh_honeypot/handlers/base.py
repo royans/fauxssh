@@ -122,3 +122,25 @@ class BaseHandler:
             return None, text
         except:
             return None, text
+
+    def _process_llm_json(self, r_json, r_text, vfs=None, cwd=None, user=None):
+        """
+        Standardizes return format.
+        Output: (text_output, updates)
+        """
+        output_text = ""
+        updates = {}
+
+        if r_json:
+            output_text = r_json.get("output", "")
+            updates["new_cwd"] = r_json.get("new_cwd")
+            updates["file_modifications"] = r_json.get("file_modifications")
+        else:
+            output_text = r_text
+
+        # Post-Processing: Replace 'alabaster' artifact with actual user
+        if user and output_text:
+            output_text = output_text.replace("alabaster", user)
+            output_text = output_text.replace("Alabaster", user.capitalize())
+
+        return output_text, updates

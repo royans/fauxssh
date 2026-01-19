@@ -1,9 +1,33 @@
 # Changelog
 
+## Weekly Changelog: Jan 18th 2026
+
+### New Features
+- **Database Abstraction**: Implemented `DatabaseBackend` interface allowing switchable storage engines.
+- **Postgres Support**: Backend now supports PostgreSQL for centralized logging, dynamically selectable via config.
+- **Log Consolidation**: Unified ad-hoc file logging into `EventLogger`, producing consistent `events.json.log` outputs.
+- **Data Tools**: 
+    - `tools/import_logs.py`: Backfill legacy JSON logs into SQLite or Postgres.
+    - `tools/export_logs.py`: Stream unified logs from any DB backend to JSON.
+
+### Enhancements
+- **Configuration**: Refactored `config.py` to support automatic recursive environment variable mapping (e.g., `DATABASE_POSTGRES_PASSWORD` -> `database.postgres.password`).
+- **Dependencies**: Added `psycopg2-binary` for PostgreSQL support.
+- **MySQL Service**: Added low-interaction MySQL honeypot (port 3306) with LLM query support.
+- **Throttling**: Fixed `DoSProtector` configuration (disabled defaults) and added explicit connection limits to `Telnet`.
+- **Payload Extraction**: Enabled real-time extraction of malicious URLs in the analysis loop.
+- **Service Integration**: Moved `PayloadManager` to `background_tasks` for continuous monitoring.
+- **Installer**: Enhanced `install.sh` with interactive API key validation and automatic persona generation.
+
 ## Weekly Changelog: Jan 11th 2026
 
 ### New Features
-- **Deep Hardware Simulation**: `PersonaGenerator` now extracts and simulates precise CPU, RAM, Disk, GPU, and Service details from descriptions.
+- **Apache Frontend Support**: Added `docs/internal/apache_blogofy.conf` for reverse proxy setup.
+- **HTTP Realism**:
+  - Valid `X-Forwarded-For` IP resolution.
+  - Support for POST/PUT/PATCH request bodies.
+  - **Risk Analysis**: Integrated risk scoring into LLM generation and SQLite persistence.
+- **Deep Hardware Simulation**: `PersonaGenerator` now extracts and simulates precise CPU, RAM, Disk, GPU, and Service details.
 - **🌐 HTTP Honeypot**: Added a new service (Port 8080) mimicking Apache/Nginx with LLM-generated content and caching.
 - **🔌 Telnet Support**: Added full Telnet protocol support (optional listener).
 - **📼 Session Replay**: Implemented full TTY session recording in `asciinema` v2 format.
@@ -31,6 +55,13 @@
 - **Error Suppression**: Automatically silenced "Incompatible ssh peer" and other Paramiko scanner noise.
 - **Anti-Harvesting**: Confirmed IP-based isolation for anti-harvesting rules.
 - **Maintenance**: Added automatic cleanup of legacy artifact files on startup.
+
+### Fixes
+- **UnboundLocalError**: Fixed variable scope issue in `server.py`.
+- **DoS Protection**: Fixed bug where local proxy IP (127.0.0.1) was rate-limited instead of real client IP.
+- **SQL Syntax**: Fixed `HAVING` clause error in `analyze.py`.
+- **Command Dispatch**: Fixed empty output for `apt-get` by normalizing hyphens to underscores.
+- **Startup Logic**: Enhanced `start.sh` with `--restart` (atomic restart) and reliable PID content verification.
 
 
 ## Weekly Changelog: Jan 3rd 2026

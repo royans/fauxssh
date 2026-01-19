@@ -3,6 +3,13 @@ system:
   handler_type: cisco_ios
 network:
   ssh_banner: "\r\nUser Access Verification\r\n"
+
+http:
+  server_header: "cisco-IOS"
+  headers:
+    Server: "cisco-IOS"
+    Accept-Ranges: "none"
+
 prompts:
   system_prompt: |
     You are a high-fidelity simulation of a Cisco IOS Switch/Router (C2960).

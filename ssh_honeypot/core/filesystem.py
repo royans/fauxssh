@@ -9,21 +9,20 @@ def resolve_path(cwd, path):
     Handles ~, ., ..
     """
     if path.startswith("~"):
-        # In a real shell ~ expands to home.
-        # But here we might check context['user']?
-        # For simple resolving we assume ~ is usually /root or /home/user depending on user.
-        # But this function doesn't know user.
-        # Typically the CALLER handles ~ expansion or we pass user home.
-        # command_handler.py's _resolve_path assumed path was already partially handled or just used abspath logic?
-        # Let's check original implementation logic logic.
-        # Original:
-        # if path == '~': return context.get('home', '/root') ...
-        # Wait, the original _resolve_path was:
-        # def _resolve_path(self, cwd, path):
-        #    if path.startswith('/'): return os.path.normpath(path)
-        #    return os.path.normpath(os.path.join(cwd, path))
-
-        # It did NOT handle ~. Command handler handle_cd usually handled ~.
+        # Expand ~ manually based on simple heuristics since we don't have user context here easily
+        # But we can try to guess or just return unmodified if we can't.
+        # However, to fix the specific bug '~/.ssh/authorized_keys', we need to handle it.
+        # This function signature `resolve_path(cwd, path)` is limiting.
+        # Ideally we pass `user` or `home`.
+        # For now, let's assume /root if not specified, OR we assume command_handler expands it?
+        # CommandHandler calls this. Let's update CommandHandler to expand ~ BEFORE calling resolve_path?
+        # OR we modify this to take options.
+        # But changing signature breaks callers?
+        # Let's check callers. Only CommandHandler uses it.
+        # Actually, let's keep this simple:
+        # If path starts with ~, we can't robustly resolve without user.
+        # But we can cheat: if path starts with ~/, replace with /root/ or /home/user?
+        # No, we don't know the user.
         pass
 
     if path.startswith("/"):

@@ -5,15 +5,16 @@ from ssh_honeypot.core.database import HoneyDB
 
 class TestDBSafetyRegression(unittest.TestCase):
     @patch("ssh_honeypot.core.database.HoneyDB._init_db")
-    @patch("ssh_honeypot.core.database.sqlite3")
-    def test_log_auth_event_closes_connection_on_error(self, mock_sqlite, mock_init):
+    @patch("ssh_honeypot.core.database.sqlite3.connect")
+    def test_log_auth_event_closes_connection_on_error(self, mock_connect, mock_init):
         """
         Regression Test: Ensure conn.close() is called even if execute raises an error.
         Fixes 'database is locked' zombie connections.
         """
         # Setup Mock
         mock_conn = MagicMock()
-        mock_sqlite.connect.return_value = mock_conn
+        mock_connect.return_value = mock_conn
+
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
 
@@ -29,13 +30,15 @@ class TestDBSafetyRegression(unittest.TestCase):
         mock_conn.close.assert_called_once()
 
     @patch("ssh_honeypot.core.database.HoneyDB._init_db")
-    @patch("ssh_honeypot.core.database.sqlite3")
-    def test_start_session_closes_connection_on_error(self, mock_sqlite, mock_init):
+    @patch("ssh_honeypot.core.database.sqlite3.connect")
+    def test_start_session_closes_connection_on_error(self, mock_connect, mock_init):
         """
         Regression Test: Ensure conn.close() is called in start_session on error.
         """
         mock_conn = MagicMock()
-        mock_sqlite.connect.return_value = mock_conn
+        mock_connect.return_value = mock_conn
+
+        # Force an error
         mock_conn.execute.side_effect = Exception("Insert Error")
 
         db = HoneyDB()

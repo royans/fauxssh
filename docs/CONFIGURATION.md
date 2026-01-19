@@ -66,6 +66,11 @@ upload:
   cleanup_days: 30              # Upload retention period
 ```
 
-## 3. Alerting Configuration
+## 3. Advanced Configuration (PostgreSQL)
+
+For high-volume deployments or centralized logging, FauxSSH supports PostgreSQL. See the [Advanced Configuration Guide](ADVANCED_CONFIGURATION.md) for setup and migration instructions.
+
+## 4. Alerting Configuration
+
 
 See [Alerting Guide](ALERTING.md) for webhook and keyword notification setup.

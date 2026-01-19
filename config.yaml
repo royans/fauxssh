@@ -3,16 +3,88 @@ server:
   port: 2222
   banner_default: "SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u1"
 
+logging:
+  json_log_file: "events.json.log"
+  enable_session_replay: false
+
 realism:
   latency:
     enabled: true
     min_ms: 20
     max_ms: 300
 
+database:
+  type: "sqlite" # or "postgres"
+  postgres:
+    host: "localhost"
+    port: 5432
+    user: "honeypot"
+    password: "" # ENV: DATABASE_POSTGRES_PASSWORD
+    dbname: "logs"
+
+virustotal:
+  enabled: false
+  api_key: "" # ENV: VIRUSTOTAL_API_KEY
+  upload_files: true
+  min_file_size: 500
+
+analytics:
+  ignore_ips: [] # ENV: ANALYTICS_IGNORE_IPS (comma-separated)
+  show_empty_sessions: false
+
+alerting:
+  webhook_url: "" # ENV: ALERTING_WEBHOOK_URL
+  notify_threshold: 6
+  session_threshold: 7
+  ip_threshold: 9
+  keywords: []
+
+telnet:
+  enabled: true
+  port: 2323
+
+redis:
+  enabled: true
+  port: 6379
+
+mysql:
+  enabled: true
+  port: 3306
+  allow_any_auth: false  # If true, randomly allows login for unknown users
+
+
+mcp:
+  enabled: true
+  port: 8000
+  max_llm_calls: 20
+  throttle_delay: 2.0
+
 llm:
   model_name: "gemma-3-27b-it"
+  api_key: "" # ENV: LLM_API_KEY
+
+http:
+  enabled: true
+  port: 8080
+  server_header: "Apache/2.4.52 (Ubuntu)"
+  headers:
+    X-Content-Type-Options: "nosniff"
+    X-Frame-Options: "DENY"
+  web_root: "/var/www/html"
+  llm_rpm: 4
+  llm_rpd: 20
 
 security:
-  max_input_length: 50000     # Per-Request: Max raw characters (prevent huge buffers)
-  max_input_tokens: 4000      # Per-Request: Max approximate tokens (len/4) to protect Context Window
-  max_rpm: 60                 # Rate Limit: Requests Per Minute (per IP)
+  max_input_length: 50000
+  max_input_tokens: 4000
+  max_rpm: 60
+
+throttling:
+  dos:
+    rpm: 12
+    rph: 50
+    rpd: 100
+  llm:
+    rpm: 5
+    rph: 20
+    rpd: 40

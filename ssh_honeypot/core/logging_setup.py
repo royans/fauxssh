@@ -51,8 +51,9 @@ def setup_logger(name="ssh_honeypot"):
             logger.addHandler(fh)
 
             # SUCCESS: Disable Console Handler to prevent duplication in server_startup.log
-            # We only want startup errors or python crashes in stdout now.
-            logger.removeHandler(ch)
+            # UNLESS we are in test mode, where we want to see logs in stdout
+            if os.getenv("FAUXSSH_TEST_MODE") != "1":
+                logger.removeHandler(ch)
 
     except Exception as e:
         # Fallback to console only if file setup fails

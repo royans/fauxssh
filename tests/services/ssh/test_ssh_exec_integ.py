@@ -48,9 +48,9 @@ class TestSSHExec(unittest.TestCase):
             cls.server_thread.daemon = True  # Daemonize so it dies with main
             cls.server_thread.start()
 
-            # Wait for port to respond (simple health check)
+            # Wait for port to respond (increased timeout for background startup tasks)
             start = time.time()
-            while time.time() - start < 5:
+            while time.time() - start < 30:
                 if is_server_running():
                     break
                 time.sleep(0.5)

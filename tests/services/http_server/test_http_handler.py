@@ -49,7 +49,17 @@ def test_http_get_cache_miss(mock_server):
     handler = create_handler(mock_server, output_buf, "/index.html", "GET")
 
     with patch("ssh_honeypot.services.http_server.server.config") as mock_conf:
-        mock_conf.get.return_value = "Apache/Fake"
+
+        def config_side_effect(section, key):
+            if section == "http" and key == "server_header":
+                return "Apache/Fake"
+            if section == "http" and key == "headers":
+                return {}  # Empty dict for tests
+            if section == "http" and key in ["llm_rpm", "llm_rpd"]:
+                return 100
+            return None
+
+        mock_conf.get.side_effect = config_side_effect
 
         mock_server.honey_db.get_cached_response.return_value = None
         mock_server.llm_interface.generate_response.return_value = (
@@ -80,7 +90,17 @@ def test_http_get_cache_hit(mock_server):
     handler = create_handler(mock_server, output_buf, "/old.html", "GET")
 
     with patch("ssh_honeypot.services.http_server.server.config") as mock_conf:
-        mock_conf.get.return_value = "Apache/Fake"
+
+        def config_side_effect(section, key):
+            if section == "http" and key == "server_header":
+                return "Apache/Fake"
+            if section == "http" and key == "headers":
+                return {}
+            if section == "http" and key in ["llm_rpm", "llm_rpd"]:
+                return 100
+            return None
+
+        mock_conf.get.side_effect = config_side_effect
 
         mock_server.honey_db.get_cached_response.return_value = "CachedContent"
 
@@ -98,7 +118,17 @@ def test_http_post_login(mock_server):
     handler = create_handler(mock_server, output_buf, "/login.php", "POST")
 
     with patch("ssh_honeypot.services.http_server.server.config") as mock_conf:
-        mock_conf.get.return_value = "Apache/Fake"
+
+        def config_side_effect(section, key):
+            if section == "http" and key == "server_header":
+                return "Apache/Fake"
+            if section == "http" and key == "headers":
+                return {}
+            if section == "http" and key in ["llm_rpm", "llm_rpd"]:
+                return 100
+            return None
+
+        mock_conf.get.side_effect = config_side_effect
 
         mock_server.honey_db.get_cached_response.return_value = None
         mock_server.llm_interface.generate_response.return_value = (
@@ -121,7 +151,17 @@ def test_http_llm_error_fallback(mock_server):
     handler = create_handler(mock_server, output_buf, "/error", "GET")
 
     with patch("ssh_honeypot.services.http_server.server.config") as mock_conf:
-        mock_conf.get.return_value = "Apache/Fake"
+
+        def config_side_effect(section, key):
+            if section == "http" and key == "server_header":
+                return "Apache/Fake"
+            if section == "http" and key == "headers":
+                return {}
+            if section == "http" and key in ["llm_rpm", "llm_rpd"]:
+                return 100
+            return None
+
+        mock_conf.get.side_effect = config_side_effect
 
         mock_server.honey_db.get_cached_response.return_value = None
         mock_server.llm_interface.generate_response.side_effect = Exception("API Down")
@@ -129,7 +169,9 @@ def test_http_llm_error_fallback(mock_server):
         handler.do_GET()
 
         output = output_buf.getvalue()
-        assert b"500 Internal Server Error" in output
+        assert b"404 Not Found" in output
+        # With new logic we actually send 404 status header
         assert (
-            b"200 OK" in output
-        )  # We verify that we still return 200 OK but with error body (soft fail)
+            b"HTTP/1.0 404 Not Found" in output or b"HTTP/1.1 404 Not Found" in output
+        )
+        assert b"Apache/Fake" in output

@@ -51,6 +51,7 @@ class LLMInterface:
         honeypot_ip="192.168.1.55",
         override_prompt=None,
         persona_config=None,
+        **kwargs,
     ):
         """
         Generates a terminal response for the given command.
@@ -64,7 +65,20 @@ class LLMInterface:
             f"generate_response called for '{command}'. Key Len: {len(self.api_key) if self.api_key else 0}"
         )
         if not self.api_key:
-            return '{"output": "Error: AI Core Offline.", "cwd_update": null}'
+            # Fallback for Offline Mode / Missing Key
+            # Retain immersion: better to say "command not found" than "AI Offline"
+            # Unless we want to simulate a network error for network commands.
+
+            # Simple heuristic
+            cmd_base = command.split()[0] if command else ""
+            if cmd_base in ["curl", "wget", "ssh", "nc", "ping"]:
+                return (
+                    "ssh: connect to host example.com port 22: Connection timed out"
+                    if cmd_base == "ssh"
+                    else f"{cmd_base}: unable to resolve host address"
+                )
+
+            return f"bash: {cmd_base}: command not found"
 
         # If raw prompt override is provided, skip template logic
         if override_prompt:
@@ -209,9 +223,13 @@ class LLMInterface:
             try:
                 # Gemini Pro structure
                 text = resp_json["candidates"][0]["content"]["parts"][0]["text"]
-                # Strip Markdown code blocks if present (Gemini loves ```json ... ```)
-                text = text.replace("```json", "").replace("```", "").strip()
-                return text
+                # Strip Markdown code blocks (regex)
+                text = text.strip()
+                # Remove leading fence (e.g. ```json, ```html, ```)
+                text = re.sub(r"^```[a-zA-Z0-9+-]*\s*", "", text)
+                # Remove trailing fence
+                text = re.sub(r"\s*```$", "", text)
+                return text.strip()
             except (KeyError, IndexError) as e:
                 print(f"[!] LLM Response Parsing Error: {e} | Resp: {resp.text[:100]}")
                 return '{"output": "Error: Parsing Failure.", "new_cwd": null}'
@@ -346,13 +364,17 @@ class LLMInterface:
         
         Task:
         1. Provide a brief 1-sentence narrative summary of the attacker's intent and tools used.
-        2. Assign a generic Risk Score (0-10) for the whole session.
+        2. Assign a Risk Score (0-99) based on these heuristics:
+            - 0-30: Reconnaissance, basic discovery (ls, whoami, uname).
+            - 30-60: Probing specific vulnerabilities, non-standard commands.
+            - 60-80: Attempts to write files, modify config, known exploitation attempts.
+            - 80-99: Critical Risk. POST requests with payloads, downloading payloads (wget/curl/scp), execution of downloaded payloads, persistence mechanisms.
         3. Identify any relevant MITRE ATT&CK Technique IDs (e.g. T1059.004).
         
         Return ONLY a JSON object:
         {{
             "summary": "Attacker probed to...",
-            "risk_score": 5,
+            "risk_score": 85,
             "mitre_codes": ["T1059", "T1003"]
         }}
         """

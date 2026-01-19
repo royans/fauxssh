@@ -38,7 +38,14 @@ class TestSCP(unittest.TestCase):
             cls.server_thread = threading.Thread(target=server_main, args=([],))
             cls.server_thread.daemon = True
             cls.server_thread.start()
-            time.sleep(2)
+            # Wait for startup (increased timeout for background startup tasks)
+            start = time.time()
+            while time.time() - start < 30:
+                if is_server_running(TEST_PORT):
+                    break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError("Server failed to start")
 
     def setUp(self):
         # Reset quotas for 127.0.0.1 (DELETE FROM user_filesystem WHERE ip='127.0.0.1')

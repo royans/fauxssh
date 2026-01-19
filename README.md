@@ -17,6 +17,7 @@ FauxSSH deceptively emulates a realistic Linux server, engaging attackers in lon
 - **🔌 Telnet Support**: Optional Telnet listener to capture attacks on legacy protocols, sharing the same persona and intelligence engine.
 - **🌐 HTTP Honeypot**: A realistic web server (Port 8080) that dynamically generates HTML, logins, and error pages using the LLM.
 - **🟥 High-Interaction Redis**: A realistic Redis honeypot that supports standard commands (`PING`, `INFO`) and uses LLM hallucination for data store queries (`GET`, `SET`).
+- **🐬 LLM-Driven MySQL**: A realistic MySQL server (Port 3306) with a hybrid query engine. Simple queries (`SELECT @@version`) are handled locally for speed, while complex SQL (`SELECT * FROM users`) is forwarded to the LLM to generate realistic rows.
 - **🤖 MCP "Control Plane"**: Exposes a Model Context Protocol service (Port 8000) mimicking an internal DevOps control plane with fake diagnostic tools.
 - **📼 Session Replay**: Record full TTY sessions (input/output) in [asciinema](https://asciinema.org) format for playback.
 - **Network Emulation**: Simulates `curl`/`wget` with realistic delays and firewalls.
@@ -28,6 +29,9 @@ FauxSSH deceptively emulates a realistic Linux server, engaging attackers in lon
 - **📊 Built-in Analytics**: CLI tools to visualize sessions, inspect malware, and correlate threat actors.
 
 ## Recent Improvements (Jan 9)
+- **Database Abstraction**: Decoupled DB layer (`SQLiteBackend`, `PostgresBackend`) enabling seamless switching to PostgreSQL for high-scale logging.
+- **Unified Logging**: Consolidated all event streams into a structured `events.json.log` schema, ready for vector/SIEM ingestion.
+- **Log Tools**: Added `tools/import_logs.py` (legacy migration) and `tools/export_logs.py` (bulk export) utilities.
 - **Robust Telnet Input**: Completely rewrote Telnet input handling (`TelnetHelper`) to fix "Enter key hangs" and support byte-by-byte typing/fragmentation.
 - **Scanning Noise Suppression**: Added intelligent log filtering to automatically suppress "Incompatible ssh peer" and other Paramiko tracebacks from mass scanners.
 - **Anti-Harvesting Isolation**: Verified strict IP-based isolation for anti-harvesting rules (one abusive IP won't lock out others).
@@ -38,7 +42,8 @@ FauxSSH deceptively emulates a realistic Linux server, engaging attackers in lon
 ## Quick Start
 
 ### 1. One-Line Installation (Recommended)
-Fastest way to get started. Handles dependencies, virtualenv, and configuration automatically.
+Fastest way to get started. Handles dependencies, virtualenv, and configuration.
+**Now includes interactive setup** to configure your Gemini API Key and generate your first custom persona automatically.
 
 ```bash
 env bash -c "$(curl -sL https://raw.githubusercontent.com/royans/fauxssh/main/install.sh)"

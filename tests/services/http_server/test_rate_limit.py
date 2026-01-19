@@ -16,13 +16,17 @@ class TestHTTPRateLimiting(unittest.TestCase):
         db = HoneyDB()
 
         # Scenario 1: Under Limit
-        mock_cursor.fetchone.side_effect = [(3,), (10,)]  # RPM=3, RPD=10
-        allowed, reason = db.check_llm_rate_limit("1.2.3.4", rpm_limit=4, rpd_limit=20)
+        mock_cursor.fetchone.side_effect = [(3,), (5,), (10,)]  # RPM=3, RPH=5, RPD=10
+        allowed, reason = db.check_llm_rate_limit(
+            "1.2.3.4", rpm_limit=4, rph_limit=60, rpd_limit=20
+        )
         self.assertTrue(allowed)
 
         # Scenario 2: Over RPM
         mock_cursor.fetchone.side_effect = [(5,), (10,)]  # RPM=5!
-        allowed, reason = db.check_llm_rate_limit("1.2.3.4", rpm_limit=4, rpd_limit=20)
+        allowed, reason = db.check_llm_rate_limit(
+            "1.2.3.4", rpm_limit=4, rph_limit=60, rpd_limit=20
+        )
         self.assertFalse(allowed)
         self.assertIn("RPM Limit", reason)
 
