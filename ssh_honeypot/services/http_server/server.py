@@ -366,12 +366,29 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 def start_http_server(port, db, llm):
     try:
-        server = ThreadingHTTPServer(("0.0.0.0", port), HoneyHTTPHandler)
+        bind_ip = (
+            os.getenv("FAUXSSH_BIND_IP") or config.get("server", "bind_ip") or "0.0.0.0"
+        )
+
+        # ThreadingHTTPServer inherits TCPServer which defaults to AF_INET.
+        # We must override address_family if using IPv6.
+        if ":" in bind_ip or bind_ip == "::":
+            ThreadingHTTPServer.address_family = socket.AF_INET6
+
+        server = ThreadingHTTPServer((bind_ip, port), HoneyHTTPHandler)
         server.honey_db = db
         server.llm_interface = llm
 
+        family_str = "IPv4"
+        if server.address_family == socket.AF_INET6:
+            family_str = "IPv6"
+            # TCPServer binds automatically in __init__.
+            # We rely on OS dual stack default for AF_INET6 usually,
+            # but standard library doesn't expose V6ONLY easily without overriding server_bind.
+            # For now, binding :: usually does dual stack on Linux by default if not strictly disabled.
+
         log.info(
-            f"[*] Starting HTTP Honeypot on 0.0.0.0:{port} ({config.get('http', 'server_header')})"
+            f"[*] Starting HTTP Honeypot on {bind_ip}:{port} ({config.get('http', 'server_header')}) [{family_str}]"
         )
         # Perform Startup Cache Cleanup (Invalidate VFS overrides)
         web_root = config.get("http", "web_root") or "/var/www/html"

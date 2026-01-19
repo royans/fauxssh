@@ -907,8 +907,10 @@ def start_ssh_server(port, db_instance, llm_instance):
 
     # Create Socket
     addr_family = socket.AF_INET
+    family_str = "IPv4"
     if ":" in BIND_IP or BIND_IP == "::":
         addr_family = socket.AF_INET6
+        family_str = "IPv6"
 
     sock = socket.socket(addr_family, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -918,15 +920,16 @@ def start_ssh_server(port, db_instance, llm_instance):
             IPPROTO_IPV6 = getattr(socket, "IPPROTO_IPV6", 41)
             IPV6_V6ONLY = getattr(socket, "IPV6_V6ONLY", 26)
             sock.setsockopt(IPPROTO_IPV6, IPV6_V6ONLY, 0)
+            family_str = "IPv6 (Dual Stack)"
         except Exception as e:
-            print(f"[!] Warning: Could not set IPV6_V6ONLY=0: {e}")
+            log.warning(f"[!] Warning: Could not set IPV6_V6ONLY=0: {e}")
 
     try:
         sock.bind((BIND_IP, port))
         sock.listen(100)
-        log.info(f"[*] SSH Honeypot listening on {BIND_IP}:{port}")
+        log.info(f"[*] SSH Honeypot listening on {BIND_IP}:{port} ({family_str})")
     except Exception as e:
-        log.error(f"[!] Failed to bind SSH port {port}: {e}")
+        log.error(f"[!] Failed to bind SSH port {port} on {BIND_IP}: {e}")
         return
 
     while True:

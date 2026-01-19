@@ -626,11 +626,31 @@ def start_telnet_server(port, db, llm):
     """
 
     def runner():
-        log.info(f"[*] Starting Telnet Honeypot on 0.0.0.0:{port}...")
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        bind_ip = (
+            os.getenv("FAUXSSH_BIND_IP") or config.get("server", "bind_ip") or "0.0.0.0"
+        )
+
+        addr_family = socket.AF_INET
+        family_str = "IPv4"
+        if ":" in bind_ip or bind_ip == "::":
+            addr_family = socket.AF_INET6
+            family_str = "IPv6"
+
+        log.info(f"[*] Starting Telnet Honeypot on {bind_ip}:{port}...")
+        sock = socket.socket(addr_family, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        if addr_family == socket.AF_INET6:
+            try:
+                IPPROTO_IPV6 = getattr(socket, "IPPROTO_IPV6", 41)
+                IPV6_V6ONLY = getattr(socket, "IPV6_V6ONLY", 26)
+                sock.setsockopt(IPPROTO_IPV6, IPV6_V6ONLY, 0)
+                family_str = "IPv6 (Dual Stack)"
+            except Exception as e:
+                log.warning(f"[Telnet] Warning: Could not set IPV6_V6ONLY=0: {e}")
+
         try:
-            sock.bind(("0.0.0.0", port))
+            sock.bind((bind_ip, port))
             sock.listen(5)
 
             while True:
