@@ -260,7 +260,7 @@ import sys
 import google.generativeai as genai
 try:
     genai.configure(api_key=sys.argv[1])
-    model = genai.GenerativeModel('gemini-pro')
+    model = genai.GenerativeModel('gemma-3-27b-it')
     r = model.generate_content('test', generation_config={'max_output_tokens': 1})
     print("OK")
 except Exception as e:
