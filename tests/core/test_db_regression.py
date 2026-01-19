@@ -72,6 +72,31 @@ class TestDBSafetyRegression(unittest.TestCase):
         self.assertTrue(sync_normal, "Must set synchronous=NORMAL for perf")
         self.assertTrue(busy_timeout, "Must set busy_timeout for concurrency")
 
+    @patch("ssh_honeypot.core.database.sqlite3.connect")
+    def test_get_max_interaction_id(self, mock_connect):
+        """
+        Regression Test: Ensure get_max_interaction_id works and handles None.
+        Fixes AttributeError in background tasks.
+        """
+        mock_conn = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        db = HoneyDB()
+
+        # Case 1: Database returns a value (e.g. 42)
+        mock_cursor.fetchone.return_value = (42,)
+        self.assertEqual(db.get_max_interaction_id(), 42)
+
+        # Case 2: Database returns None (empty table)
+        mock_cursor.fetchone.return_value = (None,)
+        self.assertEqual(db.get_max_interaction_id(), 0)
+
+        # Case 3: Exception handling (should return 0)
+        mock_cursor.execute.side_effect = Exception("DB Error")
+        self.assertEqual(db.get_max_interaction_id(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

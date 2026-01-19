@@ -146,7 +146,8 @@ class PersonaGenerator:
            Format: {{ "path": "/absolute/path/to/file", "type": "file", "description": "Detailed description of content." }}
            MANDATORY FILES TO GENERATE:
              - An 'index.html' (or index.php) placed in the 'web_root' you selected above. It should reflect the company/role described.
-             - At least 3-5 other files specific to the persona (e.g. CSVs in /home/user, logs in /var/log, config files in /etc).
+             - At least 3-5 other files specific to the persona.
+             - IMPORTANT: For user-specific files (documents, downloads, secrets), place them in '/home/USER/' (literal string 'USER'). Do not use random info like '/home/alice'. Example: '/home/USER/salary_data.csv'.
              - Do NOT generate generic linux files like /bin/ls. Focus on user data and app configs.
         """
 
@@ -236,7 +237,13 @@ class PersonaGenerator:
                 if v is not None:
                     config["access_control"][k] = v
 
-        # 6. Update System Prompt (Inject Context & Hardware Identity)
+        # 6. Update Filesystem Config (Enforce USER mapping)
+        if "filesystem" not in config:
+            config["filesystem"] = {}
+        config["filesystem"]["user_home_mapping"] = True
+        config["filesystem"]["default_home_owner"] = True
+
+        # 7. Update System Prompt (Inject Context & Hardware Identity)
         current_prompt = config["prompts"]["system_prompt"]
 
         sys_meta = metadata.get("system", {})

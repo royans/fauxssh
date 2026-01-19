@@ -21,9 +21,43 @@ class HoneyMySQLSession(MysqlSession):
 
     async def init(self, connection):
         # We can access connection info here
-        self.client_address = connection.reader.get_extra_info("peername")
+        # Defensive attribute access for different mysql-mimic versions
+        peername = None
+
+        # Try writer (asyncio standard)
+        writer = getattr(connection, "writer", None)
+        if writer:
+            peername = writer.get_extra_info("peername")
+
+        # Try reader
+        if not peername:
+            reader = getattr(connection, "reader", None)
+            if reader:
+                peername = reader.get_extra_info("peername")
+
+        # Try direct access (if Connection wraps transport or has helper)
+        if not peername and hasattr(connection, "get_extra_info"):
+            peername = connection.get_extra_info("peername")
+
+        # Try 'stream' attribute (common in mysql-mimic)
+        if not peername:
+            stream = getattr(connection, "stream", None)
+            if stream and hasattr(stream, "get_extra_info"):
+                peername = stream.get_extra_info("peername")
+
+        # Try accessing _writer (sometimes private) as last resort
+        if not peername:
+            _writer = getattr(connection, "_writer", None)
+            if _writer and hasattr(_writer, "get_extra_info"):
+                peername = _writer.get_extra_info("peername")
+
+        self.client_address = peername
         if self.client_address:
             client_ip_ctx.set(self.client_address[0])
+        else:
+            log.warning(
+                f"[MySQL] Could not determine client IP from connection: {dir(connection)}"
+            )
 
         log.info(f"[*] MySQL Connection from {self.client_address}")
 

@@ -204,6 +204,7 @@ def main(argv=None):
 
     # Start SSH Server (Main Service)
     # We run SSH in a thread so we can start others too, or keep main thread for healthchecks
+    log.info(f"[*] Attempting to start SSH service on port {ssh_port}...")
     ssh_thread = threading.Thread(target=start_ssh_server, args=(ssh_port, db, llm))
     ssh_thread.daemon = True
     ssh_thread.start()
@@ -211,6 +212,7 @@ def main(argv=None):
     # Start Telnet Server (Optional)
     if str(os.getenv("FAUXSSH_ENABLE_TELNET", "true")).lower() == "true":
         t_port = int(os.getenv("FAUXSSH_TELNET_PORT", 2323))
+        log.info(f"[*] Attempting to start Telnet service on port {t_port}...")
         start_telnet_server(t_port, db, llm)
 
     # Start Redis Server (Optional)
@@ -218,6 +220,7 @@ def main(argv=None):
         r_port = int(os.getenv("FAUXSSH_REDIS_PORT", 6379))
         from ssh_honeypot.services.redis.server import start_redis_server
 
+        log.info(f"[*] Attempting to start Redis service on port {r_port}...")
         redis_thread = threading.Thread(
             target=start_redis_server, args=(r_port, db, llm)
         )
@@ -245,6 +248,7 @@ def main(argv=None):
                 log.info(f"[*] MySQL Service running on port {port}")
                 loop.run_forever()
 
+            log.info(f"[*] Attempting to start MySQL service on port {m_port}...")
             mysql_thread = threading.Thread(
                 target=start_mysql_wrapper, args=(m_port, db, llm, config)
             )
@@ -269,6 +273,7 @@ def main(argv=None):
             # MCP uses asyncio/uvicorn which is blocking or complex to thread?
             # start_mcp_server calls uvicorn.run which blocks.
             # We must run it in a thread.
+            log.info(f"[*] Attempting to start MCP service on port {mcp_port}...")
             mcp_thread = threading.Thread(
                 target=start_mcp_server, args=(mcp_port, db, llm)
             )
@@ -287,6 +292,7 @@ def main(argv=None):
         try:
             from ssh_honeypot.services.http_server.server import start_http_server
 
+            log.info(f"[*] Attempting to start HTTP service on port {h_port}...")
             http_thread = threading.Thread(
                 target=start_http_server, args=(h_port, db, llm)
             )
@@ -297,7 +303,7 @@ def main(argv=None):
         except Exception as e:
             log.error(f"[!] HTTP Service Failed to Start: {e}")
 
-    log.info(f"[*] Honeypot services started. SSH: {ssh_port}")
+    log.info(f"[*] Honeypot services initialization complete.")
 
     # Keep Main Thread Alive
     try:

@@ -17,7 +17,8 @@ class HoneyAuthPlugin(NativePasswordAuthPlugin):
         self.honey_db = honey_db
         self.config = config
         self.username = username
-        self.weak_passwords = self.config.get("auth", {}).get("weak_passwords", [])
+        auth_config = (self.config or {}).get("auth") or {}
+        self.weak_passwords = auth_config.get("weak_passwords", [])
         # We can pass password=None to super because we override matching logic
         super().__init__()
 
@@ -94,7 +95,7 @@ class HoneyMySQLIdentityProvider(IdentityProvider):
         self.honey_db = honey_db
         self.config = config
 
-    def get_user(self, username):
+    async def get_user(self, username):
         ip = client_ip_ctx.get()
 
         # Root Desperation Check
@@ -142,4 +143,4 @@ class HoneyMySQLHandler(MysqlServer):
 
     async def serve(self, host="0.0.0.0", port=3306):
         log.info(f"[*] Starting MySQL Honeypot on {host}:{port}")
-        await asyncio.start_server(self, host, port)
+        await self.start_server(host=host, port=port)

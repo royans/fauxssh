@@ -59,6 +59,19 @@ class SQLiteBackend(DatabaseBackend):
     def get_connection_info(self):
         return f"SQLite Backend (Path: {self.db_path})"
 
+    def get_max_interaction_id(self):
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT MAX(id) FROM interactions")
+            row = c.fetchone()
+            return row[0] if row and row[0] else 0
+        except Exception as e:
+            log.error(f"[DB] Error getting max interaction ID: {e}")
+            return 0
+        finally:
+            conn.close()
+
     def _init_db(self):
         # Directory creation handled by get_data_dir()
 

@@ -56,6 +56,14 @@ class TestCDIntegreation(unittest.TestCase):
             print(f"[*] Starting Test Server on {TEST_PORT}")
             os.environ["FAUXSSH_TEST_MODE"] = "1"
             os.environ["FAUXSSH_PORT"] = str(TEST_PORT)
+
+            # Disable other services to avoid port conflicts during deployment
+            os.environ["FAUXSSH_ENABLE_TELNET"] = "false"
+            os.environ["FAUXSSH_ENABLE_MYSQL"] = "false"
+            os.environ["FAUXSSH_ENABLE_REDIS"] = "false"
+            os.environ["FAUXSSH_ENABLE_HTTP"] = "false"
+            os.environ["FAUXSSH_ENABLE_MCP"] = "false"
+
             cls.server_thread = threading.Thread(target=server_main, args=([],))
             cls.server_thread.daemon = True
             cls.server_thread.start()

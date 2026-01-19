@@ -104,6 +104,10 @@ class TestPersonaGenerator:
         # 4. Check State Manager
         assert StateManager.get_last_persona() == new_persona
 
+        # 5. Check Filesystem Config Enforcement (USER mapping)
+        assert config["filesystem"]["user_home_mapping"] is True
+        assert config["filesystem"]["default_home_owner"] is True
+
     def test_generate_persona_llm_failure(self, setup_generator):
         # Simulate LLM Failure on Ping
         self.mock_llm.generate_response.side_effect = Exception("API Error")

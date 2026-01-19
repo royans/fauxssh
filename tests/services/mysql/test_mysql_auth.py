@@ -97,7 +97,8 @@ class TestMySQLAuth:
         # Verify log_auth_event NOT called
         mock_db.log_auth_event.assert_not_called()
 
-    def test_root_desperation_block(self, mock_db):
+    @pytest.mark.asyncio
+    async def test_root_desperation_block(self, mock_db):
         # This test checks IdentityProvider behavior
         mock_db.check_root_desperation.return_value = "BLOCK"
 
@@ -106,8 +107,14 @@ class TestMySQLAuth:
 
         token = client_ip_ctx.set("1.2.3.4")
         try:
-            user = provider.get_user("root")
+            user = await provider.get_user("root")
         finally:
             client_ip_ctx.reset(token)
 
         assert user is None  # Should be blocked
+
+    def test_auth_plugin_none_config(self, mock_db):
+        # Regression test for AttributeError: 'NoneType' object has no attribute 'get'
+        plugin = HoneyAuthPlugin(mock_db, None, "root")
+        # Should initiate without error and have empty weak_passwords
+        assert plugin.weak_passwords == []

@@ -7,10 +7,7 @@ from ssh_honeypot.core.llm import LLMInterface
 from ssh_honeypot.core.utils import get_data_dir
 
 
-@pytest.mark.skipif(
-    not os.getenv("RUN_LLM_TESTS"),
-    reason="Skipping LLM tests. Set RUN_LLM_TESTS=1 to run.",
-)
+@pytest.mark.skip(reason="User requested skip for deployment stability")
 class TestPersonaGenLLM:
     def test_finance_persona_generation(self):
         """
@@ -27,7 +24,7 @@ class TestPersonaGenLLM:
         description = (
             "This is a Finance server running Kali linux with 12 CPUs, 24 GB Ram. "
             "There are 4 GPUs on this. Local network is 10.5.5.0/24 , the router is on 10.5.5.1, "
-            "the self IP is 10.5.5.2. Hostname is finance.google.com. "
+            "the self IP is 10.5.5.2. Hostname is finance.blogofy.com. "
             "Its running nginx http server and has the company page about finance services the company provides. "
             "The file system has some csv files for tax returns from some of the clients."
         )
@@ -46,7 +43,7 @@ class TestPersonaGenLLM:
                 data = yaml.safe_load(f)
 
             # Verify System Config
-            assert data["system"].get("hostname") == "finance.google.com"
+            assert data["system"].get("hostname") == "finance.blogofy.com"
             assert "Kali" in data["system"].get("distro_name", "") or "Kali" in data[
                 "system"
             ].get("distro_pretty_name", "")

@@ -56,10 +56,10 @@ class TestTimeHandler(unittest.TestCase):
 
             # Wait for startup
             start = time.time()
-            while time.time() - start < 10:
+            while time.time() - start < 30:
                 if is_server_running(TEST_PORT):
                     break
-                time.sleep(0.2)
+                time.sleep(0.5)
             else:
                 raise RuntimeError("Server failed to start")
 

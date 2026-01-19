@@ -2,6 +2,7 @@ import http.server
 import socketserver
 import threading
 import time
+import socket
 import mimetypes
 import os
 import json
@@ -362,9 +363,11 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
 
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
+    allow_reuse_address = True
 
 
 def start_http_server(port, db, llm):
+    log.info(f"[HTTP] Initializing HTTP Server on port {port}...")
     try:
         bind_ip = (
             os.getenv("FAUXSSH_BIND_IP") or config.get("server", "bind_ip") or "0.0.0.0"
