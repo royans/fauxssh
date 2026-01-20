@@ -1,7 +1,6 @@
 import logging
 import asyncio
 from mysql_mimic.session import Session as MysqlSession
-from mysql_mimic import ResultColumn, ColumnType
 from ssh_honeypot.services.mysql.context import client_ip_ctx
 from ssh_honeypot.services.mysql.dummy_data import SYSTEM_VARIABLES, DUMMY_DATABASES
 import sqlglot
@@ -20,7 +19,6 @@ class HoneyMySQLSession(MysqlSession):
         self.current_db = "production_db"
         self.client_address = "unknown"
         import uuid
-
         self.session_id = str(uuid.uuid4())
 
     async def init(self, connection):
@@ -50,22 +48,45 @@ class HoneyMySQLSession(MysqlSession):
                 # 1. Try asyncio get_extra_info on stream
                 if hasattr(stream, "get_extra_info"):
                     peername = stream.get_extra_info("peername")
-
+                
                 # 2. Try raw socket getpeername on stream
-                if hasattr(stream, "get_extra_info"):
-                    peername = stream.get_extra_info("peername")
+                if not peername and hasattr(stream, "getpeername"):
+                    try:
+                        peername = stream.getpeername()
+                    except Exception:
+                        pass
+                
+                # 3. Try stream.socket.getpeername
+                if not peername:
+                    sock = getattr(stream, "socket", None)
+                    if sock and hasattr(sock, "getpeername"):
+                        try:
+                            peername = sock.getpeername()
+                        except Exception:
+                            pass
+                
+                # 4. Try stream.writer (if stream is a reader/writer pair container)
+                if not peername:
+                    s_writer = getattr(stream, "writer", None)
+                    if s_writer:
+                        if hasattr(s_writer, "get_extra_info"):
+                            peername = s_writer.get_extra_info("peername")
+                        elif hasattr(s_writer, "transport"):
+                             t = getattr(s_writer, "transport", None)
+                             if t and hasattr(t, "get_extra_info"):
+                                 peername = t.get_extra_info("peername")
 
+        # Try accessing _writer 
         if not peername:
-            # Try accessing _writer
             _writer = getattr(connection, "_writer", None)
             if _writer and hasattr(_writer, "get_extra_info"):
                 peername = _writer.get_extra_info("peername")
 
         # Try connection.writer.transport (Common in asyncio StreamWriter)
         if not peername and writer:
-            transport = getattr(writer, "transport", None)
-            if transport and hasattr(transport, "get_extra_info"):
-                peername = transport.get_extra_info("peername")
+             transport = getattr(writer, "transport", None)
+             if transport and hasattr(transport, "get_extra_info"):
+                 peername = transport.get_extra_info("peername")
 
         self.client_address = peername
         if self.client_address:
@@ -75,60 +96,47 @@ class HoneyMySQLSession(MysqlSession):
             debug_info = f"ConnType: {type(connection)}"
             if writer:
                 debug_info += f" | WriterType: {type(writer)}"
-            if hasattr(connection, "stream"):
-                debug_info += f" | StreamType: {type(connection.stream)}"
-
-            # log.warning(
-            #    f"[MySQL] Could not determine client IP. Debug: {debug_info}"
-            # )
-            pass
+            if hasattr(connection, 'stream'):
+                 debug_info += f" | StreamType: {type(connection.stream)}"
+            
+            log.warning(
+                f"[MySQL] Could not determine client IP. Debug: {debug_info}"
+            )
 
         # log.info(f"[*] MySQL Connection from {self.client_address}")
-
+        
         # Start session in DB
         self.honey_db.start_session(
             self.session_id,
             self.client_address[0] if self.client_address else "unknown",
             self.username or "unknown",
-            None,  # No password yet at init
+            None, # No password yet at init
             "unknown",
-            "mysql",
+            "mysql"
         )
 
-    async def schema(self):
-        """
-        Provide the database schema for INFORMATION_SCHEMA queries.
-        """
-        schema_map = {}
-        for db_name, tables in DUMMY_DATABASES.items():
-            schema_map[db_name] = {}
-            for table_name, table_data in tables.items():
-                if "columns" in table_data:
-                    cols = {col: "TEXT" for col in table_data["columns"]}
-                    schema_map[db_name][table_name] = cols
-
-        if "mysql" not in schema_map:
-            schema_map["mysql"] = {}
-
-        # Add basic mysql tables if needed
-        return schema_map
-
-    async def query(self, expression, sql, attrs):
+    async def query(self, expression, sql):
         log.info(f"[MySQL] Query from {self.client_address}: {sql}")
         self.honey_db.log_interaction(self.session_id, "mysql", sql, None)
 
-        # NOTE: 'expression' is already a parsed sqlglot AST.
-        # Do NOT call sqlglot.parse_one(expression) unless expression is string (it shouldn't be here)
+        # 1. Parse SQL
+        try:
+            parsed = sqlglot.parse_one(expression)
+        except Exception as e:
+            log.debug(f"[MySQL] Parse Error (falling back to LLM): {e}")
+            return await self._llm_query(sql)
 
-        # 1. Handle simple SELECTs locally
-        if isinstance(expression, exp.Select):
-            results = self._handle_local_select(expression)
+        # 2. Handle simple SELECTs locally
+        if isinstance(parsed, exp.Select):
+            # Check for system variables like SELECT @@version
+            # Simple heuristic: look for expressions that are just variables or functions we know
+            results = self._handle_local_select(parsed)
             if results is not None:
                 return results
 
             # Check for FROM clause to handle table selects
             table_name = None
-            for table in expression.find_all(exp.Table):
+            for table in parsed.find_all(exp.Table):
                 table_name = table.name
                 break
 
@@ -136,55 +144,15 @@ class HoneyMySQLSession(MysqlSession):
                 results = self._handle_table_select(table_name)
                 if results is not None:
                     return results
-                if results is not None:
-                    return results
 
-        # 2. Handle USE command
-        if isinstance(expression, exp.Use):
-            db_name = expression.this.name
-            # If it's an identifier, it might be quoted
+        # 3. Handle USE database
+        if isinstance(parsed, exp.Use):
+            db_name = parsed.this.name
             self.current_db = db_name
             return [], []
-        # Note: USE, SHOW, etc. are handled by middlewares before reaching here.
+
+        # 4. Fallback to LLM for everything else (complex selects, updates, etc)
         return await self._llm_query(sql)
-
-    def _parse(self, sql):
-        try:
-            # Default behavior
-            return [e for e in self.dialect().parse(sql) if e]
-        except sqlglot.errors.ParseError:
-            # Fallback: Try splitting by newline if standard parse fails
-            # This handles cases like "use mysql\nshow tables" without semicolons
-
-            expressions = []
-            parts = sql.split("\n")
-            if len(parts) > 1:
-                # Check if we can parse the parts individually
-                all_valid = True
-                temp_exprs = []
-                for part in parts:
-                    part = part.strip()
-                    if not part:
-                        continue
-                    try:
-                        parsed = self.dialect().parse(part)
-                        if parsed:
-                            temp_exprs.extend([e for e in parsed if e])
-                    except:
-                        all_valid = False
-                        break
-
-                if all_valid and temp_exprs:
-                    log.debug(
-                        f"[MySQL] Recovered {len(temp_exprs)} expressions by splitting newline"
-                    )
-                    return temp_exprs
-
-            # Fallback to LLM for syntax errors (let LLM interpret "selet *")
-            log.debug(
-                f"[MySQL] Parse failed, returning raw fallback for LLM: {sql[:50]}..."
-            )
-            return [sqlglot.exp.Literal.string("SYNTAX_ERROR_FALLBACK")]
 
     def _handle_local_select(self, parsed):
         """Attempts to handle SELECT statements purely with local variables."""
@@ -222,18 +190,10 @@ class HoneyMySQLSession(MysqlSession):
 
         return [tuple(row)], columns
 
-    async def use(self, database):
-        self.current_db = database
-        await super().use(database)
-
     def _handle_table_select(self, table_name):
         """Attempts to return data from dummy tables."""
         # Look in current DB
-        # Use self.database if self.current_db isn't set, or prefer base class?
-        # Base class `use` sets self.database.
-        db_to_search = self.database or self.current_db or "production_db"
-
-        db_data = DUMMY_DATABASES.get(db_to_search) or DUMMY_DATABASES.get(
+        db_data = DUMMY_DATABASES.get(self.current_db) or DUMMY_DATABASES.get(
             "production_db"
         )
         if not db_data:
@@ -290,15 +250,7 @@ class HoneyMySQLSession(MysqlSession):
             match = re.search(r"\{.*\}", resp, re.DOTALL)
             if match:
                 data = json.loads(match.group(0))
-                rows = data.get("rows", [])
-                cols_raw = data.get("columns", [])
-
-                # Explicitly convert to ResultColumn to avoid inference bugs/limitations
-                columns = [
-                    ResultColumn(name=c, type=ColumnType.VAR_STRING) for c in cols_raw
-                ]
-
-                return rows, columns
+                return data.get("rows", []), data.get("columns", [])
             else:
                 log.warning("[MySQL] LLM returned invalid format")
                 return [], []

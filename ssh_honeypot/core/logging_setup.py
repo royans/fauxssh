@@ -5,61 +5,101 @@ import sys
 def setup_logger(name="ssh_honeypot"):
     """
     Sets up a centralized logger with valid formatting:
-    Date/Time - File - Function - Line - Message
+    Date/Time - Level - Target - File:Line - Message
+    Configures the ROOT logger to ensure library logs are also formatted correctly
+    and prevents double logging.
     """
-    logger = logging.getLogger(name)
+    # 1. Get the Root Logger
+    root_logger = logging.getLogger()
 
-    # Prevent adding multiple handlers if setup is called multiple times
-    if logger.hasHandlers():
-        return logger
+    # If root already has handlers, we've already initialized
+    if root_logger.hasHandlers():
+        return logging.getLogger(name)
 
-    logger.setLevel(logging.DEBUG)
+    # Initial Global Level
+    root_logger.setLevel(logging.INFO)
 
-    # Console Handler
+    # 2. Console Handler (for startup/test)
     ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.DEBUG)
+    ch.setLevel(logging.INFO)
 
-    # Format: 2026-01-01 19:42:59   server.py   handle_connection   555   Message
-    # Using 3 spaces as distinct separator
+    # Structured Format
+    # 2026-01-01 19:42:59   INFO   ssh_honeypot   server.py:123   Message
     formatter = logging.Formatter(
-        "%(asctime)s   %(filename)s   %(funcName)s   %(lineno)d   %(message)s",
+        "%(asctime)s   %(levelname)-8s   %(name)-15s   %(filename)s:%(lineno)d   %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     ch.setFormatter(formatter)
+    root_logger.addHandler(ch)
 
-    logger.addHandler(ch)
-
-    # File Handler (Rotating)
+    # 3. File Handler
     try:
         from logging.handlers import TimedRotatingFileHandler
         import os
-
-        # Avoid circular import with config by using utils directly if possible, or try import
-        # ssh_honeypot.core.utils should be safe
         from ssh_honeypot.core.utils import get_data_dir
 
         log_dir = get_data_dir()
-        if log_dir and os.path.exists(log_dir):
-            log_file = os.path.join(log_dir, "server.log")
+        if log_dir:
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir, exist_ok=True)
+
+            log_file = os.path.join(log_dir, "fauxssh.log")
 
             # Rotate at midnight, keep 7 days
             fh = TimedRotatingFileHandler(
                 log_file, when="midnight", interval=1, backupCount=7
             )
-            fh.setLevel(logging.DEBUG)
+            fh.setLevel(logging.INFO)
             fh.setFormatter(formatter)
-            logger.addHandler(fh)
+            root_logger.addHandler(fh)
 
-            # SUCCESS: Disable Console Handler to prevent duplication in server_startup.log
-            # UNLESS we are in test mode, where we want to see logs in stdout
+            # Disable Console Handler in production to keep stdout clean for start.sh
             if os.getenv("FAUXSSH_TEST_MODE") != "1":
-                logger.removeHandler(ch)
+                root_logger.removeHandler(ch)
 
     except Exception as e:
-        # Fallback to console only if file setup fails
         print(f"[!] Logging File Setup Failed: {e}")
 
-    return logger
+    # 4. Suppress Noisy Libraries by default
+    logging.getLogger("paramiko").setLevel(logging.WARNING)
+    logging.getLogger("mysql_mimic").setLevel(logging.WARNING)
+    logging.getLogger("passlib").setLevel(logging.ERROR)
+
+    return logging.getLogger(name)
+
+
+def apply_config_to_logging(config):
+    """
+    Applies the configuration values to the logging system.
+    Called after config.yaml is loaded.
+    """
+    log_cfg = config.get("logging") or {}
+    global_level_name = log_cfg.get("level", "INFO").upper()
+    global_level = getattr(logging, global_level_name, logging.INFO)
+
+    # 1. Update Global ROOT Logger Level
+    root_logger = logging.getLogger()
+    root_logger.setLevel(global_level)
+    for handler in root_logger.handlers:
+        handler.setLevel(global_level)
+
+    # 2. Apply Module-Specific Levels
+    modules = log_cfg.get("modules") or {}
+    for mod_name, level_name in modules.items():
+        try:
+            level = getattr(logging, level_name.upper(), logging.INFO)
+            logging.getLogger(mod_name).setLevel(level)
+            logging.getLogger("ssh_honeypot").info(
+                f"[Logging] Set module '{mod_name}' to {level_name.upper()}"
+            )
+        except Exception as e:
+            logging.getLogger("ssh_honeypot").warning(
+                f"[Logging] Failed to set module '{mod_name}' level: {e}"
+            )
+
+    logging.getLogger("ssh_honeypot").info(
+        f"[Logging] Applied config-based levels (Global: {global_level_name})"
+    )
 
 
 def configure_paramiko_noise():

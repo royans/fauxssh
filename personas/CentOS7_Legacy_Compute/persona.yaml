@@ -48,6 +48,12 @@ filesystem:
        mode: "0700"
     "~/salaries_2023_Q4.csv":
        mode: "0600"
+    "~/customer_db_dump.sql":
+       mode: "0600"
+    "~/risk_models/black_scholes.py":
+       mode: "0600"
+    "~/client_portfolios/portfolio_allocations_2024.csv":
+       mode: "0600"
     "/var/www/html/phpinfo.php":
        mode: "0644"
        owner: "apache"
@@ -111,6 +117,6 @@ prompts:
        Return ONLY a JSON object with these keys:
        - type: (Reconnaissance, Execution, Persistence, etc.)
        - stage: (Recon, Weaponization, Delivery, Exploitation, Installation, C2, Actions)
-       - risk: (Integer 0-10)
+       - risk: (Integer 0-99)
        - explanation: (Brief 1 sentence)
        - mitre_technique_id: (Optional String, e.g. "T1059.004")

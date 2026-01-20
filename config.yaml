@@ -13,6 +13,12 @@ realism:
     min_ms: 20
     max_ms: 300
 
+logging:
+  level: INFO
+  modules:
+    ssh_honeypot.services.mysql: INFO
+    ssh_honeypot.core.llm: DEBUG
+
 database:
   type: "sqlite" # or "postgres"
   postgres:
@@ -50,7 +56,13 @@ redis:
 mysql:
   enabled: true
   port: 3306
-  allow_any_auth: false  # If true, randomly allows login for unknown users
+  auth:
+    allow_any: true
+    allow_any_rate: 1.0 # Allow everything during test/debug
+    weak_passwords:
+      - "root:root"
+      - "admin:admin"
+      - "test:test"
 
 
 mcp:

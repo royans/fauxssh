@@ -103,6 +103,19 @@ def test_analyze_command(mock_post, llm):
             }
         ]
     }
+    mock_resp.json.return_value = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "text": '```json\\n{"type": "Recon", "stage": "Recon", "risk": 2, "explanation": "Simple list"}\\n```'
+                        }
+                    ]
+                }
+            }
+        ]
+    }
     mock_post.return_value = mock_resp
 
     result = llm.analyze_command("ls")
@@ -112,8 +125,14 @@ def test_analyze_command(mock_post, llm):
     assert result["explanation"] == "Simple list"
 
 
+@patch("ssh_honeypot.core.llm.get_db_backend")
 @patch("ssh_honeypot.core.llm.requests.post")
-def test_analyze_command_failure(mock_post, llm):
+def test_analyze_command_failure(mock_post, mock_db_getter, llm):
+    # Mock DB Bypass (Cache Miss)
+    mock_db = MagicMock()
+    mock_db.get_llm_response.return_value = None
+    mock_db_getter.return_value = mock_db
+
     # Mock Failure
     mock_resp = MagicMock()
     mock_resp.status_code = 500

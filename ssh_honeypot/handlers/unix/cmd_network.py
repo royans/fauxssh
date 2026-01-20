@@ -231,15 +231,17 @@ def handle_ping(args):
     received = 0
 
     for seq in range(1, count + 1):
-        # Simulate Delay
+        # 1. Real-world interval (1 second between pings)
+        if seq > 1:
+            time.sleep(1.0)
+            total_time += 1.0
+
+        # 2. Network Latency Simulation (the RTT)
         delay = latency_base + random.uniform(-latency_jitter, latency_jitter)
         if delay < 0:
             delay = 0.0001
 
         # Sleep to simulate network time (blocks the thread, creating feel of latency)
-        # Note: In production this blocks the handler thread.
-        # Since we are single-threaded per session (mostly), this pauses the user's terminal.
-        # This is DESIRED behavior for ping.
         time.sleep(delay)
         total_time += delay
 

@@ -7,6 +7,17 @@ class AptCommand(BaseHandler):
         """
         Handles 'apt' and 'apt-get' commands.
         """
+        # Distro Check
+        from ssh_honeypot.core.config import config
+
+        distro = config.get("persona", "system", "distro_id") or "debian"
+        if distro not in ["debian", "ubuntu", "kali"]:
+            return (
+                f"-bash: apt: command not found\n",
+                {},
+                {"source": "local", "cached": False},
+            )
+
         user = context.get("user", "unknown")
 
         # Permission check

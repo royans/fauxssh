@@ -300,3 +300,13 @@ class DatabaseBackend(ABC):
     def purge_poisoned_cache(self):
         """Purges any cached responses containing AI Core error messages."""
         pass
+
+    @abstractmethod
+    def get_llm_response(self, prompt_hash):
+        """Retrieves a cached LLM response by prompt hash if it exists and is fresh."""
+        pass
+
+    @abstractmethod
+    def save_llm_response(self, prompt_hash, prompt_text, response):
+        """Caches an LLM response."""
+        pass

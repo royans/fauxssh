@@ -115,6 +115,19 @@ class PostgresBackend(DatabaseBackend):
             except:
                 pass
 
+    def get_max_interaction_id(self):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT MAX(id) FROM interactions")
+            row = cursor.fetchone()
+            return row[0] if row and row[0] else 0
+        except Exception as e:
+            log.error(f"[Postgres] Error getting max interaction ID: {e}")
+            return 0
+        finally:
+            conn.close()
+
     def _init_db(self):
         """
         Initialize the database schema.
@@ -322,6 +335,32 @@ class PostgresBackend(DatabaseBackend):
             )
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_llm_usage_ip_time ON llm_usage(ip, timestamp)"
+            )
+
+            # LLM Response Cache (Jan 19)
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS llm_response_cache (
+                    prompt_hash TEXT PRIMARY KEY,
+                    prompt_text TEXT,
+                    response TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """
+            )
+
+            # LLM Response Cache (Jan 19)
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS llm_response_cache (
+                    prompt_hash TEXT PRIMARY KEY,
+                    prompt_text TEXT,
+                    response TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """
             )
 
             # Payload Requests (Many-to-One Tracker)
@@ -1639,5 +1678,49 @@ class PostgresBackend(DatabaseBackend):
             log.info("[Postgres] Purged poisoned cache entries.")
         except Exception as e:
             log.error(f"[Postgres] Error purging cache: {e}")
+        finally:
+            conn.close()
+
+    def get_llm_response(self, prompt_hash):
+        """Retrieves a cached LLM response by prompt hash if it exists and is fresh (30 days)."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            # PostGres syntax: NOW() - INTERVAL '30 days'
+            cursor.execute(
+                """
+                SELECT response FROM llm_response_cache 
+                WHERE prompt_hash = %s AND created_at > NOW() - INTERVAL '30 days'
+                """,
+                (prompt_hash,),
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None
+        except Exception as e:
+            log.error(f"[Postgres] Error getting LLM cache: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def save_llm_response(self, prompt_hash, prompt_text, response):
+        """Caches an LLM response."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            # Upsert in Postgres (ON CONFLICT)
+            cursor.execute(
+                """
+                INSERT INTO llm_response_cache (prompt_hash, prompt_text, response)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (prompt_hash) DO UPDATE SET
+                    response = EXCLUDED.response,
+                    updated_at = CURRENT_TIMESTAMP,
+                    created_at = CURRENT_TIMESTAMP -- Reset expiry
+                """,
+                (prompt_hash, prompt_text, response),
+            )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Error saving LLM cache: {e}")
         finally:
             conn.close()

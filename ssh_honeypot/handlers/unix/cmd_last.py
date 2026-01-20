@@ -32,8 +32,27 @@ class LastCommand(BaseHandler):
 
         output = []
         import random
+        from ssh_honeypot.core.config import config
+
+        # Inject Persona Users (Historical)
+        persona_users = config.get("persona", "system", "users") or []
+        for p_user in persona_users:
+            # Add 1-2 fake historical entries for this user
+            for _ in range(random.randint(1, 2)):
+                tty = f"pts/{random.randint(0, 10)}"
+                ip_stub = "10.0.0." + str(random.randint(2, 254))
+                # Random date in last few days
+                days_ago = random.randint(1, 5)
+                login_dt = datetime.now().replace(
+                    day=datetime.now().day - days_ago, hour=random.randint(8, 20)
+                )
+                start_str = login_dt.strftime("%a %b %d %H:%M")
+                dur_hours = random.randint(1, 8)
+                line = f"{p_user:<8} {tty:<12} {ip_stub:<16} {start_str:<16}   ({dur_hours:02d}:{random.randint(0, 59):02d})"
+                output.append(line)
 
         for s in sessions:
+
             # FILTER: Ignore specific IPs
             if s["ip"] in ignored_ips:
                 continue

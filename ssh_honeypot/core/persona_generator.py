@@ -103,12 +103,13 @@ class PersonaGenerator:
         Analyze this description and return a JSON object with the following fields to fully customize the server:
         
         1. system: An object containing:
-           - hostname: (Extract the most specific FQDN, e.g. 'web.abc.com')
+           - hostname: (Extract the most specific FQDN or hostname found)
            - os_name: "GNU/Linux"
-           - distro_name: (e.g. "Kali GNU/Linux", "CentOS")
-           - distro_version: (e.g. "2023.4", "7")
-           - distro_pretty_name: (e.g. "Kali GNU/Linux Rolling")
-           - kernel_release: (e.g. "6.5.0-kali3-amd64")
+           - distro_name: (e.g. Debian, CentOS, Ubuntu, Kali)
+           - distro_version: (e.g. 11, 7.9, 22.04)
+           - distro_pretty_name: (Full string from /etc/os-release)
+           - kernel_release: (e.g. 5.10.0-21-cloud-amd64)
+           - users: (A list of 2-4 realistic usernames that would exist on this system, e.g. [ "admin", "db_manager" ])
            - processor_version: (Specific CPU model if mentioned, otherwise realistic default)
            
         2. hardware: An object containing (for context injection):
@@ -145,6 +146,8 @@ class PersonaGenerator:
         8. files: A list of objects representing CRITICAL and PERSONALIZED files found on this specific system.
            Format: {{ "path": "/absolute/path/to/file", "type": "file", "description": "Detailed description of content." }}
            MANDATORY FILES TO GENERATE:
+             - /etc/hostname (Must match the hostname chosen above)
+             - /etc/resolv.conf (Realistic nameservers for the network type)
              - An 'index.html' (or index.php) placed in the 'web_root' you selected above. It should reflect the company/role described.
              - At least 3-5 other files specific to the persona.
              - IMPORTANT: For user-specific files (documents, downloads, secrets), place them in '/home/USER/' (literal string 'USER'). Do not use random info like '/home/alice'. Example: '/home/USER/salary_data.csv'.
@@ -243,57 +246,52 @@ class PersonaGenerator:
         config["filesystem"]["user_home_mapping"] = True
         config["filesystem"]["default_home_owner"] = True
 
-        # 7. Update System Prompt (Inject Context & Hardware Identity)
-        current_prompt = config["prompts"]["system_prompt"]
+        # 7. Update System Prompt (Intelligent Merge)
+        log.info("Integrating persona description into system prompt...")
+        base_prompt = config["prompts"]["system_prompt"]
 
-        sys_meta = metadata.get("system", {})
-        hw_meta = metadata.get("hardware", {})
-        svc_meta = metadata.get("services", {})
+        prompt = f"""
+        You are an AI specializing in honeypot persona design.
+        I have a BASE system prompt for a honeypot, and a NEW persona description.
+        
+        BASE PROMPT:
+        {base_prompt}
+        
+        NEW PERSONA DESCRIPTION:
+        "{original_desc}"
+        
+        METADATA FROM ANALYSIS:
+        {json.dumps(metadata, indent=2)}
+        
+        INSTRUCTION:
+        Integrate the NEW PERSONA identity into the BASE PROMPT.
+        - The resulting prompt MUST maintain ALL the "BEHAVIOR RULES" and "CRITICAL" rules from the BASE PROMPT.
+        - It should adopt the TONE, ROLE, and IDENTITY of the NEW PERSONA.
+        - Update any hardcoded hostname or OS references to match the METADATA.
+        - Return ONLY the final integrated system prompt text. Do not include markdown blocks or explanations.
+        """
 
-        os_identity = (
-            f"You are a **{sys_meta.get('distro_pretty_name', 'Linux Server')}**."
-        )
-
-        # Construct Hardware Context
-        hw_context = []
-        if hw_meta.get("cpu_info"):
-            hw_context.append(f"CPU: {hw_meta['cpu_info']}")
-        if hw_meta.get("memory"):
-            hw_context.append(f"RAM: {hw_meta['memory']}")
-        if hw_meta.get("swap"):
-            hw_context.append(f"Swap: {hw_meta['swap']}")
-        if hw_meta.get("disk_info"):
-            hw_context.append(f"Disk: {hw_meta['disk_info']}")
-        if hw_meta.get("gpu_info"):
-            hw_context.append(f"GPU: {hw_meta['gpu_info']}")
-
-        hw_str = ", ".join(hw_context) if hw_context else "Hardware: Default Container"
-
-        # Construct Service/Security Context
-        svc_str = ""
-        if svc_meta.get("running_processes"):
-            procs = ", ".join(svc_meta["running_processes"])
-            svc_str += (
-                f"\n      - **RUNNING SERVICES**: Should appear in 'ps aux': {procs}."
+        try:
+            integrated_prompt = self.llm.generate_response(
+                "MERGE_PROMPT", "/", [], [], [], override_prompt=prompt
             )
+            # Clean markdown
+            integrated_prompt = self._clean_llm_markdown(integrated_prompt)
 
-        if svc_meta.get("patch_status"):
-            svc_str += f"\n      - **SECURITY POSTURE**: {svc_meta['patch_status']}."
-
-        context_Role = metadata.get("prompt_context", "You are a generic server.")
-
-        injection = f"""
-      - **DYNAMIC IDENTITY**: {os_identity} {context_Role}
-      - **HARDWARE**: {hw_str} (Use this for 'free', 'lscpu', 'df -h', 'nvidia-smi').
-      - **OS OVERRIDE**: Act exactly like {sys_meta.get('distro_name', 'Linux')} {sys_meta.get('distro_version', '')}.{svc_str}
-"""
-
-        if "BEHAVIOR RULES:" in current_prompt:
-            config["prompts"]["system_prompt"] = current_prompt.replace(
-                "BEHAVIOR RULES:", f"BEHAVIOR RULES:{injection}"
-            )
-        else:
-            config["prompts"]["system_prompt"] += injection
+            if integrated_prompt and len(integrated_prompt) > 100:
+                config["prompts"]["system_prompt"] = integrated_prompt
+            else:
+                log.warning(
+                    "Integrated prompt was too short or empty. Falling back to injection method."
+                )
+                config["prompts"][
+                    "system_prompt"
+                ] += f"\n\n# Dynamic Context\n{metadata.get('prompt_context', '')}"
+        except Exception as e:
+            log.error(f"Failed to merge system prompt: {e}")
+            config["prompts"][
+                "system_prompt"
+            ] += f"\n\n# Dynamic Context\n{metadata.get('prompt_context', '')}"
 
         with open(yaml_path, "w") as f:
             yaml.dump(config, f, default_flow_style=False)

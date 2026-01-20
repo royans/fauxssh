@@ -1,0 +1,11 @@
+Client_ID,Portfolio_Type,Asset_Class,Allocation_Percentage,Last_Rebalance
+C9921,Growth,Equities_US,45.0,2023-11-15
+C9921,Growth,Equities_Intl,20.0,2023-11-15
+C9921,Growth,Fixed_Income,25.0,2023-11-15
+C9921,Growth,Alternative,10.0,2023-11-15
+C8845,Conservative,Equities_US,20.0,2023-12-01
+C8845,Conservative,Fixed_Income,60.0,2023-12-01
+C8845,Conservative,Cash,20.0,2023-12-01
+C7732,High_Yield,High_Yield_Bonds,50.0,2023-10-20
+C7732,High_Yield,Equities_Dividend,30.0,2023-10-20
+C7732,High_Yield,REITs,20.0,2023-10-20

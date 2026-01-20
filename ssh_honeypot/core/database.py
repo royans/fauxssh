@@ -272,6 +272,17 @@ class SQLiteBackend(DatabaseBackend):
             "CREATE INDEX IF NOT EXISTS idx_llm_usage_ip_time ON llm_usage(ip, timestamp)"
         )
 
+        # LLM Response Cache (Jan 19)
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS llm_response_cache (
+            prompt_hash TEXT PRIMARY KEY,
+            prompt_text TEXT,
+            response TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )"""
+        )
+
         # Analytics: Response Tracking (Jan 3)
         try:
             c.execute("ALTER TABLE interactions ADD COLUMN response_md5 TEXT")
@@ -2478,6 +2489,47 @@ class SQLiteBackend(DatabaseBackend):
             log.info("[SQLite] Purged poisoned cache entries.")
         except Exception as e:
             log.error(f"[SQLite] Error purging cache: {e}")
+        finally:
+            conn.close()
+
+    def get_llm_response(self, prompt_hash):
+        """Retrieves a cached LLM response by prompt hash if it exists and is fresh (30 days)."""
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            # Check if exists and is younger than 30 days
+            c.execute(
+                """
+                SELECT response FROM llm_response_cache 
+                WHERE prompt_hash = ? AND created_at > datetime('now', '-30 days')
+                """,
+                (prompt_hash,),
+            )
+            row = c.fetchone()
+            return row[0] if row else None
+        except Exception as e:
+            log.error(f"[SQLite] Error getting LLM cache: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def save_llm_response(self, prompt_hash, prompt_text, response):
+        """Caches an LLM response."""
+        conn = self._get_conn()
+        try:
+            # Use REPLACE to update timestamp if it already exists (though hash collision unlikely different prompt)
+            # Actually, we should update updated_at if we overwrite.
+            # But REPLACE deletes and inserts new row, so created_at resets to CURRENT_TIMESTAMP which is what we want (refresh TTL)
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO llm_response_cache (prompt_hash, prompt_text, response)
+                VALUES (?, ?, ?)
+                """,
+                (prompt_hash, prompt_text, response),
+            )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[SQLite] Error saving LLM cache: {e}")
         finally:
             conn.close()
 

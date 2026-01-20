@@ -5,7 +5,10 @@ from ssh_honeypot.handlers.unix.cmd_apt import AptCommand
 
 @pytest.fixture
 def handler():
-    return AptCommand(MagicMock(), MagicMock())
+    from unittest.mock import patch
+
+    with patch("ssh_honeypot.core.config.config.get", return_value="debian"):
+        yield AptCommand(MagicMock(), MagicMock())
 
 
 def test_apt_root_required(handler):

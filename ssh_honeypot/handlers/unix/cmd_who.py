@@ -15,7 +15,28 @@ class WhoCommand(BaseHandler):
             sessions = self.db.get_active_sessions()
 
         output = []
+
+        # Inject Persona Users
+        from ssh_honeypot.core.config import config
+
+        persona_users = config.get("persona", "system", "users") or []
+        for p_user in persona_users:
+            if not any(s["user"] == p_user for s in sessions):
+                # Add a fake session for this persona user
+                import random
+
+                tty = f"pts/{random.randint(10, 50)}"
+                # Mock a start time ~ few hours ago
+                time_str = (
+                    datetime.now().replace(
+                        hour=random.randint(0, 8), minute=random.randint(0, 59)
+                    )
+                ).strftime("%Y-%m-%d %H:%M")
+                line = f"{p_user:<8} {tty:<12} {time_str} (127.0.0.1)"
+                output.append(line)
+
         for s in sessions:
+
             # standard who format:
             # root     pts/0        2023-10-27 10:00 (192.168.1.55)
 

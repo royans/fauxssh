@@ -61,10 +61,18 @@ class TestPersonaGenerator:
             ]
         }"""
 
-        # LLM Side Effects: 1. Ping->Pong, 2. Analysis->JSON, 3. File->Content
+        # LLM Side Effects: 1. Ping->Pong, 2. Analysis->JSON, 3. Merge->Prompt, 4. File->Content
+        integrated_prompt = """
+        DYNAMIC IDENTITY: This is a classified gateway for Area 51.
+        HARDWARE: 16GB RAM, 4 vCPU, 500GB SSD. 
+        RUNNING SERVICES: nginx, mysqld.
+        BEHAVIOR RULES: Maintain strict security posture and act as a legacy gateway server.
+        Instructions: You are a secure vault simulator.
+        """
         self.mock_llm.generate_response.side_effect = [
             "Pong",
             analysis_json,
+            integrated_prompt,
             "TOP SECRET DATA",
         ]
 
@@ -130,7 +138,12 @@ class TestPersonaGenerator:
             }
         }"""
 
-        self.mock_llm.generate_response.side_effect = ["Pong", analysis_json, ""]
+        self.mock_llm.generate_response.side_effect = [
+            "Pong",
+            analysis_json,
+            "INTEGRATED PROMPT",
+            "",
+        ]
 
         new_persona = self.generator.generate_persona(desc)
         self.generated_personas.append(new_persona)
@@ -152,6 +165,7 @@ class TestPersonaGenerator:
         self.mock_llm.generate_response.side_effect = [
             "Pong",
             wrapped_json,
+            "INTEGRATED PROMPT",
             "",  # no files
         ]
 

@@ -11,7 +11,7 @@ from ssh_honeypot.core.database import HoneyDB, get_db_backend
 from ssh_honeypot.core.llm import LLMInterface
 from ssh_honeypot.core.config import config
 from ssh_honeypot.core.utils import get_data_dir
-from ssh_honeypot.core.logging_setup import log
+from ssh_honeypot.core.logging_setup import log, apply_config_to_logging
 from ssh_honeypot.core.persona_validator import validate_active_persona
 from ssh_honeypot.core.background_tasks import start_background_tasks
 from ssh_honeypot.core import fs_seeder
@@ -39,6 +39,9 @@ def main(argv=None):
         help="Run a single pass of the analysis loop and exit",
     )
     args = parser.parse_args(argv)
+
+    # 0. Apply logging config immediately after loading (config was imported at module level)
+    apply_config_to_logging(config)
 
     # Initialize LLM early if needed for generation
     api_key = os.getenv("GOOGLE_API_KEY")
@@ -110,7 +113,7 @@ def main(argv=None):
                     # We need to init DB to clear it properly
                     temp_db = HoneyDB()
                     temp_db.clear_cache()
-                    print("[*] Cache cleared.")
+                    log.info("[*] Cache cleared.")
         except Exception as e:
             log.error(f"Failed to prompt for cache clear: {e}")
 
@@ -144,13 +147,10 @@ def main(argv=None):
             pass
 
     if not api_key:
-        # High Visibility Warning
-        print("\033[1;31m" + "=" * 60 + "\033[0m")
-        print("\033[1;31mCRITICAL WARNING: GOOGLE_API_KEY IS MISSING!\033[0m")
-        print(
-            "\033[1;31mAI-powered content generation and analysis will be disabled.\033[0m"
-        )
-        print("\033[1;31m" + "=" * 60 + "\033[0m")
+        log.warning("=" * 60)
+        log.warning("CRITICAL WARNING: GOOGLE_API_KEY IS MISSING!")
+        log.warning("AI-powered content generation and analysis will be disabled.")
+        log.warning("=" * 60)
         log.error("GOOGLE_API_KEY not found. AI Core is OFFLINE.")
 
     # Clear any previously "poisoned" cache entries in background

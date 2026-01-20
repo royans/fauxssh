@@ -24,3 +24,22 @@ fauxssh = "ssh_honeypot.server:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["ssh_honeypot*"]
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+  | personas
+)/
+'''

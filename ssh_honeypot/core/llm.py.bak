@@ -3,22 +3,16 @@ import json
 import os
 import re
 
-import hashlib
-
 try:
     from .config import config
 except ImportError:
     from config_manager import config
 
+# Configuration loaded from config_manager
 try:
     from .logging_setup import log
 except ImportError:
     from ssh_honeypot.core.logging_setup import log
-
-try:
-    from .database import get_db_backend
-except ImportError:
-    from ssh_honeypot.core.database import get_db_backend
 
 
 class LLMInterface:
@@ -46,12 +40,6 @@ class LLMInterface:
         except Exception as e:
             log.error(f"[!] Error loading prompt template: {e}")
             self.prompt_template = "Error: Prompt template missing."
-
-    def query(self, prompt, **kwargs):
-        """
-        Generic query method for arbitary prompts (used by MySQL/Redis layers).
-        """
-        return self._call_api(prompt)
 
     def generate_response(
         self,
@@ -213,16 +201,6 @@ class LLMInterface:
             return "Error: Content generation failed."
 
     def _call_api(self, prompt):
-        # 1. Check Cache
-        prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
-        db = get_db_backend()
-        cached_resp = db.get_llm_response(prompt_hash)
-        if cached_resp:
-            log.debug(f"[LLM] Cache Hit for hash {prompt_hash[:8]}")
-            return cached_resp
-
-        log.debug(f"[LLM] Cache Miss for hash {prompt_hash[:8]}")
-
         headers = {"Content-Type": "application/json"}
         data = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -253,11 +231,7 @@ class LLMInterface:
                 text = re.sub(r"^```[a-zA-Z0-9+-]*\s*", "", text)
                 # Remove trailing fence
                 text = re.sub(r"\s*```$", "", text)
-
-                final_text = text.strip()
-                # 2. Save to Cache
-                db.save_llm_response(prompt_hash, prompt, final_text)
-                return final_text
+                return text.strip()
             except (KeyError, IndexError) as e:
                 print(f"[!] LLM Response Parsing Error: {e} | Resp: {resp.text[:100]}")
                 return '{"output": "Error: Parsing Failure.", "new_cwd": null}'

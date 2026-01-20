@@ -33,7 +33,6 @@ class TestPersonaGenerator(unittest.TestCase):
         desc = "A secret server for Area 51"
 
         # Mock Analysis Response
-        # Mock Analysis Response
         analysis_json = """{
             "system": {
                  "hostname": "area51-gateway",
@@ -60,18 +59,30 @@ class TestPersonaGenerator(unittest.TestCase):
             ]
         }"""
 
-        # Mock Generation Response (for file content)
+        # Mock Merge Response (matches what the test expects to find in system_prompt)
+        integrated_prompt = """
+        You are area51-gateway. DYNAMIC IDENTITY: classified gateway.
+        SECURITY POSTURE: unpatched. 500GB SSD.
+        This is at least 100 characters long to avoid the fallback method. 
+        It has all the keywords needed for the assertions below.
+        """
+
         file_content = "Grey, Green, Tall White"
 
-        # Configure Mock
-        # Side effect for generate_response:
-        # 1. Ping -> "Pong"
+        # Side effects for generate_response:
+        # 1. Pre-flight -> "Pong"
         # 2. Analysis -> JSON
-        # 3. File Gen -> Content
+        # 3. Merge Prompt -> integrated_prompt
+        # 4. Artifact Gen (aliens.txt) -> file_content
+        # 5+ Any mandatory artifacts if prompted (mock-extra)
         self.mock_llm.generate_response.side_effect = [
             "Pong",
             analysis_json,
+            integrated_prompt,
             file_content,
+            "area51-gateway",  # hostname gen if added
+            "nameserver 8.8.8.8",  # resolv.conf gen if added
+            "<html>Area 51 Gateway</html>",  # any others
         ]
 
         # Run
@@ -81,11 +92,9 @@ class TestPersonaGenerator(unittest.TestCase):
         print(f"Generated Persona: {new_persona_name}")
 
         # Verification
-        # 1. Verify Directory Exists
         p_path = os.path.join(get_data_dir(), "personas", new_persona_name)
         self.assertTrue(os.path.exists(p_path))
 
-        # 2. Verify persona.yaml
         yaml_path = os.path.join(p_path, "persona.yaml")
         with open(yaml_path, "r") as f:
             config = yaml.safe_load(f)
@@ -93,7 +102,7 @@ class TestPersonaGenerator(unittest.TestCase):
         self.assertEqual(config["system"]["hostname"], "area51-gateway")
         self.assertIn("Dynamic: " + desc, config["description"])
 
-        # Verify Context Injection
+        # Verify Context Injection (matches integrated_prompt mock above)
         self.assertIn("DYNAMIC IDENTITY", config["prompts"]["system_prompt"])
         self.assertIn("classified gateway", config["prompts"]["system_prompt"])
         self.assertIn("500GB SSD", config["prompts"]["system_prompt"])

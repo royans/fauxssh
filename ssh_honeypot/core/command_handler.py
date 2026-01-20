@@ -1842,35 +1842,8 @@ Sector size (logical/physical): 512 bytes / 512 bytes
     def handle_uptime(self, cmd, context):
         return self.system_handler.handle_uptime(cmd, context)
 
-    def handle_ifconfig(self, cmd, context):
-        # return self.system_handler.handle_ifconfig(cmd, context)
-        # Use new consistent network persona
-        out = self.network_handlers.handle_ifconfig([])
-        return f"{out}\n", {}
-
-    def handle_ip(self, cmd, context):
-        args = cmd.split()[1:]
-        out = self.network_handlers.handle_ip(args)
-        return f"{out}\n", {}
-
-    def handle_ping(self, cmd, context):
-        args = cmd.split()[1:]
-        out = self.network_handlers.handle_ping(args)
-        return f"{out}\n", {}
-
-    def handle_netstat(self, cmd, context):
-        args = cmd.split()[1:]
-        client_ip = context.get("client_ip", "unknown")
-        out = self.network_handlers.handle_netstat(args, client_ip)
-        return f"{out}\n", {}
-
-    def handle_ss(self, cmd, context):
-        args = cmd.split()[1:]
-        client_ip = context.get("client_ip", "unknown")
-        out = self.network_handlers.handle_ss(args, client_ip)
-        return f"{out}\n", {}
-
     def handle_free(self, cmd, context):
+
         return self.system_handler.handle_free(cmd, context)
 
     def handle_df(self, cmd, context):
@@ -2979,17 +2952,25 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
         if not j or "processes" not in j:
             # 3. Request LLM Process List (Cache Miss)
-            print(f"[Session: {session_id}] [LLM] Calling LLM API for 'ps'...")
-            # We ask for 'alabaster' as the placeholder user.
-            prompt = """ps -ef (INSTRUCTION: Return a valid JSON object with key 'processes'.
+            # Get Persona Services
+            from ssh_honeypot.core.config import config
+
+            persona_procs = config.get("persona", "services", "running_processes") or []
+            proc_context = (
+                f"\nMANDATORY PROCESSES TO INCLUDE: {', '.join(persona_procs)}"
+                if persona_procs
+                else ""
+            )
+
+            prompt = f"""ps -ef (INSTRUCTION: Return a valid JSON object with key 'processes'.
 Example format:
-{
+{{
   "processes": [
-    {"user": "root", "pid": 1, "ppid": 0, "cpu": 0.0, "mem": 0.1, "start": "10:00", "time": "00:00:05", "command": "/sbin/init"},
-    {"user": "alabaster", "pid": 1001, "ppid": 1, "cpu": 0.0, "mem": 0.2, "start": "10:05", "time": "00:00:01", "command": "-bash"}
+    {{"user": "root", "pid": 1, "ppid": 0, "cpu": 0.0, "mem": 0.1, "start": "10:00", "time": "00:00:05", "command": "/sbin/init"}},
+    {{"user": "alabaster", "pid": 1001, "ppid": 1, "cpu": 0.0, "mem": 0.2, "start": "10:05", "time": "00:00:01", "command": "-bash"}}
   ]
-}
-Generate realistic processes for a web server (blogofy.com). Include system services, sshd, and user shell.)"""
+}}
+Generate realistic processes for a web server (blogofy.com). Include system services, sshd, and user shell.{proc_context})"""
 
             resp = self.llm.generate_response(
                 "ps",

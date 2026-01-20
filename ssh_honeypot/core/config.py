@@ -63,7 +63,15 @@ DEFAULT_CONFIG_DICT = {
     },
     "telnet": {"enabled": True, "port": 2323},
     "redis": {"enabled": True, "port": 6379},
-    "mysql": {"enabled": True, "port": 3306},
+    "mysql": {
+        "enabled": True,
+        "port": 3306,
+        "auth": {
+            "allow_any": False,
+            "allow_any_rate": 0.5,
+            "weak_passwords": ["root:root", "admin:admin", "test:test"],
+        },
+    },
     "mcp": {
         "enabled": True,
         "port": 8000,
@@ -71,8 +79,11 @@ DEFAULT_CONFIG_DICT = {
         "throttle_delay": 2.0,
     },
     "logging": {
+        "level": "INFO",
+        "file": os.path.join(get_data_dir(), "fauxssh.log"),
         "json_log_file": os.path.join(get_data_dir(), "events.json.log"),
         "enable_session_replay": False,
+        "modules": {},
     },
     "upload": {
         "max_file_size": 1048576,

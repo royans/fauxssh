@@ -173,7 +173,7 @@ if [ "$FOREGROUND" = true ]; then
 else
     # Run in background (Default)
     mkdir -p "$DATA_DIR"
-    LOG_FILE="$DATA_DIR/server_startup.log"
+    LOG_FILE="$DATA_DIR/fauxssh.log"
     PID_FILE="$DATA_DIR/server.pid"
     
     # Check if running
