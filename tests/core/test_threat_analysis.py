@@ -103,19 +103,6 @@ def test_analyze_command(mock_post, llm):
             }
         ]
     }
-    mock_resp.json.return_value = {
-        "candidates": [
-            {
-                "content": {
-                    "parts": [
-                        {
-                            "text": '```json\\n{"type": "Recon", "stage": "Recon", "risk": 2, "explanation": "Simple list"}\\n```'
-                        }
-                    ]
-                }
-            }
-        ]
-    }
     mock_post.return_value = mock_resp
 
     result = llm.analyze_command("ls")
