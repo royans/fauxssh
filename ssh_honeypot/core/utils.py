@@ -106,3 +106,32 @@ def random_response_delay(min_seconds=0.1, max_seconds=0.5):
     import random
 
     time.sleep(random.uniform(min_seconds, max_seconds))
+
+
+def create_dual_stack_socket(bind_ip, port, backlog=64):
+    """
+    Creates and binds a socket that supports dual-stack (IPv4+IPv6) if bind_ip is '::'.
+    """
+    import socket
+
+    addr_family = socket.AF_INET
+    if ":" in bind_ip or bind_ip == "::":
+        addr_family = socket.AF_INET6
+
+    sock = socket.socket(addr_family, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    if addr_family == socket.AF_INET6:
+        try:
+            # Enable Dual Stack (IPv4 fallback on IPv6 socket) if binding ::
+            IPPROTO_IPV6 = getattr(socket, "IPPROTO_IPV6", 41)
+            IPV6_V6ONLY = getattr(socket, "IPV6_V6ONLY", 26)
+            sock.setsockopt(IPPROTO_IPV6, IPV6_V6ONLY, 0)
+        except Exception as e:
+            from ssh_honeypot.core.logging_setup import log
+
+            log.warning(f"[Socket] Could not set IPV6_V6ONLY=0: {e}")
+
+    sock.bind((bind_ip, port))
+    sock.listen(backlog)
+    return sock

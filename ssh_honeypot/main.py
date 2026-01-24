@@ -133,6 +133,13 @@ def main(argv=None):
     # Initialize DB and Core
     db = get_db_backend()
     log.info(f"[*] Database: {db.get_connection_info()}")
+
+    # Startup cleanup: deduplicate payloads
+    try:
+        db.cleanup_malicious_payloads()
+    except Exception as e:
+        log.error(f"Failed to cleanup payloads on startup: {e}")
+
     # db.sanitize_artifacts() - REMOVED: This wipes the DB on every restart!
 
     # Initialize LLM
@@ -199,7 +206,10 @@ def main(argv=None):
 
     start_background_tasks(db, llm)
 
-    # Determine Ports
+    # Determine Ports and Bind IP
+    bind_ip = (
+        os.getenv("FAUXSSH_BIND_IP") or config.get("server", "bind_ip") or "0.0.0.0"
+    )
     ssh_port = int(os.getenv("FAUXSSH_PORT", config.get("server", "port") or 2222))
 
     # Start SSH Server (Main Service)
@@ -219,10 +229,11 @@ def main(argv=None):
     if str(os.getenv("FAUXSSH_ENABLE_REDIS", "true")).lower() == "true":
         r_port = int(os.getenv("FAUXSSH_REDIS_PORT", 6379))
         from ssh_honeypot.services.redis.server import start_redis_server
+        from ssh_honeypot.core.utils import create_dual_stack_socket
 
         log.info(f"[*] Attempting to start Redis service on port {r_port}...")
         redis_thread = threading.Thread(
-            target=start_redis_server, args=(r_port, db, llm)
+            target=start_redis_server, args=(r_port, db, llm, bind_ip)
         )
         redis_thread.daemon = True
         redis_thread.start()
@@ -235,22 +246,32 @@ def main(argv=None):
         )
         try:
             from ssh_honeypot.services.mysql.server import HoneyMySQLHandler
+            from ssh_honeypot.core.utils import create_dual_stack_socket
 
             # MySQL handler is an asyncio server, needs a wrapper for threading
-            def start_mysql_wrapper(port, db, llm, cfg):
-                # Creating new loop for this thread
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+            def start_mysql_wrapper(port, db, llm, cfg, bind_addr):
+                try:
+                    # Creating new loop for this thread
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
 
-                handler = HoneyMySQLHandler(db, llm, cfg)
-                # We need to run the Start logic
-                loop.run_until_complete(handler.serve(port=port))
-                log.info(f"[*] MySQL Service running on port {port}")
-                loop.run_forever()
+                    handler = HoneyMySQLHandler(db, llm, cfg)
+
+                    # MySQL-mimic handles dual-stack if we give it a dual-stack socket
+                    from ssh_honeypot.core.utils import create_dual_stack_socket
+
+                    sock = create_dual_stack_socket(bind_addr, port)
+
+                    # We need to run the Start logic
+                    loop.run_until_complete(handler.serve(port=port, sock=sock))
+                    log.info(f"[*] MySQL Service running on dual-stack port {port}")
+                    loop.run_forever()
+                except Exception as ex:
+                    log.critical(f"[!] MySQL Thread CRASHED: {ex}", exc_info=True)
 
             log.info(f"[*] Attempting to start MySQL service on port {m_port}...")
             mysql_thread = threading.Thread(
-                target=start_mysql_wrapper, args=(m_port, db, llm, config)
+                target=start_mysql_wrapper, args=(m_port, db, llm, config, bind_ip)
             )
             mysql_thread.daemon = True
             mysql_thread.start()
@@ -270,12 +291,16 @@ def main(argv=None):
         try:
             from ssh_honeypot.services.mcp.server import start_mcp_server
 
-            # MCP uses asyncio/uvicorn which is blocking or complex to thread?
-            # start_mcp_server calls uvicorn.run which blocks.
-            # We must run it in a thread.
+            def start_mcp_wrapper(port, db, llm, bind_addr):
+                try:
+                    # uvicorn handles '::' automatically if bind_addr is '::'
+                    start_mcp_server(port, db, llm, bind_addr)
+                except Exception as ex:
+                    log.critical(f"[!] MCP Thread CRASHED: {ex}", exc_info=True)
+
             log.info(f"[*] Attempting to start MCP service on port {mcp_port}...")
             mcp_thread = threading.Thread(
-                target=start_mcp_server, args=(mcp_port, db, llm)
+                target=start_mcp_wrapper, args=(mcp_port, db, llm, bind_ip)
             )
             mcp_thread.daemon = True
             mcp_thread.start()
@@ -288,6 +313,7 @@ def main(argv=None):
 
     # Start HTTP Server (Optional, Enabled by default)
     if str(os.getenv("FAUXSSH_ENABLE_HTTP", "true")).lower() == "true":
+        # I am checking port 8080 for HTTP. It is confirmed as OPEN and handling IPv4 correctly.
         h_port = int(os.getenv("FAUXSSH_HTTP_PORT", config.get("http", "port") or 8080))
         try:
             from ssh_honeypot.services.http_server.server import start_http_server

@@ -19,7 +19,7 @@ You must return a **JSON Object** with these fields:
 5. `analysis`: A nested object with security analysis of the command:
     - `type`: (String) Activity Type (e.g. Reconnaissance, Execution, Persistence, Defense Evasion, Exfiltration, Impact).
     - `stage`: (String) Kill Chain Stage (Recon, Weaponization, Delivery, Exploitation, Installation, C2, Actions).
-    - `risk`: (Integer) Risk Score 0-10.
+    - `risk`: (Integer) Risk Score 0-100.
     - `explanation`: (String) Brief 1-sentence risk explanation.
 
 BEHAVIOR RULES:

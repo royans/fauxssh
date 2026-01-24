@@ -12,7 +12,7 @@ export PYTHONPATH="$PROJECT_ROOT"
 # Auto-Detect IPv6
 if [ -z "${FAUXSSH_BIND_IP:-}" ]; then
     if [ -f /proc/net/if_inet6 ]; then
-        # echo "IPv6 detected. Binding to ::"
+        # echo "IPv6 detected. Binding to :: for Dual Stack (IPv4+IPv6) support"
         export FAUXSSH_BIND_IP="::"
     else
         export FAUXSSH_BIND_IP="0.0.0.0"

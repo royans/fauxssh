@@ -21,9 +21,9 @@ class TestAlertManager(unittest.TestCase):
             {
                 "alerting": {
                     "webhook_url": "http://mock.local",
-                    "notify_threshold": 6,
-                    "session_threshold": 7,
-                    "ip_threshold": 9,
+                    "notify_threshold": 60,
+                    "session_threshold": 70,
+                    "ip_threshold": 90,
                 }
             },
         )
@@ -36,16 +36,16 @@ class TestAlertManager(unittest.TestCase):
         self.config_patcher.stop()
 
     def test_tier1_notify_only(self):
-        # Risk 6: Should Notify but NOT monitor session or IP
-        self.am.check_risk_score("s1", "1.1.1.1", 6, "L1 Risk")
+        # Risk 60: Should Notify but NOT monitor session or IP
+        self.am.check_risk_score("s1", "1.1.1.1", 60, "L1 Risk")
 
-        self.am.notifier.send_alert.assert_called_with("s1", "1.1.1.1", "L1 Risk", 6)
+        self.am.notifier.send_alert.assert_called_with("s1", "1.1.1.1", "L1 Risk", 60)
         self.assertNotIn("s1", self.am.monitored_sessions)
         self.assertNotIn("1.1.1.1", self.am.monitored_ips)
 
     def test_tier2_monitor_session(self):
-        # Risk 7: Should Notify AND Monitor Session, but NOT IP
-        self.am.check_risk_score("s2", "2.2.2.2", 7, "L2 Risk")
+        # Risk 70: Should Notify AND Monitor Session, but NOT IP
+        self.am.check_risk_score("s2", "2.2.2.2", 70, "L2 Risk")
 
         self.am.notifier.send_alert.assert_called()
         self.assertIn("s2", self.am.monitored_sessions)
@@ -56,8 +56,8 @@ class TestAlertManager(unittest.TestCase):
         self.am.notifier.send_interaction.assert_called()
 
     def test_tier3_monitor_ip(self):
-        # Risk 9: Should Notify, Monitor Session, AND Monitor IP
-        self.am.check_risk_score("s3", "3.3.3.3", 9, "L3 Risk")
+        # Risk 90: Should Notify, Monitor Session, AND Monitor IP
+        self.am.check_risk_score("s3", "3.3.3.3", 90, "L3 Risk")
 
         self.am.notifier.send_alert.assert_called()
         self.assertIn("s3", self.am.monitored_sessions)

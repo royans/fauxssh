@@ -116,17 +116,21 @@ class PayloadManager:
                 return
 
             # 3. Queue it
-            self.db.add_malicious_payload(
+            added = self.db.add_malicious_payload(
                 url=url,
                 url_hash=url_hash,
                 session_id=session_id,
                 ip=ip,
                 timestamp=timestamp,
             )
-            logger.info(f"[PayloadManager] Queued suspicious URL: {url}")
+            if added:
+                logger.info(f"[PayloadManager] Queued suspicious URL: {url}")
+                return True
+            return False
 
         except Exception as e:
             logger.error(f"Error queuing payload {url}: {e}")
+            return False
 
     def process_queue(self):
         """
@@ -411,7 +415,8 @@ class PayloadManager:
             # Only fetch meaningful commands (e.g. contain http)
             rows = self.db.get_interactions_with_http()
 
-            count = 0
+            total_potential = 0
+            added_count = 0
             for row in rows:
                 sid = row["session_id"]
                 cmd = row["command"]
@@ -419,16 +424,13 @@ class PayloadManager:
 
                 urls = self.extract_urls(cmd)
                 for u in urls:
-                    # Queue logic handles dedupe
-                    # We need IP... finding IP from session might be expensive per row.
-                    # We'll rely on DB helper or just pass None and let DB fill it if possible?
-                    # Ideally we fetch IP in the query.
+                    total_potential += 1
                     ip = row.get("remote_ip")
-                    self.queue_payload(u, sid, ip, timestamp=ts)
-                    count += 1
+                    if self.queue_payload(u, sid, ip, timestamp=ts):
+                        added_count += 1
 
             logger.info(
-                f"[PayloadManager] Backfill complete. Queued {count} potential payloads."
+                f"[PayloadManager] Backfill complete. Scanned {len(rows)} commands, found {total_potential} URLs, queued {added_count} new payloads."
             )
 
         except Exception as e:

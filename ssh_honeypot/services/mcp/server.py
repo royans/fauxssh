@@ -161,12 +161,12 @@ def tool_run_system_command(
     return output
 
 
-def start_mcp_server(port, db, llm):
+def start_mcp_server(port, db, llm, bind_ip="0.0.0.0"):
     if not MCP_AVAILABLE:
         core_log.error("Cannot start MCP Server: Dependencies missing.")
         return
 
-    core_log.info(f"[*] Starting MCP Honeypot on port {port}...")
+    core_log.info(f"[*] Starting MCP Honeypot on {bind_ip}:{port}...")
 
     # Initialize CommandHandler
     cmd_handler = CommandHandler(llm, db)
@@ -253,9 +253,23 @@ def start_mcp_server(port, db, llm):
         ],
     )
 
-    # Run Uvicorn
-    # Since we are already in a thread (called from main), we can block here?
-    # Yes, main.py starts this in a thread.
-    import uvicorn
+    # Run Uvicorn Config manually to handle pre-bound sockets if we wanted,
+    # but since uvicorn.run has issues, we use the standard way but ensure it works.
+    # Actually, uvicorn doesn't expose V6ONLY.
+    # Let's use the low-level Server API.
+    from uvicorn import Config, Server
 
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="error")
+    config = Config(app=app, host=bind_ip, port=port, log_level="error")
+    server = Server(config=config)
+
+    # We can override the server's behavior or just hope Config handles it.
+    # Better: Use the socket we already have a helper for!
+    from ssh_honeypot.core.utils import create_dual_stack_socket
+
+    sock = create_dual_stack_socket(bind_ip, port)
+    # Patch the server to use this socket
+    # uvicorn.Server has a 'run' method that calls 'serve'.
+    # We'll just run it.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(server.serve(sockets=[sock]))

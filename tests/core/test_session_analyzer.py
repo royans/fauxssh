@@ -17,12 +17,18 @@ class TestSessionAnalyzer(unittest.TestCase):
         self.mock_llm = MagicMock(spec=LLMInterface)
         self.session_id = "sess_123"
 
-    def test_short_session_skipped(self):
-        # 1 command -> skipped
+    def test_short_session_handled(self):
+        # 1 command -> now handled by LLM or Reuse (default LLM if no analysis in DB)
         self.mock_db.get_session_interactions.return_value = ["ping"]
+        self.mock_db.get_analysis.return_value = None
+        self.mock_db.get_cached_session_summary.return_value = None
+        self.mock_llm.generate_session_summary.return_value = {
+            "summary": "ping test",
+            "risk_score": 0,
+        }
+
         status = analyze_session(self.session_id, db=self.mock_db, llm=self.mock_llm)
-        self.assertEqual(status, "Skipped (Short Session)")
-        self.mock_llm.generate_session_summary.assert_not_called()
+        self.assertEqual(status, "Analyzed (LLM)")
 
     def test_cache_hit(self):
         # Commands

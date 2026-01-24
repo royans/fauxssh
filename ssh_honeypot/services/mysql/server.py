@@ -166,6 +166,22 @@ class HoneyMySQLHandler(MysqlServer):
         # Continue with standard mysql-mimic logic
         await super()._client_connected_cb(reader, writer)
 
-    async def serve(self, host="0.0.0.0", port=3306):
-        log.info(f"[*] Starting MySQL Honeypot on {host}:{port}")
-        await self.start_server(host=host, port=port)
+    async def start_server(self, **kwargs):
+        """Override to handle pre-bound socks safely"""
+        if "sock" in kwargs:
+            # If socket provided, we MUST NOT pass host/port to asyncio.start_server
+            kwargs.pop("host", None)
+            kwargs.pop("port", None)
+            self._server = await asyncio.start_server(
+                self._client_connected_cb, **kwargs
+            )
+        else:
+            await super().start_server(**kwargs)
+
+    async def serve(self, host="0.0.0.0", port=3306, sock=None):
+        if sock:
+            log.info(f"[*] Starting MySQL Honeypot on pre-bound socket (port {port})")
+            await self.start_server(sock=sock)
+        else:
+            log.info(f"[*] Starting MySQL Honeypot on {host}:{port}")
+            await self.start_server(host=host, port=port)

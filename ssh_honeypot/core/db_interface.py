@@ -220,6 +220,10 @@ class DatabaseBackend(ABC):
         pass
 
     @abstractmethod
+    def get_unanalyzed_sessions(self, limit=10):
+        pass
+
+    @abstractmethod
     def save_analysis(self, cmd_hash, cmd_text, analysis):
         pass
 
@@ -233,6 +237,11 @@ class DatabaseBackend(ABC):
 
     @abstractmethod
     def inspect_dir(self, ip, username, directory):
+        pass
+
+    @abstractmethod
+    def cleanup_malicious_payloads(self):
+        """Removes duplicate URLs from the malicious_payloads table, keeping only the oldest."""
         pass
 
     @abstractmethod
@@ -294,6 +303,11 @@ class DatabaseBackend(ABC):
     @abstractmethod
     def iter_interactions(self, batch_size=1000):
         """Yields all interactions from the database for export."""
+        pass
+
+    @abstractmethod
+    def get_infographic_stats(self, hours=24, ignore_ips=None):
+        """Returns a dictionary of statistics for the infographic dashboard."""
         pass
 
     @abstractmethod

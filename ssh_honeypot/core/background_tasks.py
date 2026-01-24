@@ -1,5 +1,7 @@
 import time
 import os
+import json
+from datetime import datetime
 from ssh_honeypot.core.logging_setup import log
 from ssh_honeypot.core.config import config
 from ssh_honeypot.core.alert_manager import AlertManager
@@ -80,6 +82,57 @@ def run_analysis_batch(db_instance, llm_instance, alert_manager):
 
     except Exception as e:
         log.error(f"[Analysis] Error: {e}")
+
+
+def run_session_analysis_batch(db_instance, llm_instance):
+    """Summarizes missed sessions."""
+    try:
+        from ssh_honeypot.core.session_analyzer import analyze_session
+
+        sessions = db_instance.get_unanalyzed_sessions(limit=5)
+        if not sessions:
+            return
+
+        for session_id in sessions:
+            analyze_session(session_id, db=db_instance, llm=llm_instance)
+    except Exception as e:
+        log.error(f"[SessionAnalysis] Error: {e}")
+
+
+def run_stats_generation_job(db_instance):
+    """Generates infographic data and saves to JSON."""
+    try:
+        if not config.get("http", "showstats"):
+            return
+
+        from ssh_honeypot.core.utils import get_ignored_ips
+
+        ignore_ips = get_ignored_ips()
+        stats = db_instance.get_infographic_stats(hours=24, ignore_ips=ignore_ips)
+        stats["daily_trends"] = db_instance.get_daily_session_counts(days=7)
+        stats["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Write to web_root/status_data.json
+        web_root = config.get("http", "web_root") or "/var/www/html"
+
+        # Ensure directory exists (local path vs VFS path is usually same if deployed)
+        # But for the honeypot, we might want to store it in a dedicated data dir if not real FS.
+        # However, the HTTP server reads from DB (VFS) or LOCAL.
+        # The user said: "/status_data.json should load the json file which is updated on an hourly basis"
+        # I will store it in a place where the HTTP server can serve it.
+        # If I use a Local Handler in server.py, I can just store it in the project root or data dir.
+
+        from ssh_honeypot.core.utils import PROJECT_ROOT
+
+        data_path = os.path.join(PROJECT_ROOT, "data", "status_data.json")
+        os.makedirs(os.path.dirname(data_path), exist_ok=True)
+
+        with open(data_path, "w") as f:
+            json.dump(stats, f, indent=2)
+
+        log.info(f"[StatsJob] Generated stats infographic data in {data_path}")
+    except Exception as e:
+        log.error(f"[StatsJob] Error: {e}")
 
 
 def run_ip_enrichment_batch(db_instance):
@@ -183,7 +236,7 @@ def run_payload_recovery_job(db_instance):
                     pm.queue_payload(url, sid, ip)
 
             # Log progress so user sees activity
-            log.info(
+            log.debug(
                 f"[Recovery] Scanned {len(rows)} interactions (Cursor: {_payload_recovery_cursor}). queued={len(urls) if 'urls' in locals() else 'N/A'}"
             )
 
@@ -218,7 +271,7 @@ def run_status_report_job(db_instance):
         except:
             pass
 
-        log.info(
+        log.debug(
             f"[System Status] Payloads Queued: {pending_dl} | Payloads Failed: {failed_dl} | Recovery Cursor: {_payload_recovery_cursor}"
         )
 
@@ -240,11 +293,18 @@ def start_background_tasks(db_instance, llm_instance):
             "cleanup", lambda: run_cleanup_job(db_instance), interval_seconds=3600
         )
 
-        # 2. Analysis (Every 10 seconds)
+        # 2. Command Analysis (Every 10 seconds)
         scheduler.register_job(
             "llm_analysis",
             lambda: run_analysis_batch(db_instance, llm_instance, alert_manager),
             interval_seconds=10,
+        )
+
+        # 2.5. Session Analysis (Every 30 seconds)
+        scheduler.register_job(
+            "session_analysis",
+            lambda: run_session_analysis_batch(db_instance, llm_instance),
+            interval_seconds=30,
         )
 
         # 3. IP Enrichment (Every 10 seconds - controlled rate)
@@ -267,6 +327,13 @@ def start_background_tasks(db_instance, llm_instance):
             "payload_vt",
             lambda: run_payload_analysis_batch(db_instance),
             interval_seconds=15,
+        )
+
+        # 6. Infographic Stats (Every 1 hour)
+        scheduler.register_job(
+            "infographic_stats",
+            lambda: run_stats_generation_job(db_instance),
+            interval_seconds=3600,
         )
 
         # 6. Payload Recovery / Backfill Safety Net (Every 30 seconds - Turbo Mode)

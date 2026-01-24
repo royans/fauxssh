@@ -14,6 +14,8 @@ from ssh_honeypot.core.event_logger import EventLogger
 
 
 class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def version_string(self):
         # Mimic Apache/Nginx based on config
         return config.get("http", "server_header") or "Apache/2.4.52 (Ubuntu)"
@@ -88,12 +90,64 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
             )
 
     def handle_honey_request(self, method):
+        self.close_connection = True
         client_ip = self.get_client_ip()
 
         # 0. DoS Protection (Silent Drop)
         if not dos_protector.is_allowed(client_ip, "HTTP"):
-            self.close_connection = True
             return
+
+        # 0.5 Local Handlers (Stats Infographic)
+        if config.get("http", "showstats"):
+            if self.path == "/stats_request.html" or self.path == "/stats_request":
+                try:
+                    asset_path = os.path.join(
+                        os.path.dirname(__file__), "assets", "stats_request.html"
+                    )
+                    if os.path.exists(asset_path):
+                        with open(asset_path, "r") as f:
+                            content = f.read()
+                        encoded_content = content.encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                        self.send_header("Content-Length", str(len(encoded_content)))
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        self.wfile.write(encoded_content)
+                        return
+                except Exception as e:
+                    log.error(f"[HTTP] Error serving stats dashboard: {e}")
+
+            if self.path == "/status_data.json":
+                try:
+                    from ssh_honeypot.core.utils import PROJECT_ROOT
+
+                    data_path = os.path.join(PROJECT_ROOT, "data", "status_data.json")
+                    if os.path.exists(data_path):
+                        with open(data_path, "r") as f:
+                            content = f.read()
+                        encoded_content = content.encode("utf-8")
+                        self.send_response(200)
+                        self.send_header(
+                            "Content-Type", "application/json; charset=utf-8"
+                        )
+                        self.send_header("Content-Length", str(len(encoded_content)))
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        self.wfile.write(encoded_content)
+                        return
+                    else:
+                        # Fallback if job hasn't run yet
+                        err_body = b'{"error": "Data not generated yet"}'
+                        self.send_response(404)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(err_body)))
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        self.wfile.write(err_body)
+                        return
+                except Exception as e:
+                    log.error(f"[HTTP] Error serving stats data: {e}")
 
         # 1. Caching Key
         # We treat "HTTP <METHOD> <PATH>" as the unique command key
@@ -232,11 +286,13 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
             if not allowed:
                 log.warning(f"[HTTP] Rate Limit Exceeded for {client_ip}: {reason}")
                 # Return 429 Too Many Requests
+                err_body = b"Too Many Requests"
                 self.send_response(429)
                 self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(err_body)))
                 self.send_header("Connection", "close")
                 self.end_headers()
-                self.wfile.write(b"Too Many Requests")
+                self.wfile.write(err_body)
                 return  # Stop processing
 
             # Record Usage
@@ -283,16 +339,13 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 log.error(f"[HTTP] LLM Error: {e}")
                 content = self._get_fallback_404()
-                # Update status code for 404?
-                # Ideally we should send 404 header, but logic below sends 200 by default.
-                # We need to change the flow to set status code.
-                # Let's refactor slightly to separate content vs status.
-                # For now, just serve the 404 CONTENT with 404 Status.
+                encoded_content = content.encode("utf-8")
                 self.send_response(404)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(encoded_content)))
                 self.send_header("Connection", "close")
                 self.end_headers()
-                self.wfile.write(content.encode("utf-8"))
+                self.wfile.write(encoded_content)
                 return  # Exit early
 
         # 3. Serve Response
@@ -373,12 +426,34 @@ def start_http_server(port, db, llm):
             os.getenv("FAUXSSH_BIND_IP") or config.get("server", "bind_ip") or "0.0.0.0"
         )
 
-        # ThreadingHTTPServer inherits TCPServer which defaults to AF_INET.
-        # We must override address_family if using IPv6.
+        # TCPServer uses class attribute address_family.
+        # We set it for this call to ensure it matches bind_ip.
+        original_family = ThreadingHTTPServer.address_family
         if ":" in bind_ip or bind_ip == "::":
             ThreadingHTTPServer.address_family = socket.AF_INET6
+        else:
+            ThreadingHTTPServer.address_family = socket.AF_INET
 
-        server = ThreadingHTTPServer((bind_ip, port), HoneyHTTPHandler)
+        server = ThreadingHTTPServer(
+            (bind_ip, port), HoneyHTTPHandler, bind_and_activate=False
+        )
+
+        # Restore original family to avoid polluting global state
+        ThreadingHTTPServer.address_family = original_family
+
+        # Enable Dual Stack (IPv4 fallback on IPv6 socket) if binding ::
+        if server.address_family == socket.AF_INET6 and bind_ip == "::":
+            try:
+                # server.socket is the underlying listener socket
+                IPPROTO_IPV6 = getattr(socket, "IPPROTO_IPV6", 41)
+                IPV6_V6ONLY = getattr(socket, "IPV6_V6ONLY", 26)
+                server.socket.setsockopt(IPPROTO_IPV6, IPV6_V6ONLY, 0)
+            except Exception as e:
+                log.warning(f"[HTTP] Could not set IPV6_V6ONLY=0: {e}")
+
+        server.server_bind()
+        server.server_activate()
+
         server.honey_db = db
         server.llm_interface = llm
 

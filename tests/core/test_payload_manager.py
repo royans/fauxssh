@@ -123,7 +123,7 @@ def test_process_queue_success(payload_manager, mock_db):
 
 
 def test_process_queue_failure_404(payload_manager, mock_db):
-    url = "http://fail.com/404"
+    url = "http://example.com/404"  # Use a safe domain to pass SSRF check
     payload_manager.queue_payload(url, "s1", "1.1.1.1")
 
     with patch("requests.get") as mock_get:
@@ -148,8 +148,8 @@ def test_process_queue_failure_404(payload_manager, mock_db):
 
 def test_duplicate_file_content_handling(payload_manager, mock_db):
     # Two different URLs pointing to content with SAME MD5
-    url1 = "http://site1.com/malware"
-    url2 = "http://site2.com/malware_copy"  # Different host, allowed
+    url1 = "http://example.com/malware"
+    url2 = "http://example.org/malware_copy"  # Different host, allowed
 
     content = b"same_content"
 
@@ -160,7 +160,8 @@ def test_duplicate_file_content_handling(payload_manager, mock_db):
     with patch("requests.get") as mock_get:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.iter_content.return_value = [content]
+        # Use side_effect to provide a fresh list/generator each time
+        mock_resp.iter_content.side_effect = lambda **kwargs: [content]
         mock_get.return_value.__enter__.return_value = mock_resp
 
         # Process first

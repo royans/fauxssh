@@ -9,7 +9,7 @@ INSTRUCTIONS:
 1. Analyze each command for:
    - type: (Reconnaissance, Execution, Persistence, Defense Evasion, Credential Access, Discovery, Lateral Movement, Collection, Command and Control, Exfiltration, Impact)
    - stage: (Recon, Weaponization, Delivery, Exploitation, Installation, C2, Actions)
-   - risk: (Integer 0-10, where 10 is critical impact)
+   - risk: (Integer 0-100, where 100 is critical impact)
    - explanation: (Brief 1 sentence summary of intent)
 
 2. Return ONLY a single JSON list of objects.

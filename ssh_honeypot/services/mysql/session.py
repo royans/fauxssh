@@ -19,9 +19,11 @@ class HoneyMySQLSession(MysqlSession):
         self.username = None
         self.current_db = "production_db"
         self.client_address = "unknown"
-        import uuid
+        import os
 
-        self.session_id = str(uuid.uuid4())
+        self.session_id = os.urandom(8).hex()
+        # Disable built-in middlewares that cause crashes with sqlglot
+        self._middlewares = []
 
     async def init(self, connection):
         await super().init(connection)
@@ -47,52 +49,36 @@ class HoneyMySQLSession(MysqlSession):
         if not peername:
             stream = getattr(connection, "stream", None)
             if stream:
-                # 1. Try asyncio get_extra_info on stream
-                if hasattr(stream, "get_extra_info"):
+                # 1. Try asyncio get_extra_info on stream.writer
+                writer = getattr(stream, "writer", None)
+                if writer and hasattr(writer, "get_extra_info"):
+                    peername = writer.get_extra_info("peername")
+
+                # 2. Try get_extra_info on stream itself (older mysql-mimic)
+                if not peername and hasattr(stream, "get_extra_info"):
                     peername = stream.get_extra_info("peername")
 
-                # 2. Try raw socket getpeername on stream
-                if hasattr(stream, "get_extra_info"):
-                    peername = stream.get_extra_info("peername")
-
+        # Context Fallback
         if not peername:
-            # Try accessing _writer
-            _writer = getattr(connection, "_writer", None)
-            if _writer and hasattr(_writer, "get_extra_info"):
-                peername = _writer.get_extra_info("peername")
-
-        # Try connection.writer.transport (Common in asyncio StreamWriter)
-        if not peername and writer:
-            transport = getattr(writer, "transport", None)
-            if transport and hasattr(transport, "get_extra_info"):
-                peername = transport.get_extra_info("peername")
+            ctx_ip = client_ip_ctx.get()
+            if ctx_ip and ctx_ip != "0.0.0.0":
+                peername = (ctx_ip, 0)
 
         self.client_address = peername
         if self.client_address:
+            # Refresh context if we found a more specific one
             client_ip_ctx.set(self.client_address[0])
-        else:
-            # Enhanced Debugging with Types
-            debug_info = f"ConnType: {type(connection)}"
-            if writer:
-                debug_info += f" | WriterType: {type(writer)}"
-            if hasattr(connection, "stream"):
-                debug_info += f" | StreamType: {type(connection.stream)}"
-
-            # log.warning(
-            #    f"[MySQL] Could not determine client IP. Debug: {debug_info}"
-            # )
-            pass
 
         # log.info(f"[*] MySQL Connection from {self.client_address}")
 
         # Start session in DB
         self.honey_db.start_session(
-            self.session_id,
-            self.client_address[0] if self.client_address else "unknown",
-            self.username or "unknown",
-            None,  # No password yet at init
-            "unknown",
-            "mysql",
+            session_id=self.session_id,
+            ip=self.client_address[0] if self.client_address else "unknown",
+            username=self.username or "unknown",
+            password=None,  # No password yet at init
+            client_version="unknown",
+            protocol="mysql",
         )
 
     async def schema(self):
@@ -113,40 +99,101 @@ class HoneyMySQLSession(MysqlSession):
         # Add basic mysql tables if needed
         return schema_map
 
+    async def data(self):
+        """
+        Provide data for tables defined in schema().
+        """
+        data_map = {}
+        for db_name, tables in DUMMY_DATABASES.items():
+            if db_name == "information_schema":
+                continue
+            data_map[db_name] = {}
+            for table_name, table_data in tables.items():
+                data_map[db_name][table_name] = table_data["rows"]
+        return data_map
+
+    async def handle_query(self, sql, attrs):
+        """
+        Override handle_query to bypass the middleware chain which causes
+        crashes in sqlglot due to missing functions or data.
+        """
+        log.debug(f"[MySQL] Handling query (bypassing middlewares): {sql}")
+        expressions = self._parse(sql)
+        if not expressions:
+            return [], []
+
+        last_result = ([], [])
+        for expression in expressions:
+            try:
+                last_result = await self.query(expression, sql, attrs)
+            except Exception as e:
+                log.error(f"[MySQL] Error in query handling: {e}")
+                # Fallback to empty result to prevent protocol crash
+                last_result = ([], [])
+
+        return last_result
+
     async def query(self, expression, sql, attrs):
         log.info(f"[MySQL] Query from {self.client_address}: {sql}")
-        self.honey_db.log_interaction(self.session_id, "mysql", sql, None)
 
         # NOTE: 'expression' is already a parsed sqlglot AST.
         # Do NOT call sqlglot.parse_one(expression) unless expression is string (it shouldn't be here)
 
+        results = None
+
         # 1. Handle simple SELECTs locally
         if isinstance(expression, exp.Select):
             results = self._handle_local_select(expression)
-            if results is not None:
-                return results
+            if results is None:
+                # Check for FROM clause to handle table selects
+                table_name = None
+                for table in expression.find_all(exp.Table):
+                    table_name = table.name
+                    break
 
-            # Check for FROM clause to handle table selects
-            table_name = None
-            for table in expression.find_all(exp.Table):
-                table_name = table.name
-                break
-
-            if table_name:
-                results = self._handle_table_select(table_name)
-                if results is not None:
-                    return results
-                if results is not None:
-                    return results
+                if table_name:
+                    results = self._handle_table_select(table_name)
 
         # 2. Handle USE command
-        if isinstance(expression, exp.Use):
+        if results is None and isinstance(expression, exp.Use):
             db_name = expression.this.name
             # If it's an identifier, it might be quoted
-            self.current_db = db_name
-            return [], []
-        # Note: USE, SHOW, etc. are handled by middlewares before reaching here.
-        return await self._llm_query(sql)
+            await self.use(db_name)  # Call the overridden use method
+            results = [], []
+
+        # 3. Handle SHOW commands (commonly used for discovery)
+        if results is None and isinstance(expression, exp.Show):
+            # Fallback to LLM for now, but we could handle common ones like 'SHOW TABLES'
+            results = await self._llm_query(sql)
+
+        # 4. Handle SET commands
+        if results is None and isinstance(expression, exp.Set):
+            # Assume success for SET commands (e.g. SET NAMES)
+            results = [], []
+
+        if results is None:
+            results = await self._llm_query(sql)
+
+        # Log Interaction with Result summary
+        try:
+            res_str = ""
+            if results and len(results) > 0 and results[0]:
+                rows = results[0]
+                cols = results[1]
+                # Format a small snippet of the result
+                col_names = [getattr(c, "name", str(c)) for c in cols]
+                res_str = f"Columns: {', '.join(col_names)}\nRows: {len(rows)}\nFirst Row: {rows[0] if rows else 'None'}"
+            else:
+                res_str = "Empty result set / Success"
+
+            self.honey_db.log_interaction(
+                self.session_id, "mysql", sql, res_str, source="mysql"
+            )
+        except Exception as le:
+            log.error(f"[MySQL] Error logging results: {le}")
+            self.honey_db.log_interaction(self.session_id, "mysql", sql, None)
+
+        return results
 
     def _parse(self, sql):
         try:

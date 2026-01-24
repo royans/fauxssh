@@ -97,9 +97,11 @@ class TestPersonaConfig:
         # Test the multi-path lookup logic in _read_persona_file
         # We need to mock os.path.exists and open/yaml.load
 
-        with patch("os.path.exists") as mock_exists, patch(
-            "builtins.open", new_callable=MagicMock
-        ) as mock_open, patch("yaml.safe_load") as mock_yaml:
+        with (
+            patch("os.path.exists") as mock_exists,
+            patch("builtins.open", new_callable=MagicMock) as mock_open,
+            patch("yaml.safe_load") as mock_yaml,
+        ):
 
             # Setup
             mock_yaml.return_value = {"system": {"hostname": "found"}}

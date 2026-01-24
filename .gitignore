@@ -132,6 +132,7 @@ ipython_config.py
 .pixi
 
 # PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
+# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
 __pypackages__/
 
 # Celery stuff
@@ -226,4 +227,7 @@ data/personas/*
 
 # Exception for Personas (contains fake root fs with ruled names like var/)
 !personas/**
+
+# Test Data
+.testmondata*
 

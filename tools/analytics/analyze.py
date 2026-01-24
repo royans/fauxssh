@@ -7,7 +7,8 @@ import sys
 import json
 import shutil
 import textwrap
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from dateutil import tz, parser
 
 
@@ -132,9 +133,9 @@ def get_risk_style(score):
         return "white"
     try:
         s = float(score)
-        if s >= 8:
+        if s >= 80:
             return "bold red"
-        if s >= 5:
+        if s >= 50:
             return "yellow"
         return "green"
     except:
@@ -613,6 +614,117 @@ def list_commands(
     console.print(table)
 
 
+def parse_duration(duration_str):
+    """Parses duration string like 15m, 14h, 3d into seconds."""
+    if not duration_str:
+        return 3600  # 1 hour default
+    try:
+        amount = int(re.sub(r"[^0-9]", "", duration_str))
+        unit = re.sub(r"[0-9]", "", duration_str).lower()
+
+        if unit == "m":
+            return amount * 60
+        if unit == "h":
+            return amount * 3600
+        if unit == "d":
+            return amount * 86400
+        return amount  # Default to seconds
+    except:
+        return 3600
+
+
+def list_top_commands(
+    limit=50,
+    duration_str=None,
+    ip_filter=None,
+    anon=False,
+    db_path=None,
+    protocol_filter=None,
+    show_output=False,
+):
+    conn, ph = get_db_connection(db_path)
+    if ph == "%s":
+        import psycopg2.extras
+
+        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    else:
+        c = conn.cursor()
+
+    duration_secs = parse_duration(duration_str)
+
+    # Time filter clause
+    if ph == "%s":
+        time_filter = f"i.timestamp > NOW() - INTERVAL '{duration_secs} seconds'"
+    else:
+        time_filter = f"i.timestamp > datetime('now', '-{duration_secs} seconds')"
+
+    query = f"""
+        SELECT 
+            i.command,
+            COUNT(*) as total_count,
+            COUNT(DISTINCT s.remote_ip) as unique_ips,
+            MAX(ca.risk_score) as max_risk,
+            { "STRING_AGG(DISTINCT s.protocol, ', ')" if ph == "%s" else "group_concat(DISTINCT s.protocol)" } as protocols,
+            MAX(i.response) as sample_response
+        FROM interactions i
+        JOIN sessions s ON i.session_id = s.session_id
+        LEFT JOIN command_analysis ca ON i.request_md5 = ca.command_hash
+        WHERE {time_filter}
+    """
+    params = []
+
+    if protocol_filter:
+        query += f" AND s.protocol = {ph}"
+        params.append(protocol_filter)
+
+    if ip_filter:
+        query += f" AND s.remote_ip = {ph}"
+        params.append(ip_filter)
+
+    query += " GROUP BY i.command ORDER BY total_count DESC LIMIT " + str(int(limit))
+
+    c.execute(query, tuple(params))
+    rows = c.fetchall()
+    conn.close()
+
+    title = f"Top Commands (Last {duration_str or '1h'})"
+    table = Table(title=title, box=box.ROUNDED)
+    table.add_column("Rank", style="dim", justify="right")
+    table.add_column("Command", style="white", overflow="fold")
+    table.add_column("Count", justify="right", style="green")
+    table.add_column("Unique IPs", justify="right", style="magenta")
+    table.add_column("Max Risk", justify="right")
+    table.add_column("Protocols", style="cyan")
+
+    rank = 1
+    for r in rows:
+        cmd = r["command"] or "-"
+        risk = r["max_risk"]
+        risk_str = f"{risk}" if risk is not None else "-"
+        risk_style = get_risk_style(risk)
+
+        cmd_cell = Text(cmd)
+        if show_output:
+            resp = r["sample_response"] or ""
+            if resp:
+                snippet = textwrap.shorten(resp, width=300, placeholder="...")
+                cmd_cell = Group(
+                    cmd_cell, Rule(style="dim"), Text(snippet, style="italic grey50")
+                )
+
+        table.add_row(
+            str(rank),
+            cmd_cell,
+            str(r["total_count"]),
+            str(r["unique_ips"]),
+            f"[{risk_style}]{risk_str}[/{risk_style}]",
+            r["protocols"] or "-",
+        )
+        rank += 1
+
+    console.print(table)
+
+
 def list_top_ips(limit=50, anon=False, db_path=None):
     conn, ph = get_db_connection(db_path)
     # Ensure cursor factory
@@ -1024,6 +1136,12 @@ def main():
     parser.add_argument(
         "--output", action="store_true", help="Show command output snippets"
     )
+    parser.add_argument(
+        "--top", action="store_true", help="Show most frequently requested commands"
+    )
+    parser.add_argument(
+        "--duration", help="Time period for analysis (e.g. 15m, 14h, 3d)"
+    )
 
     args = parser.parse_args()
 
@@ -1045,16 +1163,27 @@ def main():
             protocol_filter=args.protocol,
         )
     elif args.commands:
-        list_commands(
-            limit=args.limit,
-            ip_filter=args.ip,
-            session_filter=args.session_id,
-            anon=args.anon,
-            db_path=args.db,
-            sort_param=args.sort,
-            protocol_filter=args.protocol,
-            show_output=args.output,
-        )
+        if args.top:
+            list_top_commands(
+                limit=args.limit,
+                duration_str=args.duration,
+                ip_filter=args.ip,
+                anon=args.anon,
+                db_path=args.db,
+                protocol_filter=args.protocol,
+                show_output=args.output,
+            )
+        else:
+            list_commands(
+                limit=args.limit,
+                ip_filter=args.ip,
+                session_filter=args.session_id,
+                anon=args.anon,
+                db_path=args.db,
+                sort_param=args.sort,
+                protocol_filter=args.protocol,
+                show_output=args.output,
+            )
     elif args.retry_failed:
         reset_failed_analysis(db_path=args.db)
     elif args.top_ips:

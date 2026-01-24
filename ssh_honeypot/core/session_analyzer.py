@@ -24,12 +24,19 @@ def analyze_session(session_id, db=None, llm=None):
 
     # 1. Fetch Interactions
     commands = db.get_session_interactions(session_id)
-    if not commands or len(commands) <= 1:
-        return "Skipped (Short Session)"
+
+    # Use consistent string for hashing empty/single sessions
+    if not commands:
+        chain_str = "__EMPTY_SESSION__"
+    else:
+        # Truncate for LLM if it's a massive automated dump to save tokens
+        if len(commands) > 50:
+            commands_to_hash = commands[:50]
+        else:
+            commands_to_hash = commands
+        chain_str = "|".join([c.strip() for c in commands_to_hash])
 
     # 2. Compute Chain Hash
-    # Normalize: join by pipe, maybe strip whitespace
-    chain_str = "|".join([c.strip() for c in commands])
     chain_hash = hashlib.md5(chain_str.encode()).hexdigest()
 
     # 3. Check Cache
@@ -41,6 +48,31 @@ def analyze_session(session_id, db=None, llm=None):
             f"[SessionAnalyzer] Cache Hit for session {session_id} (Hash: {chain_hash[:8]})"
         )
         return "Analyzed (Cache Hit)"
+
+    # Handle Empty Session specifically (cached above after first run)
+    if not commands:
+        summary = "Session terminated after authentication (no commands)."
+        risk_score = 0
+        db.save_session_summary_cache(chain_hash, summary, risk_score)
+        db.update_session_summary(session_id, summary, risk_score)
+        return "Analyzed (Empty)"
+
+    # 4. Command-Level Fallback for 1-Command Sessions
+    if len(commands) == 1:
+        cmd_text = commands[0]
+        cmd_hash = hashlib.md5(cmd_text.encode()).hexdigest()
+        analysis = db.get_analysis(cmd_hash)
+        if analysis:
+            summary = (
+                f"Single command session: {cmd_text}. {analysis.get('explanation', '')}"
+            )
+            risk_score = analysis.get("risk_score", 0)
+            db.save_session_summary_cache(chain_hash, summary, risk_score)
+            db.update_session_summary(session_id, summary, risk_score)
+            log.info(
+                f"[SessionAnalyzer] Reusing command analysis for session {session_id}"
+            )
+            return "Analyzed (Command Reuse)"
 
     # 4. LLM Analysis
     if not llm:

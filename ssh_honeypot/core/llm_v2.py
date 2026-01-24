@@ -223,7 +223,7 @@ class LLMInterfaceV2:
                 "\n\nIMPORTANT: Return your response as a valid JSON object with this structure:\n"
                 "{\n"
                 '  "content": "The actual response content (HTML, text, etc)",\n'
-                '  "risk_score": <Integer 0-10, 10 is high risk>,\n'
+                '  "risk_score": <Integer 0-100, 100 is high risk>,\n'
                 '  "explanation": "Brief explanation of risk",\n'
                 '  "type": "Exploit/Enumeration/Benign"\n'
                 "}\n"

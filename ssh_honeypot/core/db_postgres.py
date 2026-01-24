@@ -188,6 +188,9 @@ class PostgresBackend(DatabaseBackend):
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_interactions_ts ON interactions(timestamp)"
             )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_interactions_md5 ON interactions(request_md5)"
+            )
 
             # Auth Events
             cursor.execute(
@@ -537,6 +540,11 @@ class PostgresBackend(DatabaseBackend):
         response_head=None,
         response_size=None,
     ):
+        if not request_md5 and command:
+            import hashlib
+
+            request_md5 = hashlib.md5(command.encode("utf-8")).hexdigest()
+
         # Defensive Type Casting
         try:
             if isinstance(source, (dict, list)):
@@ -1098,11 +1106,18 @@ class PostgresBackend(DatabaseBackend):
             conn.close()
 
     def cleanup_http_cache(self, web_root="/var/www/html"):
-        # Not implementing full cache cleanup for Postgres yet
-        # Assuming HTTP cache is transient/redis/sqlite based usually
-        # Or implementing same logic with %s syntax if needed.
-        # Leaving as TODO/No-op for simplicity unless requested.
-        pass
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM command_cache WHERE command LIKE 'wget%%' OR command LIKE 'curl%%'"
+            )
+            conn.commit()
+            log.info(f"[Postgres] HTTP Cache cleared for {web_root}")
+        except Exception as e:
+            log.error(f"[Postgres] Error clearing HTTP cache: {e}")
+        finally:
+            conn.close()
 
     def prune_uploads(self, days=30):
         # Postgres syntax for interval
@@ -1238,8 +1253,63 @@ class PostgresBackend(DatabaseBackend):
             conn.close()
 
     def scan_and_repair_corruption(self, ip, username):
-        # Omitted for brevity, similar heuristic logic
-        pass
+        """
+        Scans User Filesystem for entries where a FILE overwrites a known DIRECTORY from Global/Skeleton layers.
+        Deletes the corrupt file entry if found.
+        """
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            # Find User Files that might be directories
+            cursor.execute(
+                "SELECT path, content FROM user_filesystem WHERE ip=%s AND username=%s AND type='file' AND is_deleted=0",
+                (ip, username),
+            )
+            candidates = cursor.fetchall()
+
+            home_dir = "/root" if username == "root" else f"/home/{username}"
+            repaired_count = 0
+
+            for row in candidates:
+                path = row["path"]
+                content = row["content"]
+                # Check if this path IS a directory in Skeleton
+                is_skel_dir = False
+                for item in self.skeleton_cache:
+                    skel_path = item["path"]
+                    if skel_path.startswith("~"):
+                        skel_path = skel_path.replace("~", home_dir, 1)
+                    if skel_path == path and item["type"] == "directory":
+                        is_skel_dir = True
+                        break
+
+                # Also check Global FS if needed
+                is_global_dir = False
+                if not is_skel_dir:
+                    node = self.get_fs_node(path)
+                    if node and node["type"] == "directory":
+                        is_global_dir = True
+
+                if is_skel_dir or is_global_dir:
+                    log.warning(
+                        f"[FS Repair] Found corrupt FILE '{path}' shadowing a directory. Content: {str(content)[:50]}..."
+                    )
+                    cursor.execute(
+                        "DELETE FROM user_filesystem WHERE ip=%s AND username=%s AND path=%s",
+                        (ip, username, path),
+                    )
+                    repaired_count += 1
+
+            if repaired_count > 0:
+                conn.commit()
+                log.info(
+                    f"[FS Repair] Repaired {repaired_count} corrupt entries for {username}@{ip}"
+                )
+
+        except Exception as e:
+            log.error(f"[FS Repair] Error: {e}")
+        finally:
+            conn.close()
 
     def get_global_stats(self):
         conn = self._get_conn()
@@ -1305,9 +1375,25 @@ class PostgresBackend(DatabaseBackend):
             conn.close()
 
     def validate_anti_harvesting(self, ip, username, password):
-        # Simplified anti-harvesting check without re-implementing full logic for now
-        # Ideally import or reuse logic if shared
-        return True, None
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT password FROM sessions WHERE remote_ip = %s AND username = %s AND start_time > NOW() - INTERVAL '1 day'",
+                (ip, username),
+            )
+            passwords = {r[0] for r in cursor.fetchall()}
+            if passwords and password not in passwords:
+                return (
+                    False,
+                    f"Anti-Harvesting: IP {ip} trying new password for {username}",
+                )
+            return True, None
+        except Exception as e:
+            log.error(f"[Postgres] Error validating anti-harvesting: {e}")
+            return True, None
+        finally:
+            conn.close()
 
     def check_root_desperation(self, ip):
         conn = self._get_conn()
@@ -1447,24 +1533,430 @@ class PostgresBackend(DatabaseBackend):
             conn.close()
 
     def get_unanalyzed_commands(self, limit=10):
-        # Implementation omitted for brevity
-        return []
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(
+                """
+                SELECT i.id, i.session_id, i.command, i.request_md5, s.remote_ip
+                FROM interactions i
+                JOIN sessions s ON i.session_id = s.session_id
+                LEFT JOIN command_analysis ca ON i.request_md5 = ca.command_hash
+                WHERE ca.command_hash IS NULL
+                AND i.request_md5 IS NOT NULL
+                AND i.command != ''
+                ORDER BY i.id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [dict(r) for r in cursor.fetchall()]
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching unanalyzed commands: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_infographic_stats(self, hours=24, ignore_ips=None):
+        """Returns complex stats for the infographic dashboard (Postgres)."""
+        conn = self._get_conn()
+        stats = {
+            "total_ips": 0,
+            "total_requests": 0,
+            "total_sessions": 0,
+            "total_networks": 0,
+            "trends": {},
+            "top_ips": [],
+            "top_countries": [],
+            "top_isps": [],
+            "service_dist": [],
+            "longest_sessions": [],
+            "manual_vs_bot": {"manual": 0, "bot": 0},
+            "recent_unique_commands": [],
+            "top_ssh_commands": [],
+            "top_telnet_commands": [],
+            "top_mysql_commands": [],
+            "top_http_commands": [],  # Added HTTP
+            "top_redis_commands": [],
+            "top_mcp_commands": [],
+            "top_passwords": [],
+            "top_ssh_users": [],
+            "top_ssh_risk": [],
+            "total_payloads": 0,
+            "protocol_activity": {},  # For sorting in UI
+            "multi_window": {},  # Added for 24H, 48H, 1W, 2W
+        }
+        try:
+            cursor = conn.cursor()
+            time_filter = f"NOW() - INTERVAL '{hours} hours'"
+            prev_time_filter = f"NOW() - INTERVAL '{hours*2} hours'"
+
+            # IP Exclusion Filter
+            ip_filter = ""
+            params = []
+            if ignore_ips:
+                placeholders = ",".join(["%s" for _ in ignore_ips])
+                ip_filter = f"AND remote_ip NOT IN ({placeholders})"
+                params = list(ignore_ips)
+
+            # Helper for interactions (needs join with sessions to check remote_ip)
+            interaction_ip_filter = ""
+            if ignore_ips:
+                placeholders = ",".join(["%s" for _ in ignore_ips])
+                interaction_ip_filter = f"AND s.remote_ip NOT IN ({placeholders})"
+
+            # --- TOTALS & TRENDS ---
+            def get_window_stats(start_expr, end_expr=None):
+                e_part = f" AND start_time <= {end_expr}" if end_expr else ""
+                cursor.execute(
+                    f"SELECT COUNT(DISTINCT remote_ip), COUNT(*) FROM sessions WHERE start_time > {start_expr} {e_part} {ip_filter}",
+                    params,
+                )
+                ips, sessions = cursor.fetchone()
+
+                ei_part = f" AND i.timestamp <= {end_expr}" if end_expr else ""
+                cursor.execute(
+                    f"""
+                    SELECT COUNT(*) FROM interactions i
+                    JOIN sessions s ON i.session_id = s.session_id
+                    WHERE i.timestamp > {start_expr} {ei_part} {interaction_ip_filter}
+                """,
+                    params,
+                )
+                commands = cursor.fetchone()[0] or 0
+
+                # Count unique networks (ORGs)
+                cursor.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT intel.org) 
+                    FROM sessions s
+                    JOIN ip_intelligence intel ON s.remote_ip = intel.ip
+                    WHERE s.start_time > {start_expr} {e_part} {ip_filter}
+                """,
+                    params,
+                )
+                networks = cursor.fetchone()[0] or 0
+
+                return {
+                    "ips": ips or 0,
+                    "sessions": sessions or 0,
+                    "commands": commands,
+                    "networks": networks,
+                }
+
+            # Multi-window Metrics (Task 3)
+            windows = {"24H": 24, "48H": 48, "1W": 168, "2W": 336}
+            for label, h in windows.items():
+                w_filter = f"NOW() - INTERVAL '{h} hours'"
+                w_stats = get_window_stats(w_filter)
+                stats["multi_window"][label] = {
+                    "ips": w_stats["ips"],
+                    "networks": w_stats["networks"],
+                    "interactions": w_stats["commands"],
+                    "sessions": w_stats["sessions"],
+                }
+
+            current_window = get_window_stats(time_filter)
+            prev_window = get_window_stats(prev_time_filter, time_filter)
+
+            stats["total_ips"] = current_window["ips"]
+            stats["total_sessions"] = current_window["sessions"]
+            stats["total_requests"] = current_window["commands"]
+            stats["total_networks"] = current_window["networks"]
+
+            for key in ["ips", "sessions", "commands"]:
+                curr = current_window[key]
+                prev = prev_window[key]
+                diff = curr - prev
+                pct = (diff / prev * 100) if prev > 0 else 0
+                stats["trends"][key] = {"diff": diff, "pct": round(pct, 1)}
+
+            # Total Payloads
+            query = f"SELECT COUNT(*) FROM malicious_payloads WHERE timestamp > {time_filter}"
+            cursor.execute(query)
+            stats["total_payloads"] = cursor.fetchone()[0] or 0
+
+            # --- PROTOCOL DISTRIBUTION ---
+            query = f"""
+                SELECT s.protocol, COUNT(DISTINCT s.session_id) as sess_count, COUNT(i.id) as cmd_count
+                FROM sessions s
+                LEFT JOIN interactions i ON s.session_id = i.session_id
+                WHERE s.start_time > {time_filter} {ip_filter}
+                GROUP BY s.protocol
+                ORDER BY sess_count DESC
+            """
+            cursor.execute(query, params)
+            for r in cursor.fetchall():
+                proto = r[0]
+                stats["service_dist"].append(
+                    {"protocol": proto, "sessions": r[1], "commands": r[2]}
+                )
+                stats["protocol_activity"][proto] = r[2]
+
+            # --- TOP TABLES ---
+
+            # Top Countries (Unique IPs and Sessions)
+            query = f"""
+                SELECT intel.country, COUNT(DISTINCT s.remote_ip) as unique_ips, COUNT(DISTINCT s.session_id) as sessions
+                FROM sessions s 
+                JOIN ip_intelligence intel ON s.remote_ip = intel.ip 
+                WHERE s.start_time > {time_filter} {interaction_ip_filter}
+                GROUP BY intel.country 
+                ORDER BY unique_ips DESC LIMIT 50
+            """
+            cursor.execute(query, params)
+            stats["top_countries"] = [
+                {"country": r[0] or "Unknown", "ips": r[1], "sessions": r[2]}
+                for r in cursor.fetchall()
+            ]
+
+            # Top ISPs (Unique IPs and Sessions)
+            query = f"""
+                SELECT intel.org, COUNT(DISTINCT s.remote_ip) as unique_ips, COUNT(DISTINCT s.session_id) as sessions
+                FROM sessions s 
+                JOIN ip_intelligence intel ON s.remote_ip = intel.ip 
+                WHERE s.start_time > {time_filter} {interaction_ip_filter}
+                GROUP BY intel.org 
+                ORDER BY unique_ips DESC LIMIT 50
+            """
+            cursor.execute(query, params)
+            stats["top_isps"] = [
+                {"isp": r[0] or "Unknown", "ips": r[1], "sessions": r[2]}
+                for r in cursor.fetchall()
+            ]
+
+            # Top SSH Users
+            query = f"""
+                SELECT username, COUNT(*) as count, COUNT(DISTINCT remote_ip) as unique_ips
+                FROM sessions 
+                WHERE start_time > {time_filter} AND protocol = 'ssh' AND username IS NOT NULL AND username != '' {ip_filter}
+                GROUP BY username 
+                ORDER BY count DESC LIMIT 50
+            """
+            cursor.execute(query, params)
+            stats["top_ssh_users"] = [
+                {"username": r[0], "count": r[1], "ips": r[2]}
+                for r in cursor.fetchall()
+            ]
+
+            # Top Passwords
+            query = f"""
+                SELECT password, COUNT(*) as count, COUNT(DISTINCT remote_ip) as unique_ips
+                FROM sessions 
+                WHERE start_time > {time_filter} AND protocol = 'ssh' AND password IS NOT NULL AND password != '' {ip_filter}
+                GROUP BY password 
+                ORDER BY count DESC LIMIT 50
+            """
+            cursor.execute(query, params)
+            stats["top_passwords"] = [
+                {"password": r[0], "count": r[1], "ips": r[2]}
+                for r in cursor.fetchall()
+            ]
+
+            # Generic Top Command Fetcher
+            def get_top_commands(proto, limit=50):
+                q = f"""
+                    SELECT i.command, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips
+                    FROM interactions i
+                    JOIN sessions s ON i.session_id = s.session_id
+                    WHERE i.timestamp > {time_filter} AND s.protocol = %s {interaction_ip_filter}
+                    GROUP BY i.command 
+                    ORDER BY unique_ips DESC, count DESC LIMIT %s
+                """
+                cursor.execute(q, [proto] + params + [limit])
+                return [
+                    {"command": r[0], "count": r[1], "ips": r[2]}
+                    for r in cursor.fetchall()
+                ]
+
+            stats["top_ssh_commands"] = get_top_commands("ssh")
+            stats["top_telnet_commands"] = get_top_commands("telnet")
+            stats["top_mysql_commands"] = get_top_commands("mysql")
+            stats["top_http_commands"] = get_top_commands("http")
+            stats["top_redis_commands"] = get_top_commands("redis")
+            stats["top_mcp_commands"] = get_top_commands("mcp")
+
+            # Top SSH Commands by Risk (Freq and unique IP counts)
+            # Improved sorting: Risk first, then unique IPs, then total count
+            query = f"""
+                SELECT i.command, COALESCE(MAX(ca.risk_score), 0) as max_risk, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips
+                FROM interactions i
+                JOIN sessions s ON i.session_id = s.session_id
+                JOIN command_analysis ca ON i.request_md5 = ca.command_hash
+                WHERE i.timestamp > {time_filter} AND s.protocol = 'ssh' {interaction_ip_filter}
+                GROUP BY i.command
+                ORDER BY max_risk DESC, unique_ips DESC, count DESC
+                LIMIT 50
+            """
+            cursor.execute(query, params)
+            stats["top_ssh_risk"] = [
+                {"command": r[0], "risk": r[1], "count": r[2], "ips": r[3]}
+                for r in cursor.fetchall()
+            ]
+
+            # Recent Unique Commands
+            query = f"""
+                SELECT DISTINCT i.command 
+                FROM interactions i
+                JOIN sessions s ON i.session_id = s.session_id
+                WHERE s.start_time > {time_filter} {interaction_ip_filter}
+                ORDER BY i.timestamp DESC LIMIT 20
+            """
+            cursor.execute(query, params)
+            stats["recent_unique_commands"] = [r[0] for r in cursor.fetchall()]
+
+            # Manual vs Bot
+            query = f"""
+                SELECT 
+                    SUM(CASE WHEN command_count > 10 OR summary ILIKE '%manual%' THEN 1 ELSE 0 END) as manual_count,
+                    SUM(CASE WHEN command_count <= 10 AND (summary IS NULL OR summary NOT ILIKE '%manual%') THEN 1 ELSE 0 END) as bot_count
+                FROM (
+                    SELECT s.session_id, s.summary, COUNT(i.id) as command_count
+                    FROM sessions s
+                    LEFT JOIN interactions i ON s.session_id = i.session_id
+                    WHERE s.start_time > {time_filter} {interaction_ip_filter}
+                    GROUP BY s.session_id, s.summary
+                ) t
+            """
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            if row:
+                stats["manual_vs_bot"] = {
+                    "manual": int(row[0] or 0),
+                    "bot": int(row[1] or 0),
+                }
+
+            # Top IPs Summary (for reference)
+            query = f"""
+                SELECT remote_ip, COUNT(*) as count 
+                FROM sessions 
+                WHERE start_time > {time_filter} {ip_filter}
+                GROUP BY remote_ip 
+                ORDER BY count DESC LIMIT 50
+            """
+            cursor.execute(query, params)
+            stats["top_ips"] = [{"ip": r[0], "count": r[1]} for r in cursor.fetchall()]
+
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching infographic stats: {e}")
+        finally:
+            conn.close()
+        return stats
+
+    def get_daily_session_counts(self, days=7):
+        """Returns session counts for each of the last X days."""
+        conn = self._get_conn()
+        res = []
+        try:
+            cursor = conn.cursor()
+            for i in range(days - 1, -1, -1):
+                day_start = f"NOW() - INTERVAL '{i+1} days'"
+                day_end = f"NOW() - INTERVAL '{i} days'"
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM sessions WHERE start_time > {day_start} AND start_time <= {day_end}"
+                )
+                count = cursor.fetchone()[0] or 0
+
+                # Get label like 'Jan 21'
+                cursor.execute(f"SELECT TO_CHAR(NOW() - INTERVAL '{i} days', 'Mon DD')")
+                label = cursor.fetchone()[0]
+                res.append({"label": label, "count": count})
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching daily session counts: {e}")
+        finally:
+            conn.close()
+        return res
+
+    def get_unanalyzed_sessions(self, limit=10):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT session_id FROM sessions WHERE (summary IS NULL OR summary = '') AND end_time IS NOT NULL ORDER BY start_time DESC LIMIT %s",
+                (limit,),
+            )
+            return [r[0] for r in cursor.fetchall()]
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching unanalyzed sessions: {e}")
+            return []
+        finally:
+            conn.close()
 
     def save_analysis(self, cmd_hash, cmd_text, analysis):
-        # Implementation omitted for brevity
-        pass
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO command_analysis 
+                (command_hash, command_text, activity_type, stage, risk_score, explanation)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (command_hash) DO UPDATE SET
+                    activity_type = EXCLUDED.activity_type,
+                    stage = EXCLUDED.stage,
+                    risk_score = EXCLUDED.risk_score,
+                    explanation = EXCLUDED.explanation
+                """,
+                (
+                    cmd_hash,
+                    cmd_text,
+                    analysis.get("type", "Unknown"),
+                    analysis.get("stage", "Unknown"),
+                    analysis.get("risk", 0),
+                    analysis.get("explanation", ""),
+                ),
+            )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Error saving analysis: {e}")
+        finally:
+            conn.close()
 
     def get_analysis(self, cmd_hash):
-        # Implementation omitted for brevity
-        return None
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(
+                "SELECT * FROM command_analysis WHERE command_hash = %s", (cmd_hash,)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching analysis: {e}")
+            return None
+        finally:
+            conn.close()
 
     def inspect_path(self, ip, username, path):
-        # Implementation omitted for brevity
-        return None
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(
+                "SELECT * FROM user_filesystem WHERE ip=%s AND username=%s AND path=%s",
+                (ip, username, path),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except Exception as e:
+            log.error(f"[Postgres] Error inspecting path: {e}")
+            return None
+        finally:
+            conn.close()
 
     def inspect_dir(self, ip, username, directory):
-        # Implementation omitted for brevity
-        return []
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(
+                "SELECT * FROM user_filesystem WHERE ip=%s AND username=%s AND parent_path=%s AND is_deleted=0",
+                (ip, username, directory),
+            )
+            return [dict(r) for r in cursor.fetchall()]
+        except Exception as e:
+            log.error(f"[Postgres] Error inspecting dir: {e}")
+            return []
+        finally:
+            conn.close()
 
     def add_malicious_payload(self, url, url_hash, session_id, ip, timestamp=None):
         conn = self._get_conn()
@@ -1486,6 +1978,9 @@ class PostgresBackend(DatabaseBackend):
                     timestamp or datetime.datetime.now(),
                 ),
             )
+            row = cursor.fetchone()
+            conn.commit()
+            return row is not None
             row = cursor.fetchone()
 
             if row:
@@ -1515,8 +2010,46 @@ class PostgresBackend(DatabaseBackend):
         finally:
             conn.close()
 
+    def cleanup_malicious_payloads(self):
+        """Removes duplicate URLs from the malicious_payloads table, keeping only the oldest."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                DELETE FROM malicious_payloads
+                WHERE id NOT IN (
+                    SELECT MIN(id)
+                    FROM malicious_payloads
+                    GROUP BY url_hash
+                )
+            """
+            )
+            deleted_count = cursor.rowcount
+            conn.commit()
+            if deleted_count > 0:
+                log.info(
+                    f"[Postgres] Cleaned up {deleted_count} duplicate malicious payloads."
+                )
+        except Exception as e:
+            log.error(f"[Postgres] Error cleaning up payloads: {e}")
+        finally:
+            conn.close()
+
     def get_payload_by_hash(self, url_hash):
-        return None
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(
+                "SELECT * FROM malicious_payloads WHERE url_hash = %s", (url_hash,)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching payload by hash: {e}")
+            return None
+        finally:
+            conn.close()
 
     def get_pending_payloads(self, limit=5):
         conn = self._get_conn()
@@ -1576,11 +2109,37 @@ class PostgresBackend(DatabaseBackend):
             conn.close()
 
     def is_payload_host_rate_limited(self, hostname):
-        return False
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM malicious_payloads 
+                WHERE url LIKE %s AND timestamp > NOW() - INTERVAL '1 hour'
+                """,
+                (f"%%//{hostname}/%%",),
+            )
+            count = cursor.fetchone()[0]
+            return count >= 5
+        except Exception as e:
+            log.error(f"[Postgres] Error checking rate limit: {e}")
+            return False
+        finally:
+            conn.close()
 
     def get_interactions_with_http(self):
-        # ... logic ...
-        pass
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(
+                "SELECT * FROM interactions WHERE command LIKE '%%http%%' OR command LIKE '%%wget%%' OR command LIKE '%%curl%%'"
+            )
+            return [dict(r) for r in cursor.fetchall()]
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching HTTP interactions: {e}")
+            return []
+        finally:
+            conn.close()
 
     def get_interactions_since_id(self, last_id, limit=100):
         conn = self._get_conn()
@@ -1637,11 +2196,33 @@ class PostgresBackend(DatabaseBackend):
             conn.close()
 
     def get_next_payload_for_analysis(self):
-        # Implementation omitted for brevity
-        return None
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(
+                "SELECT * FROM malicious_payloads WHERE vt_scan_id IS NULL AND status = 'downloaded' LIMIT 1"
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching next payload for analysis: {e}")
+            return None
+        finally:
+            conn.close()
 
     def update_payload_vt_status(self, payload_id, result, scan_id=None):
-        pass
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE malicious_payloads SET vt_result = %s, vt_scan_id = %s WHERE id = %s",
+                (result, scan_id, payload_id),
+            )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Error updating payload VT status: {e}")
+        finally:
+            conn.close()
 
     def iter_interactions(self, batch_size=1000):
         conn = self._get_conn()

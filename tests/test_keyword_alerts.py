@@ -47,7 +47,7 @@ class TestKeywordAlerts(unittest.TestCase):
 
         # Verify Alert
         self.am.notifier.send_alert.assert_called_with(
-            session_id, ip, "Keyword Trigger: magic_word", 10
+            session_id, ip, "Keyword Trigger: magic_word", 100
         )
 
         # Verify Auto-Monitoring
@@ -63,7 +63,7 @@ class TestKeywordAlerts(unittest.TestCase):
 
         # Verify Alert
         self.am.notifier.send_alert.assert_called_with(
-            session_id, ip, "Keyword Trigger: secret_sauce", 10
+            session_id, ip, "Keyword Trigger: secret_sauce", 100
         )
 
     def test_no_match(self):

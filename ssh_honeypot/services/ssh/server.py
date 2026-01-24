@@ -904,29 +904,11 @@ def start_ssh_server(port, db_instance, llm_instance):
     BIND_IP = (
         os.getenv("FAUXSSH_BIND_IP") or config.get("server", "bind_ip") or "0.0.0.0"
     )
-
-    # Create Socket
-    addr_family = socket.AF_INET
-    family_str = "IPv4"
-    if ":" in BIND_IP or BIND_IP == "::":
-        addr_family = socket.AF_INET6
-        family_str = "IPv6"
-
-    sock = socket.socket(addr_family, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-    if addr_family == socket.AF_INET6:
-        try:
-            IPPROTO_IPV6 = getattr(socket, "IPPROTO_IPV6", 41)
-            IPV6_V6ONLY = getattr(socket, "IPV6_V6ONLY", 26)
-            sock.setsockopt(IPPROTO_IPV6, IPV6_V6ONLY, 0)
-            family_str = "IPv6 (Dual Stack)"
-        except Exception as e:
-            log.warning(f"[!] Warning: Could not set IPV6_V6ONLY=0: {e}")
+    from ssh_honeypot.core.utils import create_dual_stack_socket
 
     try:
-        sock.bind((BIND_IP, port))
-        sock.listen(100)
+        sock = create_dual_stack_socket(BIND_IP, port, backlog=100)
+        family_str = "IPv6 (Dual Stack)" if sock.family == socket.AF_INET6 else "IPv4"
         log.info(f"[*] SSH Honeypot listening on {BIND_IP}:{port} ({family_str})")
     except Exception as e:
         log.error(f"[!] Failed to bind SSH port {port} on {BIND_IP}: {e}")

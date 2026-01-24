@@ -28,16 +28,12 @@ FauxSSH deceptively emulates a realistic Linux server, engaging attackers in lon
 - **🦠 Malicious Payload Analysis**: Automatically detects, queues, downloads, and analyzes malware dropped via `curl`/`wget`. Tracks payloads by MD5 and origin URL.
 - **📊 Built-in Analytics**: CLI tools to visualize sessions, inspect malware, and correlate threat actors.
 
+## Recent Improvements (Jan 23)
+- **Risk Scoring Alignment**: Normalized all threat detection and reporting to a 0-100 scale for better granularity and alerting accuracy.
+- **Analytics Power-Tools**: Added `--top` and `--duration` flags to `analyze.py`, enabling rapid triage of frequent commands over specific time periods (e.g., last 15m, 14h, 3d).
+- **Auto-Formatting Hooks**: Enhanced the smart test runner to automatically correct code style issues in a loop, ensuring CI/CD compliance.
+
 ## Recent Improvements (Jan 9)
-- **Database Abstraction**: Decoupled DB layer (`SQLiteBackend`, `PostgresBackend`) enabling seamless switching to PostgreSQL for high-scale logging.
-- **Unified Logging**: Consolidated all event streams into a structured `events.json.log` schema, ready for vector/SIEM ingestion.
-- **Log Tools**: Added `tools/import_logs.py` (legacy migration) and `tools/export_logs.py` (bulk export) utilities.
-- **Robust Telnet Input**: Completely rewrote Telnet input handling (`TelnetHelper`) to fix "Enter key hangs" and support byte-by-byte typing/fragmentation.
-- **Scanning Noise Suppression**: Added intelligent log filtering to automatically suppress "Incompatible ssh peer" and other Paramiko tracebacks from mass scanners.
-- **Anti-Harvesting Isolation**: Verified strict IP-based isolation for anti-harvesting rules (one abusive IP won't lock out others).
-- **Network Realism**: Enhanced Persona Generator to support detailed network configuration (CIDR, Gateway, DNS).
-- **LLMv2 Engine**: Refactored LLM Core to use official Google GenAI SDK with an Extensible Provider Pattern, supporting future models.
-- **Robust Startup**: Improved `start.sh` to validate persona existence and prevent silent failures.
 
 ## Quick Start
 

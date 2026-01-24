@@ -12,9 +12,10 @@ class TestTelnetFiltering:
         addr = ("1.2.3.4", 5678)
 
         # Patch config and log to avoid side effects
-        with patch("ssh_honeypot.services.telnet.server.config") as mock_config, patch(
-            "ssh_honeypot.services.telnet.server.log"
-        ) as mock_log:
+        with (
+            patch("ssh_honeypot.services.telnet.server.config") as mock_config,
+            patch("ssh_honeypot.services.telnet.server.log") as mock_log,
+        ):
 
             mock_config.get.return_value = "test-host"
 
@@ -55,9 +56,10 @@ class TestTelnetFiltering:
 
         mock_db.validate_anti_harvesting.return_value = (True, "ok")
 
-        with patch("ssh_honeypot.services.telnet.server.config") as mock_config, patch(
-            "ssh_honeypot.services.telnet.server.log"
-        ) as mock_log:
+        with (
+            patch("ssh_honeypot.services.telnet.server.config") as mock_config,
+            patch("ssh_honeypot.services.telnet.server.log") as mock_log,
+        ):
 
             mock_config.get.return_value = "test-host"
 

@@ -495,8 +495,10 @@ def handle_telnet_session(client_sock, addr, db, llm):
                                 for x in db.list_user_dir(ip, user, cwd)
                             ],
                             "known_paths": list(vfs.keys()),
-                            "persona_config": persona_config,
+                            "prompt": prompt,
                             "protocol": "telnet",
+                            "session_id": session_id,
+                            "persona_config": persona_config,
                         }
 
                         start_time = time.time()
@@ -629,29 +631,14 @@ def start_telnet_server(port, db, llm):
         bind_ip = (
             os.getenv("FAUXSSH_BIND_IP") or config.get("server", "bind_ip") or "0.0.0.0"
         )
-
-        addr_family = socket.AF_INET
-        family_str = "IPv4"
-        if ":" in bind_ip or bind_ip == "::":
-            addr_family = socket.AF_INET6
-            family_str = "IPv6"
-
-        log.info(f"[*] Starting Telnet Honeypot on {bind_ip}:{port}...")
-        sock = socket.socket(addr_family, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-        if addr_family == socket.AF_INET6:
-            try:
-                IPPROTO_IPV6 = getattr(socket, "IPPROTO_IPV6", 41)
-                IPV6_V6ONLY = getattr(socket, "IPV6_V6ONLY", 26)
-                sock.setsockopt(IPPROTO_IPV6, IPV6_V6ONLY, 0)
-                family_str = "IPv6 (Dual Stack)"
-            except Exception as e:
-                log.warning(f"[Telnet] Warning: Could not set IPV6_V6ONLY=0: {e}")
+        from ssh_honeypot.core.utils import create_dual_stack_socket
 
         try:
-            sock.bind((bind_ip, port))
-            sock.listen(5)
+            sock = create_dual_stack_socket(bind_ip, port, backlog=100)
+            family_str = (
+                "IPv6 (Dual Stack)" if sock.family == socket.AF_INET6 else "IPv4"
+            )
+            log.info(f"[*] Starting Telnet Honeypot on {bind_ip}:{port} ({family_str})")
 
             while True:
                 client, addr = sock.accept()

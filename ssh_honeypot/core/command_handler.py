@@ -700,7 +700,10 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if (
             not jailbroken
             and persona
-            and persona.get("system", {}).get("handler_type") == "cisco_ios"
+            and (
+                persona.get("system", {}).get("handler_type") == "cisco_ios"
+                or persona.get("handler_type") == "cisco_ios"
+            )
         ):
             if cisco_handlers:
                 parts = cmd.split()
@@ -1384,10 +1387,8 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             safe_base_cmd = base_cmd.replace("-", "_")
             handler_name = f"handle_{safe_base_cmd}"
 
-        import sys
-
-        sys.stderr.write(
-            f"DEBUG: Dispatching '{base_cmd}' -> '{handler_name}'. HasAttr: {hasattr(self, str(handler_name))}\n"
+        log.debug(
+            f"Dispatching '{base_cmd}' -> '{handler_name}'. HasAttr: {hasattr(self, str(handler_name))}"
         )
 
         if handler_name and hasattr(self, handler_name):
@@ -1456,7 +1457,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if r_json:
             output_text = r_json.get("output", "")
             updates["new_cwd"] = r_json.get("new_cwd")
-            updates["file_modifications"] = r_json.get("file_modifications")
+            updates["file_modifications"] = r_json.get("file_modifications") or []
         else:
             output_text = r_text
 
@@ -1527,7 +1528,9 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         log.debug(
             f"[Session: {session_id}] [Cache] Checking cache for '{cmd}' in '{cwd}'"
         )
-        cached_resp = self.db.get_cached_response(cmd, cwd)
+        cached_resp = None
+        if hasattr(self.db, "get_cached_response"):
+            cached_resp = self.db.get_cached_response(cmd, cwd)
         response_json, response_text = self._extract_json_or_text(cached_resp)
         if response_json or response_text:
             if (
@@ -1566,6 +1569,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if (
             "Error: AI Core Offline" not in resp
             and "Resource temporarily unavailable" not in resp
+            and hasattr(self.db, "cache_response")
         ):
             self.db.cache_response(cmd, cwd, resp)
 
@@ -1690,6 +1694,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if (
             "Error: AI Core Offline" not in resp
             and "Resource temporarily unavailable" not in resp
+            and hasattr(self.db, "cache_response")
         ):
             self.db.cache_response(cmd, context.get("cwd"), resp)
 
@@ -1824,6 +1829,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if (
             "Error: AI Core Offline" not in resp
             and "Resource temporarily unavailable" not in resp
+            and hasattr(self.db, "cache_response")
         ):
             self.db.cache_response(cmd, context.get("cwd"), resp)
         return self._process_llm_json(j, t)
@@ -2158,7 +2164,9 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         content_hash = hashlib.md5(content.encode("utf-8", "ignore")).hexdigest()
         cache_cmd_key = f"{cmd}::hash={content_hash}"
 
-        cached = self.db.get_cached_response(cache_cmd_key, context.get("cwd"))
+        cached = None
+        if hasattr(self.db, "get_cached_response"):
+            cached = self.db.get_cached_response(cache_cmd_key, context.get("cwd"))
         if cached:
             return self._process_llm_json(
                 json.loads(cached) if cached.startswith("{") else None, cached
@@ -2178,7 +2186,8 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         )
 
         # Cache it
-        self.db.cache_response(cache_cmd_key, context.get("cwd"), resp)
+        if hasattr(self.db, "cache_response"):
+            self.db.cache_response(cache_cmd_key, context.get("cwd"), resp)
 
         j, t = self._extract_json_or_text(resp)
         res, updates = self._process_llm_json(j, t)
@@ -2941,7 +2950,9 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         session_id = context.get("session_id", "unknown")
         CACHE_KEY = "_global_process_list"
         print(f"[Session: {session_id}] [Cache] Checking cache for '{CACHE_KEY}'")
-        cached_resp = self.db.get_cached_response(CACHE_KEY, "/")
+        cached_resp = None
+        if hasattr(self.db, "get_cached_response"):
+            cached_resp = self.db.get_cached_response(CACHE_KEY, "/")
 
         j = None
         if cached_resp:
@@ -2988,7 +2999,8 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
             # Cache valid result
             if j and "processes" in j:
                 # We cache the raw response
-                self.db.cache_response(CACHE_KEY, "/", resp)
+                if hasattr(self.db, "cache_response"):
+                    self.db.cache_response(CACHE_KEY, "/", resp)
             else:
                 # Fallback to STATIC DATA to prevent loop
                 print(

@@ -601,6 +601,9 @@ class SQLiteBackend(DatabaseBackend):
         response_head=None,
         response_size=None,
     ):
+        if not request_md5 and command:
+            request_md5 = hashlib.md5(command.encode("utf-8")).hexdigest()
+
         # Defensive Type Casting to prevent SQLite InterfaceError with dicts
         try:
             if isinstance(source, dict) or isinstance(source, list):
@@ -1572,6 +1575,311 @@ class SQLiteBackend(DatabaseBackend):
             conn.close()
         return stats
 
+    def get_infographic_stats(self, hours=24, ignore_ips=None):
+        """Returns complex stats for the infographic dashboard."""
+        conn = self._get_conn()
+        stats = {
+            "total_ips": 0,
+            "total_requests": 0,
+            "total_sessions": 0,
+            "total_networks": 0,
+            "trends": {},
+            "top_ips": [],
+            "top_countries": [],
+            "top_isps": [],
+            "service_dist": [],
+            "manual_vs_bot": {"manual": 0, "bot": 0},
+            "recent_unique_commands": [],
+            "top_ssh_commands": [],
+            "top_telnet_commands": [],
+            "top_mysql_commands": [],
+            "top_http_commands": [],  # Added HTTP
+            "top_redis_commands": [],
+            "top_mcp_commands": [],
+            "top_passwords": [],
+            "top_ssh_users": [],
+            "top_ssh_risk": [],
+            "total_payloads": 0,
+            "protocol_activity": {},  # For sorting in UI
+            "multi_window": {},  # Added for 24H, 48H, 1W, 2W
+        }
+        try:
+            c = conn.cursor()
+            time_filter = f"datetime('now', '-{hours} hours')"
+            prev_time_filter = f"datetime('now', '-{hours*2} hours')"
+
+            # IP Exclusion Filter
+            ip_filter = ""
+            params = []
+            if ignore_ips:
+                placeholders = ",".join(["?" for _ in ignore_ips])
+                ip_filter = f"AND remote_ip NOT IN ({placeholders})"
+                params = list(ignore_ips)
+
+            # Helper for interactions (needs join with sessions to check remote_ip)
+            interaction_ip_filter = ""
+            if ignore_ips:
+                placeholders = ",".join(["?" for _ in ignore_ips])
+                interaction_ip_filter = f"AND s.remote_ip NOT IN ({placeholders})"
+
+            # --- TOTALS & TRENDS ---
+            def get_window_stats(start, end=None):
+                e_part = f" AND start_time <= {end}" if end else ""
+                c.execute(
+                    f"SELECT COUNT(DISTINCT remote_ip), COUNT(*) FROM sessions WHERE start_time > {start} {e_part} {ip_filter}",
+                    params,
+                )
+                ips, sessions = c.fetchone()
+
+                ei_part = f" AND i.timestamp <= {end}" if end else ""
+                c.execute(
+                    f"""
+                    SELECT COUNT(*) FROM interactions i
+                    JOIN sessions s ON i.session_id = s.session_id
+                    WHERE i.timestamp > {start} {ei_part} {interaction_ip_filter}
+                """,
+                    params,
+                )
+                commands = c.fetchone()[0] or 0
+
+                # Count unique networks (ORGs)
+                c.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT intel.org) 
+                    FROM sessions s
+                    JOIN ip_intelligence intel ON s.remote_ip = intel.ip
+                    WHERE s.start_time > {start} {e_part} {ip_filter}
+                """,
+                    params,
+                )
+                networks = c.fetchone()[0] or 0
+
+                return {
+                    "ips": ips or 0,
+                    "sessions": sessions or 0,
+                    "commands": commands,
+                    "networks": networks,
+                }
+
+            # Multi-window Metrics (Task 3)
+            windows = {"24H": 24, "48H": 48, "1W": 168, "2W": 336}
+            for label, h in windows.items():
+                w_filter = f"datetime('now', '-{h} hours')"
+                w_stats = get_window_stats(w_filter)
+                stats["multi_window"][label] = {
+                    "ips": w_stats["ips"],
+                    "networks": w_stats["networks"],
+                    "interactions": w_stats["commands"],
+                    "sessions": w_stats["sessions"],
+                }
+
+            current_window = get_window_stats(time_filter)
+            prev_window = get_window_stats(prev_time_filter, time_filter)
+
+            stats["total_ips"] = current_window["ips"]
+            stats["total_sessions"] = current_window["sessions"]
+            stats["total_requests"] = current_window["commands"]
+            stats["total_networks"] = current_window["networks"]
+
+            for key in ["ips", "sessions", "commands"]:
+                curr = current_window[key]
+                prev = prev_window[key]
+                diff = curr - prev
+                pct = (diff / prev * 100) if prev > 0 else 0
+                stats["trends"][key] = {"diff": diff, "pct": round(pct, 1)}
+
+            # Total Payloads (Captured in last 24h)
+            query = f"SELECT COUNT(*) FROM malicious_payloads WHERE timestamp > {time_filter}"
+            c.execute(query)
+            stats["total_payloads"] = c.fetchone()[0] or 0
+
+            # --- PROTOCOL DISTRIBUTION ---
+            query = f"""
+                SELECT s.protocol, COUNT(DISTINCT s.session_id) as sess_count, COUNT(i.id) as cmd_count
+                FROM sessions s
+                LEFT JOIN interactions i ON s.session_id = i.session_id
+                WHERE s.start_time > {time_filter} {ip_filter}
+                GROUP BY s.protocol
+                ORDER BY sess_count DESC
+            """
+            c.execute(query, params)
+            for r in c.fetchall():
+                proto = r[0]
+                stats["service_dist"].append(
+                    {"protocol": proto, "sessions": r[1], "commands": r[2]}
+                )
+                stats["protocol_activity"][proto] = r[
+                    2
+                ]  # Use command count for activity sorting
+
+            # --- TOP TABLES ---
+
+            # Top Countries (Unique IPs and Sessions)
+            query = f"""
+                SELECT intel.country, COUNT(DISTINCT s.remote_ip) as unique_ips, COUNT(DISTINCT s.session_id) as sessions
+                FROM sessions s 
+                JOIN ip_intelligence intel ON s.remote_ip = intel.ip 
+                WHERE s.start_time > {time_filter} {interaction_ip_filter}
+                GROUP BY intel.country 
+                ORDER BY unique_ips DESC LIMIT 50
+            """
+            c.execute(query, params)
+            stats["top_countries"] = [
+                {"country": r[0] or "Unknown", "ips": r[1], "sessions": r[2]}
+                for r in c.fetchall()
+            ]
+
+            # Top ISPs / Networks (Unique IPs and Sessions)
+            query = f"""
+                SELECT intel.org, COUNT(DISTINCT s.remote_ip) as unique_ips, COUNT(DISTINCT s.session_id) as sessions
+                FROM sessions s 
+                JOIN ip_intelligence intel ON s.remote_ip = intel.ip 
+                WHERE s.start_time > {time_filter} {interaction_ip_filter}
+                GROUP BY intel.org 
+                ORDER BY unique_ips DESC LIMIT 50
+            """
+            c.execute(query, params)
+            stats["top_isps"] = [
+                {"isp": r[0] or "Unknown", "ips": r[1], "sessions": r[2]}
+                for r in c.fetchall()
+            ]
+
+            # Top SSH Users
+            query = f"""
+                SELECT username, COUNT(*) as count, COUNT(DISTINCT remote_ip) as unique_ips
+                FROM sessions 
+                WHERE start_time > {time_filter} AND protocol = 'ssh' AND username IS NOT NULL AND username != '' {ip_filter}
+                GROUP BY username 
+                ORDER BY count DESC LIMIT 50
+            """
+            c.execute(query, params)
+            stats["top_ssh_users"] = [
+                {"username": r[0], "count": r[1], "ips": r[2]} for r in c.fetchall()
+            ]
+
+            # Top Passwords
+            query = f"""
+                SELECT password, COUNT(*) as count, COUNT(DISTINCT remote_ip) as unique_ips
+                FROM sessions 
+                WHERE start_time > {time_filter} AND protocol = 'ssh' AND password IS NOT NULL AND password != '' {ip_filter}
+                GROUP BY password 
+                ORDER BY count DESC LIMIT 50
+            """
+            c.execute(query, params)
+            stats["top_passwords"] = [
+                {"password": r[0], "count": r[1], "ips": r[2]} for r in c.fetchall()
+            ]
+
+            # Generic Top Command Fetcher
+            def get_top_commands(proto, limit=50):
+                q = f"""
+                    SELECT i.command, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips
+                    FROM interactions i
+                    JOIN sessions s ON i.session_id = s.session_id
+                    WHERE i.timestamp > {time_filter} AND s.protocol = ? {interaction_ip_filter}
+                    GROUP BY i.command 
+                    ORDER BY unique_ips DESC, count DESC LIMIT ?
+                """
+                c.execute(q, [proto] + params + [limit])
+                return [
+                    {"command": r[0], "count": r[1], "ips": r[2]} for r in c.fetchall()
+                ]
+
+            stats["top_ssh_commands"] = get_top_commands("ssh")
+            stats["top_telnet_commands"] = get_top_commands("telnet")
+            stats["top_mysql_commands"] = get_top_commands("mysql")
+            stats["top_http_commands"] = get_top_commands("http")
+            stats["top_redis_commands"] = get_top_commands("redis")
+            stats["top_mcp_commands"] = get_top_commands("mcp")
+
+            # Top SSH Commands by Risk (Freq and unique IP counts)
+            # Improved sorting: Risk first, then unique IPs, then total count
+            query = f"""
+                SELECT i.command, COALESCE(MAX(ca.risk_score), 0) as max_risk, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips
+                FROM interactions i
+                JOIN sessions s ON i.session_id = s.session_id
+                JOIN command_analysis ca ON i.request_md5 = ca.command_hash
+                WHERE i.timestamp > {time_filter} AND s.protocol = 'ssh' {interaction_ip_filter}
+                GROUP BY i.command
+                ORDER BY max_risk DESC, unique_ips DESC, count DESC
+                LIMIT 50
+            """
+            c.execute(query, params)
+            stats["top_ssh_risk"] = [
+                {"command": r[0], "risk": r[1], "count": r[2], "ips": r[3]}
+                for r in c.fetchall()
+            ]
+
+            # Recent Unique Commands (for log scrolling effects)
+            query = f"""
+                SELECT DISTINCT i.command 
+                FROM interactions i
+                JOIN sessions s ON i.session_id = s.session_id
+                WHERE s.start_time > {time_filter} {interaction_ip_filter}
+                ORDER BY i.timestamp DESC LIMIT 20
+            """
+            c.execute(query, params)
+            stats["recent_unique_commands"] = [r[0] for r in c.fetchall()]
+
+            # Manual vs Bot (Classification)
+            query = f"""
+                SELECT 
+                    SUM(CASE WHEN command_count > 10 OR summary LIKE '%manual%' THEN 1 ELSE 0 END) as manual_count,
+                    SUM(CASE WHEN command_count <= 10 AND (summary IS NULL OR summary NOT LIKE '%manual%') THEN 1 ELSE 0 END) as bot_count
+                FROM (
+                    SELECT s.session_id, s.summary, COUNT(i.id) as command_count
+                    FROM sessions s
+                    LEFT JOIN interactions i ON s.session_id = i.session_id
+                    WHERE s.start_time > {time_filter} {interaction_ip_filter}
+                    GROUP BY s.session_id
+                )
+            """
+            c.execute(query, params)
+            row = c.fetchone()
+            if row:
+                stats["manual_vs_bot"] = {"manual": row[0] or 0, "bot": row[1] or 0}
+
+            # Top IPs Summary (for reference)
+            query = f"""
+                SELECT remote_ip, COUNT(*) as count 
+                FROM sessions 
+                WHERE start_time > {time_filter} {ip_filter}
+                GROUP BY remote_ip 
+                ORDER BY count DESC LIMIT 50
+            """
+            c.execute(query, params)
+            stats["top_ips"] = [{"ip": r[0], "count": r[1]} for r in c.fetchall()]
+
+        except Exception as e:
+            log.error(f"[SQLite] Error fetching infographic stats: {e}")
+        finally:
+            conn.close()
+        return stats
+
+    def get_daily_session_counts(self, days=7):
+        """Returns session counts for each of the last X days."""
+        conn = self._get_conn()
+        res = []
+        try:
+            c = conn.cursor()
+            for i in range(days - 1, -1, -1):
+                day_start = f"datetime('now', '-{i+1} days')"
+                day_end = f"datetime('now', '-{i} days')"
+                c.execute(
+                    f"SELECT COUNT(*) FROM sessions WHERE start_time > {day_start} AND start_time <= {day_end}"
+                )
+                count = c.fetchone()[0] or 0
+
+                # Get label like 'Jan 21'
+                c.execute(f"SELECT strftime('%b %d', 'now', '-{i} days')")
+                label = c.fetchone()[0]
+                res.append({"label": label, "count": count})
+        except Exception as e:
+            log.error(f"[SQLite] Error fetching daily session counts: {e}")
+        finally:
+            conn.close()
+        return res
+
     def get_active_sessions(self):
         """
         Returns a list of currently active sessions (end_time is NULL).
@@ -2003,6 +2311,18 @@ class SQLiteBackend(DatabaseBackend):
         conn.close()
         return results
 
+    def get_unanalyzed_sessions(self, limit=10):
+        conn = self._get_conn()
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute(
+            "SELECT session_id FROM sessions WHERE (summary IS NULL OR summary = '') AND end_time IS NOT NULL ORDER BY start_time DESC LIMIT ?",
+            (limit,),
+        )
+        sessions = [row["session_id"] for row in c.fetchall()]
+        conn.close()
+        return sessions
+
     def save_analysis(self, cmd_hash, cmd_text, analysis):
         conn = self._get_conn()
         try:
@@ -2202,10 +2522,40 @@ class SQLiteBackend(DatabaseBackend):
                 (url, url_hash, session_id, ip, ts, "pending"),
             )
             conn.commit()
+            return True
         except sqlite3.IntegrityError:
-            pass  # Already exists distinct by url_hash
+            return False  # Already exists distinct by url_hash
         except Exception as e:
             log.error(f"[DB] Error adding payload: {e}")
+        finally:
+            conn.close()
+
+    def cleanup_malicious_payloads(self):
+        """Removes duplicate URLs from the malicious_payloads table, keeping only the oldest."""
+        conn = self._get_conn()
+        try:
+            # Step 1: Identify duplicates and keep the one with the smallest ID (oldest)
+            # SQLite doesn't support complex DELETE JOINs as easily as Postgres
+            # but we can use a subquery.
+            cur = conn.cursor()
+            cur.execute(
+                """
+                DELETE FROM malicious_payloads
+                WHERE id NOT IN (
+                    SELECT MIN(id)
+                    FROM malicious_payloads
+                    GROUP BY url_hash
+                )
+            """
+            )
+            deleted_count = cur.rowcount
+            conn.commit()
+            if deleted_count > 0:
+                log.info(
+                    f"[DB] Cleaned up {deleted_count} duplicate malicious payloads."
+                )
+        except Exception as e:
+            log.error(f"[DB] Error cleaning up payloads: {e}")
         finally:
             conn.close()
 

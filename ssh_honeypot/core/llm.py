@@ -297,7 +297,7 @@ class LLMInterface:
              Return ONLY a JSON object with these keys:
              - type: (Reconnaissance, Execution, Persistence, etc.)
              - stage: (Recon, Weaponization, Delivery, Exploitation, Installation, C2, Actions)
-             - risk: (Integer 0-10)
+             - risk: (Integer 0-100)
              - explanation: (Brief 1 sentence)
              - mitre_technique_id: (Optional String, e.g. "T1059.004")
              """
@@ -381,6 +381,17 @@ class LLMInterface:
         if not session_history:
             return None
 
+        # Heuristic for common discovery-only sessions to save LLM tokens
+        common_discovery = {"ls", "whoami", "uname", "id", "pwd", "cat /etc/passwd"}
+        if len(session_history) <= 3 and all(
+            c.strip() in common_discovery for c in session_history
+        ):
+            return {
+                "summary": f"Attacker performed basic discovery: {', '.join(session_history)}",
+                "risk_score": 10,
+                "mitre_codes": ["T1592"],
+            }
+
         history_text = "\n".join([f"Cmd: {c}" for c in session_history])
 
         prompt = f"""
@@ -392,11 +403,11 @@ class LLMInterface:
         
         Task:
         1. Provide a brief 1-sentence narrative summary of the attacker's intent and tools used.
-        2. Assign a Risk Score (0-99) based on these heuristics:
+        2. Assign a Risk Score (0-100) based on these heuristics:
             - 0-30: Reconnaissance, basic discovery (ls, whoami, uname).
             - 30-60: Probing specific vulnerabilities, non-standard commands.
             - 60-80: Attempts to write files, modify config, known exploitation attempts.
-            - 80-99: Critical Risk. POST requests with payloads, downloading payloads (wget/curl/scp), execution of downloaded payloads, persistence mechanisms.
+            - 80-100: Critical Risk. POST requests with payloads, downloading payloads (wget/curl/scp), execution of downloaded payloads, persistence mechanisms.
         3. Identify any relevant MITRE ATT&CK Technique IDs (e.g. T1059.004).
         
         Return ONLY a JSON object:

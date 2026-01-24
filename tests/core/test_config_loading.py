@@ -20,20 +20,24 @@ class TestConfigLoading(unittest.TestCase):
             return False
 
         # Use context managers to strictly control mock scope and naming
-        with patch.dict(os.environ, {}, clear=True), patch(
-            "ssh_honeypot.core.config.load_dotenv"
-        ) as mock_dotenv, patch(
-            "ssh_honeypot.core.config.PROJECT_ROOT", "/mock/project/root"
-        ), patch(
-            "ssh_honeypot.core.config.os.path.exists", side_effect=exists_side_effect
-        ) as mock_exists, patch(
-            "ssh_honeypot.core.config.yaml.safe_load",
-            return_value={"database": {"type": "yaml_db"}},
-        ) as mock_yaml, patch(
-            "ssh_honeypot.core.config.open",
-            new_callable=unittest.mock.mock_open,
-            read_data="database:\n  type: yaml_db",
-        ) as mock_open:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ssh_honeypot.core.config.load_dotenv") as mock_dotenv,
+            patch("ssh_honeypot.core.config.PROJECT_ROOT", "/mock/project/root"),
+            patch(
+                "ssh_honeypot.core.config.os.path.exists",
+                side_effect=exists_side_effect,
+            ) as mock_exists,
+            patch(
+                "ssh_honeypot.core.config.yaml.safe_load",
+                return_value={"database": {"type": "yaml_db"}},
+            ) as mock_yaml,
+            patch(
+                "ssh_honeypot.core.config.open",
+                new_callable=unittest.mock.mock_open,
+                read_data="database:\n  type: yaml_db",
+            ) as mock_open,
+        ):
 
             # Action
             cm = ConfigManager()
@@ -50,11 +54,14 @@ class TestConfigLoading(unittest.TestCase):
         Test that DEFAULT_CONFIG_DICT includes database section so env overrides work
         even if NO config file is found.
         """
-        with patch.dict(os.environ, {}, clear=True), patch(
-            "ssh_honeypot.core.config.load_dotenv"
-        ), patch("ssh_honeypot.core.config.PROJECT_ROOT", "/mock/project/root"), patch(
-            "ssh_honeypot.core.config.os.path.exists", return_value=False
-        ) as mock_exists:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ssh_honeypot.core.config.load_dotenv"),
+            patch("ssh_honeypot.core.config.PROJECT_ROOT", "/mock/project/root"),
+            patch(
+                "ssh_honeypot.core.config.os.path.exists", return_value=False
+            ) as mock_exists,
+        ):
 
             cm = ConfigManager()
 

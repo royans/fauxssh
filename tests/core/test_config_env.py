@@ -22,8 +22,9 @@ class TestConfigEnv(unittest.TestCase):
         os.environ["ANALYTICS_IGNORE_IPS"] = "1.1.1.1, 2.2.2.2"  # List
 
         # Initialize Config (mocking load_config_file to not read disk)
-        with patch.object(ConfigManager, "load_config_file"), patch.object(
-            ConfigManager, "_load_env"
+        with (
+            patch.object(ConfigManager, "load_config_file"),
+            patch.object(ConfigManager, "_load_env"),
         ):
             # We also need to mock _read_persona_file or it might fail if defaults used
             with patch.object(ConfigManager, "load_persona"):
@@ -48,9 +49,11 @@ class TestConfigEnv(unittest.TestCase):
         """Test backward compatibility mappings"""
         os.environ["GOOGLE_API_KEY"] = "legacy_key"
 
-        with patch.object(ConfigManager, "load_config_file"), patch.object(
-            ConfigManager, "load_persona"
-        ), patch.object(ConfigManager, "_load_env"):
+        with (
+            patch.object(ConfigManager, "load_config_file"),
+            patch.object(ConfigManager, "load_persona"),
+            patch.object(ConfigManager, "_load_env"),
+        ):
             cfg = ConfigManager()
 
         self.assertEqual(cfg.get("llm", "api_key"), "legacy_key")
@@ -59,9 +62,11 @@ class TestConfigEnv(unittest.TestCase):
         """Test THROTTLING_DOS_RPM maps to throttling.dos.rpm"""
         os.environ["THROTTLING_DOS_RPM"] = "555"
 
-        with patch.object(ConfigManager, "load_config_file"), patch.object(
-            ConfigManager, "load_persona"
-        ), patch.object(ConfigManager, "_load_env"):
+        with (
+            patch.object(ConfigManager, "load_config_file"),
+            patch.object(ConfigManager, "load_persona"),
+            patch.object(ConfigManager, "_load_env"),
+        ):
             cfg = ConfigManager()
 
         self.assertEqual(cfg.get("throttling", "dos", "rpm"), 555)

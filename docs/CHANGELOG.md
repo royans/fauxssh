@@ -1,6 +1,21 @@
 # Changelog
 
-## Weekly Changelog: Jan 18th 2026
+## Weekly Changelog: Jan 25th 2026
+
+### New Features
+- **Risk Scoring Normalization**: Standardized all internal and external risk scores to the 0-100 scale, improving alerting precision and UI clarity.
+- **Advanced Analytics Functions**:
+    - **Top Command Analysis**: New `--top` flag in `analyze.py` for command frequency clustering and sample response display.
+    - **Time-Window Filtering**: Added `--duration` support (e.g., `15m`, `14h`, `3d`) to isolate recent activity during triage.
+
+### Enhancements
+- **Enhanced Test Automation**: Smart test runner (`run_tests_smart.sh`) now includes an automated styling fix loop for `black` formatting, preventing deployment blocks.
+- **Database Performance**: Added `idx_interactions_md5` to PostgreSQL backend for faster correlation analysis on high-volume logs.
+
+### Reliability
+- **CI/CD Integration**: Integrated `pylint` and `pytest-testmon` for faster, higher-quality test cycles.
+- **Bug Fixes**: Resolved Redis test flakiness and fixed `--output` clipping in aggregated analytics views.
+
 
 ### New Features
 - **Database Abstraction**: Implemented `DatabaseBackend` interface allowing switchable storage engines.

@@ -40,9 +40,9 @@ analytics:
 
 alerting:
   webhook_url: "" # ENV: ALERTING_WEBHOOK_URL
-  notify_threshold: 6
-  session_threshold: 7
-  ip_threshold: 9
+  notify_threshold: 60
+  session_threshold: 70
+  ip_threshold: 90
   keywords: []
 
 telnet:
@@ -79,6 +79,7 @@ http:
   enabled: true
   port: 8080
   server_header: "Apache/2.4.52 (Ubuntu)"
+  showstats: true
   headers:
     X-Content-Type-Options: "nosniff"
     X-Frame-Options: "DENY"

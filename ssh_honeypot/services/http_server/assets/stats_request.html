@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FauxSSH | Threat Intelligence Dashboard</title>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Inter:wght@300;400;600&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg-deep: #05070a;
+            --bg-card: rgba(255, 255, 255, 0.04);
+            --accent: #00f2ff;
+            --accent-muted: #008c95;
+            --text-primary: #e0e0e0;
+            --text-secondary: #88889a;
+            --border: rgba(255, 255, 255, 0.08);
+            --risk-high: #ff3e3e;
+            --risk-mid: #ff9f43;
+            --risk-low: #1dd1a1;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-deep);
+            color: var(--text-primary);
+            font-family: 'Inter', sans-serif;
+            padding: 10px;
+            font-size: 13px;
+            background-image:
+                radial-gradient(circle at 0% 0%, rgba(0, 242, 255, 0.03) 0%, transparent 50%),
+                radial-gradient(circle at 100% 100%, rgba(112, 0, 255, 0.03) 0%, transparent 50%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* --- Header --- */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            padding: 0 10px;
+        }
+
+        .title-group h1 {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.2rem;
+            color: var(--accent);
+            letter-spacing: 1px;
+        }
+
+        .title-group p {
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .last-update {
+            text-align: right;
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+        }
+
+        /* --- Trend Chart --- */
+        .chart-section {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 10px;
+            height: 120px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 5px;
+            color: var(--text-secondary);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+
+        .chart-container {
+            flex-grow: 1;
+            position: relative;
+            width: 100%;
+            height: 100%;
+        }
+
+        .chart-svg {
+            width: 100%;
+            height: 100%;
+            overflow: visible;
+        }
+
+        .chart-line {
+            fill: none;
+            stroke: var(--accent);
+            stroke-width: 2;
+            stroke-linecap: round;
+            filter: drop-shadow(0 0 3px var(--accent));
+        }
+
+        .chart-area {
+            fill: url(#chart-gradient);
+            opacity: 0.1;
+        }
+
+        .chart-point {
+            fill: var(--bg-deep);
+            stroke: var(--accent);
+            stroke-width: 2;
+            r: 3;
+        }
+
+        .chart-label {
+            font-size: 8px;
+            fill: var(--text-secondary);
+            text-anchor: middle;
+        }
+
+        /* --- Top Bar Stats --- */
+        .top-summary {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .summary-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 8px 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .summary-card span {
+            color: var(--text-secondary);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+
+        .summary-card div {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.1rem;
+            color: var(--accent);
+        }
+
+        .trend {
+            font-size: 0.7rem;
+            margin-left: 5px;
+            font-family: 'Inter';
+        }
+
+        .trend-up {
+            color: #1dd1a1;
+        }
+
+        .trend-down {
+            color: #ff3e3e;
+        }
+
+        /* --- Status Bar --- */
+        .status-bar {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border);
+            padding: 4px 15px;
+            display: flex;
+            gap: 20px;
+            font-size: 0.7rem;
+            margin-bottom: 15px;
+            border-radius: 4px;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            color: var(--text-secondary);
+        }
+
+        .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #444;
+        }
+
+        .dot-green {
+            background: #1dd1a1;
+            box-shadow: 0 0 5px #1dd1a1;
+        }
+
+        /* --- Main Masonry Grid --- */
+        .main-grid {
+            column-count: 3;
+            column-gap: 10px;
+            width: 100%;
+        }
+
+        .section-box {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px;
+            display: inline-block;
+            width: 100%;
+            margin-bottom: 10px;
+            break-inside: avoid;
+            transition: order 0.3s ease;
+        }
+
+        .section-box h2 {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.8rem;
+            color: var(--accent-muted);
+            margin-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 5px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .box-badge {
+            font-size: 0.6rem;
+            background: var(--border);
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-weight: normal;
+            font-family: 'Inter';
+        }
+
+        /* --- Table Styling --- */
+        .table-container {
+            max-height: 350px;
+            min-height: 150px;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: var(--accent-muted) transparent;
+        }
+
+        .table-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .table-container::-webkit-scrollbar-thumb {
+            background: var(--accent-muted);
+            border-radius: 10px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+        }
+
+        th {
+            text-align: left;
+            color: var(--text-secondary);
+            font-size: 0.7rem;
+            padding: 4px 6px;
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            background: #0b0e14;
+            z-index: 1;
+        }
+
+        td {
+            padding: 5px 6px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            vertical-align: middle;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        code {
+            font-family: 'Courier New', monospace;
+            color: #00ffaa;
+            font-size: 0.8rem;
+        }
+
+        .val-col {
+            text-align: right;
+            color: var(--text-primary);
+            font-family: 'Inter', sans-serif;
+            font-weight: 600;
+            font-size: 0.75rem;
+            width: 60px;
+        }
+
+        .sub-val {
+            color: var(--text-secondary);
+            font-size: 0.7rem;
+            font-weight: normal;
+        }
+
+        .risk-badge {
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 0.6rem;
+            font-weight: 700;
+            color: white;
+            text-transform: uppercase;
+        }
+
+        @media (max-width: 1200px) {
+            .main-grid {
+                column-count: 2;
+            }
+
+            .top-summary {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 800px) {
+            .main-grid {
+                column-count: 1;
+            }
+
+            .top-summary {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <div class="title-group">
+            <h1>FauxSSH Threat Intelligence</h1>
+            <p>Intelligence Window: Last 24 Hours</p>
+        </div>
+        <div class="last-update" id="last-update">Syncing logs...</div>
+    </header>
+
+    <div class="chart-section">
+        <div class="chart-header">
+            <span>7-Day Session Trend</span>
+        </div>
+        <div class="chart-container" id="chart-container">
+            <svg class="chart-svg" viewBox="0 0 700 80" preserveAspectRatio="none">
+                <defs>
+                    <linearGradient id="chart-gradient" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stop-color="var(--accent)" />
+                        <stop offset="100%" stop-color="transparent" />
+                    </linearGradient>
+                </defs>
+                <path class="chart-area" d="M 0 80 L 0 80 L 700 80 Z" id="chart-path-area"></path>
+                <path class="chart-line" d="M 0 80 L 700 80" id="chart-path-line"></path>
+                <g id="chart-labels"></g>
+                <g id="chart-points"></g>
+            </svg>
+        </div>
+    </div>
+
+    <div class="status-bar" id="status-bar">
+        <div class="status-item" data-proto="ssh">
+            <div class="dot dot-green"></div> SSH PROTOCOL
+        </div>
+        <div class="status-item" data-proto="telnet">
+            <div class="dot dot-green"></div> TELNET ENGINE
+        </div>
+        <div class="status-item" data-proto="mysql">
+            <div class="dot dot-green"></div> MYSQL SIMULATOR
+        </div>
+        <div class="status-item" data-proto="redis">
+            <div class="dot dot-green"></div> REDIS SIMULATOR
+        </div>
+        <div class="status-item" data-proto="mcp">
+            <div class="dot dot-green"></div> MCP LAYER
+        </div>
+    </div>
+
+    <div class="top-summary">
+        <div class="summary-card">
+            <span>Threat IPs (24h)</span>
+            <div id="summary-ips">0 <span class="trend" id="trend-ips"></span></div>
+        </div>
+        <div class="summary-card">
+            <span>Unique Networks</span>
+            <div id="summary-networks">0</div>
+        </div>
+        <div class="summary-card">
+            <span>Total Interaction</span>
+            <div id="summary-commands">0 <span class="trend" id="trend-commands"></span></div>
+        </div>
+        <div class="summary-card">
+            <span>Session Capture</span>
+            <div id="summary-sessions">0 <span class="trend" id="trend-sessions"></span></div>
+        </div>
+    </div>
+
+    <div class="main-grid" id="main-grid">
+        <!-- Boxes are dynamically managed and sorted by activity -->
+
+        <!-- Top Countries -->
+        <div class="section-box" id="box-countries" data-activity="1000">
+            <h2>Top Origin Countries <span class="box-badge">By Unique IPs</span></h2>
+            <div class="table-container">
+                <table id="table-countries">
+                    <thead>
+                        <tr>
+                            <th>Country</th>
+                            <th class="val-col">IPs</th>
+                            <th class="val-col">Sessions</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Top Networks -->
+        <div class="section-box" id="box-networks" data-activity="900">
+            <h2>Source Networks / ASNs <span class="box-badge">By Unique IPs</span></h2>
+            <div class="table-container">
+                <table id="table-isps">
+                    <thead>
+                        <tr>
+                            <th>Organization</th>
+                            <th class="val-col">IPs</th>
+                            <th class="val-col">Sessions</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- SSH Activity -->
+        <div class="section-box" id="box-ssh" data-activity="0">
+            <h2>Top SSH Commands</h2>
+            <div class="table-container">
+                <table id="table-ssh-cmds">
+                    <thead>
+                        <tr>
+                            <th>Command</th>
+                            <th class="val-col">Freq</th>
+                            <th class="val-col">IPs</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- MySQL Activity -->
+        <div class="section-box" id="box-mysql" data-activity="0">
+            <h2>Top MySQL Commands</h2>
+            <div class="table-container">
+                <table id="table-mysql-cmds">
+                    <thead>
+                        <tr>
+                            <th>Command</th>
+                            <th class="val-col">Hits</th>
+                            <th class="val-col">IPs</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Redis Activity -->
+        <div class="section-box" id="box-redis" data-activity="0" style="display:none">
+            <h2>Top Redis Commands</h2>
+            <div class="table-container">
+                <table id="table-redis-cmds">
+                    <thead>
+                        <tr>
+                            <th>Command</th>
+                            <th class="val-col">Hits</th>
+                            <th class="val-col">IPs</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- MCP Activity -->
+        <div class="section-box" id="box-mcp" data-activity="0" style="display:none">
+            <h2>Top MCP Activities</h2>
+            <div class="table-container">
+                <table id="table-mcp-cmds">
+                    <thead>
+                        <tr>
+                            <th>Target</th>
+                            <th class="val-col">Hits</th>
+                            <th class="val-col">IPs</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Telnet Activity -->
+        <div class="section-box" id="box-telnet" data-activity="0">
+            <h2>Top Telnet Commands</h2>
+            <div class="table-container">
+                <table id="table-telnet-cmds">
+                    <thead>
+                        <tr>
+                            <th>Command</th>
+                            <th class="val-col">Hits</th>
+                            <th class="val-col">IPs</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- HTTP Activity -->
+        <div class="section-box" id="box-http" data-activity="0">
+            <h2>Top HTTP Requests</h2>
+            <div class="table-container">
+                <table id="table-http-cmds">
+                    <thead>
+                        <tr>
+                            <th>Request Path</th>
+                            <th class="val-col">Hits</th>
+                            <th class="val-col">IPs</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Top SSH Risk -->
+        <div class="section-box" id="box-risk" data-activity="800">
+            <h2>High-Risk SSH Activity</h2>
+            <div class="table-container">
+                <table id="table-risk-cmds">
+                    <thead>
+                        <tr>
+                            <th>Payload</th>
+                            <th class="val-col">Risk</th>
+                            <th class="val-col">Freq/IP</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- SSH Auth -->
+        <div class="section-box" id="box-auth" data-activity="850">
+            <h2>SSH Authentication Intel</h2>
+            <div class="table-container">
+                <table id="table-auth">
+                    <thead>
+                        <tr>
+                            <th>User / Pass</th>
+                            <th class="val-col">Freq</th>
+                            <th class="val-col">IPs</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function formatTrend(trend) {
+            if (!trend) return "";
+            const char = trend.diff >= 0 ? "↑" : "↓";
+            const cls = trend.diff >= 0 ? "trend-up" : "trend-down";
+            return `<span class="${cls}">${char} ${Math.abs(trend.pct)}%</span>`;
+        }
+
+        function getRiskBadge(score) {
+            let color = "grey";
+            let label = "LOW";
+            if (score > 70) { color = "var(--risk-high)"; label = "CRIT"; }
+            else if (score > 40) { color = "var(--risk-mid)"; label = "MED"; }
+            else { color = "var(--risk-low)"; label = "LOW"; }
+            return `<span class="risk-badge" style="background:${color}">${label}</span>`;
+        }
+
+        function renderChart(dailyTrends) {
+            if (!dailyTrends || dailyTrends.length === 0) return;
+
+            const max = Math.max(...dailyTrends.map(d => d.count), 1);
+            const w = 700;
+            const h = 80;
+            const padding = 20;
+
+            const points = dailyTrends.map((d, i) => {
+                const x = (i / (dailyTrends.length - 1)) * w;
+                const y = h - padding - (d.count / max) * (h - padding * 2);
+                return { x, y, label: d.label, val: d.count };
+            });
+
+            // Line
+            const lineD = "M " + points.map(p => `${p.x} ${p.y}`).join(" L ");
+            document.getElementById('chart-path-line').setAttribute('d', lineD);
+
+            // Area
+            const areaD = lineD + ` L ${w} ${h} L 0 ${h} Z`;
+            document.getElementById('chart-path-area').setAttribute('d', areaD);
+
+            // Labels & Points
+            let labelsHtml = "";
+            let pointsHtml = "";
+            points.forEach(p => {
+                labelsHtml += `<text x="${p.x}" y="${h - 5}" class="chart-label">${p.label}</text>`;
+                pointsHtml += `<circle cx="${p.x}" cy="${p.y}" class="chart-point" title="${p.val} sessions"></circle>`;
+            });
+            document.getElementById('chart-labels').innerHTML = labelsHtml;
+            document.getElementById('chart-points').innerHTML = pointsHtml;
+        }
+
+        function sortDashboard() {
+            const grid = document.getElementById('main-grid');
+            const boxes = Array.from(grid.querySelectorAll('.section-box'));
+            boxes.sort((a, b) => parseInt(b.getAttribute('data-activity') || 0) - parseInt(a.getAttribute('data-activity') || 0));
+            boxes.forEach(box => grid.appendChild(box));
+        }
+
+        async function updateStats() {
+            try {
+                const r = await fetch("/status_data.json");
+                const data = await r.json();
+
+                // Local Time
+                const utcDate = new Date(data.last_updated + " UTC");
+                document.getElementById('last-update').innerText = "Last Updated: " + utcDate.toLocaleString();
+
+                // Trend Graph
+                renderChart(data.daily_trends);
+
+                // Summaries
+                document.getElementById('summary-ips').innerHTML = `${data.total_ips.toLocaleString()} ${formatTrend(data.trends.ips)}`;
+                document.getElementById('summary-networks').innerText = data.total_networks.toLocaleString();
+                document.getElementById('summary-commands').innerHTML = `${data.total_requests.toLocaleString()} ${formatTrend(data.trends.commands)}`;
+                document.getElementById('summary-sessions').innerHTML = `${data.total_sessions.toLocaleString()} ${formatTrend(data.trends.sessions)}`;
+
+                // Activity Mapping for Dynamic Sorting
+                const activities = data.protocol_activity || {};
+                document.getElementById('box-ssh').setAttribute('data-activity', activities.ssh || 0);
+                document.getElementById('box-mysql').setAttribute('data-activity', activities.mysql || 0);
+                document.getElementById('box-telnet').setAttribute('data-activity', activities.telnet || 0);
+                document.getElementById('box-redis').setAttribute('data-activity', activities.redis || 0);
+                document.getElementById('box-mcp').setAttribute('data-activity', activities.mcp || 0);
+                document.getElementById('box-http').setAttribute('data-activity', activities.http || 0);
+
+                // Show/Hide Redis/MCP/HTTP based on activity
+                document.getElementById('box-redis').style.display = (activities.redis > 0) ? 'inline-block' : 'none';
+                document.getElementById('box-mcp').style.display = (activities.mcp > 0) ? 'inline-block' : 'none';
+                document.getElementById('box-http').style.display = (activities.http > 0) ? 'inline-block' : 'none';
+
+                // Update Status Dots
+                document.querySelectorAll('.status-item').forEach(item => {
+                    const proto = item.getAttribute('data-proto');
+                    const dot = item.querySelector('.dot');
+                    if (activities[proto] > 0 || (proto === 'ssh' && data.total_sessions > 0)) {
+                        dot.classList.add('dot-green');
+                    } else {
+                        dot.classList.remove('dot-green');
+                    }
+                });
+
+                // --- DATA TABLES ---
+
+                // Countries
+                document.querySelector("#table-countries tbody").innerHTML = data.top_countries.map(c =>
+                    `<tr><td>${c.country}</td><td class="val-col">${c.ips.toLocaleString()}</td><td class="val-col sub-val">${c.sessions.toLocaleString()}</td></tr>`
+                ).join("");
+
+                // ISPs
+                document.querySelector("#table-isps tbody").innerHTML = data.top_isps.map(i =>
+                    `<tr><td title="${i.isp}">${i.isp}</td><td class="val-col">${i.ips.toLocaleString()}</td><td class="val-col sub-val">${i.sessions.toLocaleString()}</td></tr>`
+                ).join("");
+
+                // SSH Commands
+                document.querySelector("#table-ssh-cmds tbody").innerHTML = (data.top_ssh_commands || []).map(c =>
+                    `<tr><td title="${c.command}"><code>${c.command}</code></td><td class="val-col">${c.count.toLocaleString()}</td><td class="val-col sub-val">${c.ips}</td></tr>`
+                ).join("");
+
+                // MySQL Commands
+                document.querySelector("#table-mysql-cmds tbody").innerHTML = (data.top_mysql_commands || []).map(c =>
+                    `<tr><td title="${c.command}"><code>${c.command}</code></td><td class="val-col">${c.count.toLocaleString()}</td><td class="val-col sub-val">${c.ips}</td></tr>`
+                ).join("");
+
+                // Redis Commands
+                document.querySelector("#table-redis-cmds tbody").innerHTML = (data.top_redis_commands || []).map(c =>
+                    `<tr><td title="${c.command}"><code>${c.command}</code></td><td class="val-col">${c.count.toLocaleString()}</td><td class="val-col sub-val">${c.ips}</td></tr>`
+                ).join("");
+
+                // MCP Commands
+                document.querySelector("#table-mcp-cmds tbody").innerHTML = (data.top_mcp_commands || []).map(c =>
+                    `<tr><td title="${c.command}"><code>${c.command}</code></td><td class="val-col">${c.count.toLocaleString()}</td><td class="val-col sub-val">${c.ips}</td></tr>`
+                ).join("");
+
+                // Telnet Commands
+                document.querySelector("#table-telnet-cmds tbody").innerHTML = (data.top_telnet_commands || []).map(c =>
+                    `<tr><td title="${c.command}"><code>${c.command}</code></td><td class="val-col">${c.count.toLocaleString()}</td><td class="val-col sub-val">${c.ips}</td></tr>`
+                ).join("");
+
+                // HTTP Commands
+                document.querySelector("#table-http-cmds tbody").innerHTML = (data.top_http_commands || []).map(c =>
+                    `<tr><td title="${c.command}"><code>${c.command}</code></td><td class="val-col">${c.count.toLocaleString()}</td><td class="val-col sub-val">${c.ips}</td></tr>`
+                ).join("");
+
+                // Risk Commands
+                document.querySelector("#table-risk-cmds tbody").innerHTML = (data.top_ssh_risk || []).map(r =>
+                    `<tr><td title="${r.command}"><code>${r.command}</code></td><td>${getRiskBadge(r.risk)}</td><td class="val-col">${r.count.toLocaleString()}<br><span class="sub-val">${r.ips} IP</span></td></tr>`
+                ).join("");
+
+                // Auth (Merged User/Pass)
+                const combinedAuth = [
+                    ...(data.top_ssh_users || []).map(u => ({ label: `user:${u.username}`, count: u.count, ips: u.ips })),
+                    ...(data.top_passwords || []).map(p => ({ label: `pass:${p.password}`, count: p.count, ips: p.ips }))
+                ];
+
+                // Sort by IPs descending
+                combinedAuth.sort((a, b) => b.ips - a.ips);
+
+                document.querySelector("#table-auth tbody").innerHTML = combinedAuth.map(a =>
+                    `<tr><td><code>${a.label}</code></td><td class="val-col">${a.count.toLocaleString()}</td><td class="val-col sub-val">${a.ips}</td></tr>`
+                ).join("");
+
+                sortDashboard();
+
+            } catch (e) { console.error(e); }
+        }
+
+        updateStats();
+        setInterval(updateStats, 60000);
+    </script>
+</body>
+
+</html>
