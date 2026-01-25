@@ -76,6 +76,11 @@ class DatabaseBackend(ABC):
         pass
 
     @abstractmethod
+    def batch_update_fs_nodes(self, nodes):
+        """Batch update or insert filesystem nodes."""
+        pass
+
+    @abstractmethod
     def log_url_request(
         self, session_id, url, method="GET", user_agent=None, command_text=None
     ):
@@ -245,7 +250,14 @@ class DatabaseBackend(ABC):
         pass
 
     @abstractmethod
-    def add_malicious_payload(self, url, url_hash, session_id, ip, timestamp=None):
+    def add_malicious_payload(
+        self, url, url_hash, session_id, ip, timestamp=None, status="pending"
+    ):
+        pass
+
+    @abstractmethod
+    def batch_add_malicious_payloads(self, payload_list):
+        """Batch adds multiple malicious payloads and their requests."""
         pass
 
     @abstractmethod

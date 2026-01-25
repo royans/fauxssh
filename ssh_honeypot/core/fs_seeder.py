@@ -264,21 +264,12 @@ def seed_filesystem(db, json_path=None):
     Populates the global_filesystem table with skeleton data.
     """
     nodes = get_skeleton_data(json_path)
-    count = 0
-
-    # We use db.update_fs_node to ensure cross-backend compatibility
-    # and handle schema-specific logic (e.g. INSERT OR REPLACE vs ON CONFLICT)
-    for node in nodes:
-        try:
-            db.update_fs_node(
-                path=node["path"],
-                parent_path=node.get("parent_path"),
-                type=node["type"],
-                metadata=node["metadata"],
-                content=node.get("content"),
-            )
-            count += 1
-        except Exception as e:
-            logging.error(f"FS Seeder: Failed to seed {node['path']}: {e}")
+    # We use db.batch_update_fs_nodes for performance
+    try:
+        db.batch_update_fs_nodes(nodes)
+        count = len(nodes)
+    except Exception as e:
+        logging.error(f"FS Seeder: Failed to seed filesystem: {e}")
+        count = 0
 
     logging.info(f"FS Seeder: Seeded {count} items into global_filesystem.")

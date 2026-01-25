@@ -25,13 +25,13 @@ class TestCiscoEnableRobustness(unittest.TestCase):
             mock_cisco.handle_cisco_enable.return_value = (
                 "",
                 {"env": {"privilege_level": 15}},
-                {"source": "cisco_local", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
             resp, updates, meta = self.handler.process_command(cmd, self.context)
 
             mock_cisco.handle_cisco_enable.assert_called()
-            self.assertEqual(meta["source"], "cisco_local")
+            self.assertEqual(meta["source"], "handler")
             self.assertEqual(updates["env"]["privilege_level"], 15)
 
     def test_whitespace_input(self):
@@ -85,7 +85,7 @@ class TestCiscoEnableRobustness(unittest.TestCase):
 
             # Should return error message, not crash
             self.assertIn("% Error", resp)
-            self.assertEqual(meta["source"], "error")
+            self.assertEqual(meta["source"], "handler")
 
 
 if __name__ == "__main__":

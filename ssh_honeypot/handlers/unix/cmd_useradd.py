@@ -12,7 +12,7 @@ class UseraddCommand(BaseHandler):
             return (
                 "useradd: Permission denied.\n",
                 {},
-                {"source": "local", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         parts = cmd.split()
@@ -20,7 +20,7 @@ class UseraddCommand(BaseHandler):
             return (
                 "Usage: useradd [options] LOGIN\n",
                 {},
-                {"source": "local", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         username = parts[-1]
@@ -36,10 +36,10 @@ class UseraddCommand(BaseHandler):
             return (
                 "Usage: useradd [options] LOGIN\n",
                 {},
-                {"source": "local", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         # Mock success
         # We could actually add to a list of users in DB if we want?
         # For now, just silent success.
-        return "", {}, {"source": "local", "cached": False}
+        return "", {}, {"source": "handler", "cached": False}

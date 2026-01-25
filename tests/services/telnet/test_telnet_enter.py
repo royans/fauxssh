@@ -2,6 +2,7 @@ import socket
 import time
 import threading
 import pytest
+import os
 from unittest.mock import MagicMock
 from ssh_honeypot.services.telnet.server import (
     start_telnet_server,
@@ -44,11 +45,13 @@ class MockLLM:
 
 @pytest.fixture(scope="module")
 def start_enter_server():
+    os.environ["SSHPOT_TEST_MODE"] = "1"
     db = MockDB()
     llm = MockLLM()
     t = start_telnet_server(PORT, db, llm)
     time.sleep(1)
     yield
+    del os.environ["SSHPOT_TEST_MODE"]
 
 
 def test_telnet_enter_cr_only(start_enter_server):

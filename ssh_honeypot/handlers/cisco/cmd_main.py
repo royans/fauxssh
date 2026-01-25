@@ -9,7 +9,7 @@ def handle_cisco_show(cmd, context):
     """
     parts = cmd.split()
     if len(parts) < 2:
-        return "% Incomplete command.\n", {}, {"source": "cisco_local", "cached": False}
+        return "% Incomplete command.\n", {}, {"source": "handler", "cached": False}
 
     sub = parts[1]
 
@@ -78,7 +78,7 @@ Switch Ports Model              SW Version            SW Image
 
 Configuration register is 0xF
 """
-        return output, {}, {"source": "cisco_local", "cached": False}
+        return output, {}, {"source": "handler", "cached": False}
 
     elif sub in ["running-config", "run", "conf", "config", "configuration"]:
         # Check Privilege Level
@@ -87,7 +87,7 @@ Configuration register is 0xF
             return (
                 "% Invalid input detected at '^' marker.\n",
                 {},
-                {"source": "cisco_local", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         hostname = (
@@ -106,17 +106,22 @@ Configuration register is 0xF
         stored_config = context.get("env", {}).get("cisco_running_config")
 
         if not stored_config:
-            # 1. Try Persona Default
-            persona_defaults = context.get("persona_config", {}).get("defaults", {})
-            if "running_config" in persona_defaults:
-                stored_config = persona_defaults["running_config"]
-                # Ensure hostname in config matches current system hostname if it's generic
-                # (Simple replace if exact match found, otherwise trust default)
-                # But actually, 'handle_cisco_hostname' updates the config textually.
-                # Ideally, the default config in YAML has 'hostname Switch'.
-                # We can leave it as is or do a quick sub if we want dynamic-start names.
+            # 1. Try DB Persistent Cache for this Persona
+            db = context.get("db")
+            persona_name = context.get("persona_config", {}).get("name", "default")
+            cache_key = f"cisco_running_config:{persona_name}"
 
-            # 2. Fallback to LLM if no default
+            if db:
+                # Use PERSONA_CONFIG as a pseudo-CWD for global config storage
+                stored_config = db.get_cached_response(cache_key, "PERSONA_CONFIG")
+
+            if not stored_config:
+                # 2. Try Persona Default
+                persona_defaults = context.get("persona_config", {}).get("defaults", {})
+                if "running_config" in persona_defaults:
+                    stored_config = persona_defaults["running_config"]
+
+            # 3. Fallback to LLM if no default
             if not stored_config:
                 llm = context.get("llm")
                 if llm:
@@ -135,6 +140,10 @@ Output ONLY the raw configuration text, starting with 'version 15.0' or similar.
                     stored_config = (
                         stored_config.replace("```cisco", "").replace("```", "").strip()
                     )
+
+                    # Store in DB for persistence across sessions
+                    if db and stored_config:
+                        db.cache_response(cache_key, "PERSONA_CONFIG", stored_config)
                 else:
                     stored_config = f"! Fallback Config\nhostname {hostname}\nend"
 
@@ -146,7 +155,7 @@ Output ONLY the raw configuration text, starting with 'version 15.0' or similar.
             + stored_config
             + "\n"
         )
-        return output, updates, {"source": "cisco_local", "cached": False}
+        return output, updates, {"source": "handler", "cached": False}
 
     elif sub == "ip":
         if len(parts) > 2 and parts[2] == "interface":
@@ -158,18 +167,18 @@ FastEthernet0/1        unassigned      YES manual down                  down
 FastEthernet0/2        unassigned      YES manual down                  down    
 GigabitEthernet0/1     unassigned      YES manual down                  down    
 """
-                return output, {}, {"source": "cisco_local", "cached": False}
+                return output, {}, {"source": "handler", "cached": False}
 
     return (
         "% Invalid input detected at '^' marker.\n",
         {},
-        {"source": "cisco_local", "cached": False},
+        {"source": "handler", "cached": False},
     )
 
 
 def handle_cisco_enable(cmd, context):
     updates = {"env": {"privilege_level": 15}}
-    return "", updates, {"source": "cisco_local", "cached": False}
+    return "", updates, {"source": "handler", "cached": False}
 
 
 def handle_cisco_configure(cmd, context):
@@ -180,20 +189,20 @@ def handle_cisco_configure(cmd, context):
             return (
                 "% Type 'enable' to enter privileged mode first.\n",
                 {},
-                {"source": "cisco_local", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         updates = {"env": {"config_mode": True}}
         return (
             "Enter configuration commands, one per line.  End with CNTL/Z.\n",
             updates,
-            {"source": "cisco_local", "cached": False},
+            {"source": "handler", "cached": False},
         )
 
     return (
         "% Invalid input detected at '^' marker.\n",
         {},
-        {"source": "cisco_local", "cached": False},
+        {"source": "handler", "cached": False},
     )
 
 
@@ -211,21 +220,21 @@ def handle_cisco_exit(cmd, context):
 %SYS-5-CONFIG_I: Configured from console by console
 """,
             updates,
-            {"source": "cisco_local", "cached": False},
+            {"source": "handler", "cached": False},
         )
 
     if priv == 15:
         updates["env"] = {"privilege_level": 1}
-        return "", updates, {"source": "cisco_local", "cached": False}
+        return "", updates, {"source": "handler", "cached": False}
 
-    return "disconnect", {}, {"source": "cisco_local", "cached": False}
+    return "disconnect", {}, {"source": "handler", "cached": False}
 
 
 def handle_cisco_write(cmd, context):
     return (
         "Building configuration...\n[OK]\n",
         {},
-        {"source": "cisco_local", "cached": False},
+        {"source": "handler", "cached": False},
     )
 
 
@@ -300,7 +309,7 @@ def handle_cisco_help(cmd, context):
     for c, desc in cmds:
         output += f"  {c:<15} {desc}\n"
 
-    return output, {}, {"source": "cisco_local", "cached": False}
+    return output, {}, {"source": "handler", "cached": False}
 
 
 # New Handlers
@@ -310,7 +319,7 @@ def handle_cisco_ping(cmd, context):
     parts = cmd.split()
     target = parts[1] if len(parts) > 1 else "target"
     output = f"Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos to {target}, timeout is 2 seconds:\n!!!!!\nSuccess rate is 100 percent (5/5), round-trip min/avg/max = 1/2/4 ms\n"
-    return output, {}, {"source": "cisco_local", "cached": False}
+    return output, {}, {"source": "handler", "cached": False}
 
 
 def handle_cisco_traceroute(cmd, context):
@@ -323,23 +332,23 @@ Tracing the route to {target}
   2 10.0.0.1 8 msec 4 msec 8 msec
   3 {target} 8 msec 8 msec 8 msec
 """
-    return output, {}, {"source": "cisco_local", "cached": False}
+    return output, {}, {"source": "handler", "cached": False}
 
 
 def handle_cisco_clear(cmd, context):
-    return "\\033[2J\\033[H", {}, {"source": "cisco_local", "cached": False}
+    return "\\033[2J\\033[H", {}, {"source": "handler", "cached": False}
 
 
 def handle_cisco_disable(cmd, context):
     updates = {"env": {"privilege_level": 1}}
-    return "", updates, {"source": "cisco_local", "cached": False}
+    return "", updates, {"source": "handler", "cached": False}
 
 
 def handle_cisco_ssh(cmd, context):
     return (
         "% SSH connections not allowed from this terminal\n",
         {},
-        {"source": "cisco_local", "cached": False},
+        {"source": "handler", "cached": False},
     )
 
 
@@ -347,36 +356,36 @@ def handle_cisco_telnet(cmd, context):
     return (
         "% Telnet connections not allowed from this terminal\n",
         {},
-        {"source": "cisco_local", "cached": False},
+        {"source": "handler", "cached": False},
     )
 
 
 def handle_cisco_connect(cmd, context):
-    return "% Connection failed\n", {}, {"source": "cisco_local", "cached": False}
+    return "% Connection failed\n", {}, {"source": "handler", "cached": False}
 
 
 def handle_cisco_disconnect(cmd, context):
-    return "% No active connection\n", {}, {"source": "cisco_local", "cached": False}
+    return "% No active connection\n", {}, {"source": "handler", "cached": False}
 
 
 def handle_cisco_resume(cmd, context):
-    return "% No active connection\n", {}, {"source": "cisco_local", "cached": False}
+    return "% No active connection\n", {}, {"source": "handler", "cached": False}
 
 
 def handle_cisco_lock(cmd, context):
     return (
         "Password: \n% Password locked\n",
         {},
-        {"source": "cisco_local", "cached": False},
+        {"source": "handler", "cached": False},
     )
 
 
 def handle_cisco_login(cmd, context):
-    return "% Logged in\n", {}, {"source": "cisco_local", "cached": False}
+    return "% Logged in\n", {}, {"source": "handler", "cached": False}
 
 
 def handle_cisco_logout(cmd, context):
-    return "disconnect", {}, {"source": "cisco_local", "cached": False}
+    return "disconnect", {}, {"source": "handler", "cached": False}
 
 
 def handle_cisco_systat(cmd, context):
@@ -384,29 +393,29 @@ def handle_cisco_systat(cmd, context):
     Line     User      Host(s)                  Idle       Location
 *  0 con 0             idle                 00:00:00       
 """
-    return output, {}, {"source": "cisco_local", "cached": False}
+    return output, {}, {"source": "handler", "cached": False}
 
 
 def handle_cisco_where(cmd, context):
-    return "% No active connections\n", {}, {"source": "cisco_local", "cached": False}
+    return "% No active connections\n", {}, {"source": "handler", "cached": False}
 
 
 def handle_cisco_terminal(cmd, context):
-    return "", {}, {"source": "cisco_local", "cached": False}
+    return "", {}, {"source": "handler", "cached": False}
 
 
 def handle_cisco_invalid(cmd, context):
     return (
         "% Invalid input detected at '^' marker.\n",
         {},
-        {"source": "cisco_local", "cached": False},
+        {"source": "handler", "cached": False},
     )
 
 
 def handle_cisco_hostname(cmd, context):
     parts = cmd.split()
     if len(parts) < 2:
-        return "% Incomplete command.\n", {}, {"source": "cisco_local", "cached": False}
+        return "% Incomplete command.\n", {}, {"source": "handler", "cached": False}
 
     new_hostname = parts[1]
 
@@ -415,7 +424,7 @@ def handle_cisco_hostname(cmd, context):
         return (
             "% Invalid input detected at '^' marker.\n",
             {},
-            {"source": "cisco_local", "cached": False},
+            {"source": "handler", "cached": False},
         )
 
     updates = {"env": {}}
@@ -433,7 +442,7 @@ def handle_cisco_hostname(cmd, context):
         )
         updates["env"]["cisco_running_config"] = new_config
 
-    return "", updates, {"source": "cisco_local", "cached": False}
+    return "", updates, {"source": "handler", "cached": False}
 
 
 def handle_cisco_shell(cmd, context):
@@ -446,7 +455,7 @@ def handle_cisco_shell(cmd, context):
     return (
         "\nEntering sensitive shell mode... Type 'exit' to return.\n# ",
         updates,
-        {"source": "cisco_local", "cached": False},
+        {"source": "handler", "cached": False},
     )
 
 

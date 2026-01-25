@@ -166,7 +166,7 @@ def start_mcp_server(port, db, llm, bind_ip="0.0.0.0"):
         core_log.error("Cannot start MCP Server: Dependencies missing.")
         return
 
-    core_log.info(f"[*] Starting MCP Honeypot on {bind_ip}:{port}...")
+    core_log.info(f"[MCP] Starting Honeypot on {bind_ip}:{port}...")
 
     # Initialize CommandHandler
     cmd_handler = CommandHandler(llm, db)
@@ -213,7 +213,7 @@ def start_mcp_server(port, db, llm, bind_ip="0.0.0.0"):
         Bait Root Endpoint
         """
         client_ip = request.client.host
-        core_log.info(f"[*] MCP Probe from {client_ip}")
+        core_log.info(f"[MCP] Probe from {client_ip}")
 
         return JSONResponse(
             {
@@ -229,7 +229,7 @@ def start_mcp_server(port, db, llm, bind_ip="0.0.0.0"):
 
     async def handle_sse(request):
         ip = request.client.host
-        core_log.info(f"[*] MCP SSE Connection from {ip}")
+        core_log.info(f"[MCP] SSE Connection from {ip}")
 
         # Start a formal "Session" in DB logic?
         # Maybe we create a session ID here?

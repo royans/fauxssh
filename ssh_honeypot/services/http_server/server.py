@@ -10,7 +10,7 @@ import hashlib
 from ssh_honeypot.core.logging_setup import log
 from ssh_honeypot.core.config import config
 from ssh_honeypot.core.dos_protection import dos_protector
-from ssh_honeypot.core.event_logger import EventLogger
+from ssh_honeypot.core.clogging import clogger
 
 
 class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
@@ -224,36 +224,39 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                 # Log Interaction
                 seed = f"{client_ip}_{int(time.time() / 3600)}"
                 session_id = hashlib.md5(seed.encode()).hexdigest()[:16]
-                EventLogger().log_interaction(
+
+                interaction_data = {
+                    "cwd": "HTTP_ROOT",
+                    "input": f"{method} {self.path}",
+                    "response": f"[Served VFS File: {v_path}]",
+                    "source": "handler",
+                    "request_md5": request_md5,
+                    "user_agent": self.headers.get("User-Agent", "-"),
+                }
+                clogger.log_event(
+                    "interaction",
+                    interaction_data,
                     session_id=session_id,
                     ip=client_ip,
-                    input_cmd=f"{method} {self.path}",
-                    output_content=f"[Served VFS File: {v_path}]",
                     protocol="http",
-                    analysis=None,
-                    user_agent=self.headers.get("User-Agent", "-"),
                 )
 
                 try:
-                    db.start_session(
-                        session_id,
-                        client_ip,
-                        "www-data",
-                        "none",
-                        self.headers.get("User-Agent", "Unknown"),
+                    session_data = {
+                        "username": "www-data",
+                        "password": "none",
+                        "client_version": self.headers.get("User-Agent", "Unknown"),
+                        "fingerprint": "http",
+                    }
+                    clogger.log_event(
+                        "session_start",
+                        session_data,
+                        session_id=session_id,
+                        ip=client_ip,
                         protocol="http",
                     )
                 except:
                     pass
-
-                db.log_interaction(
-                    session_id,
-                    "HTTP_ROOT",
-                    cache_key,
-                    vfs_content,
-                    source="local",
-                    request_md5=request_md5,
-                )
                 return  # DONE VFS
         except Exception as vfse:
             log.error(f"[HTTP] VFS Lookup Error: {vfse}")
@@ -369,45 +372,38 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
             seed = f"{client_ip}_{int(time.time() / 3600)}"
             session_id = hashlib.md5(seed.encode()).hexdigest()[:16]
 
-            # Ensure session is valid in DB
+            # Register session if needed
             try:
-                # We can't easily check if exists without query.
-                # Just try insert, ignore if fails (on Unique constraint)?
-                # Session ID is unique.
-                # But start_session expects unique session ID usually.
-                # Let's keep it simple: Use a persistent "HTTP_Service" session per hour?
-                # Or just let log_interaction handle it if we relax FK? FKs are enforced in SQLite usually.
-                # Let's try to register it cleanly:
-                db.start_session(
-                    session_id,
-                    client_ip,
-                    "www-data",
-                    "none",
-                    self.headers.get("User-Agent", "Unknown"),
+                session_data = {
+                    "username": "www-data",
+                    "password": "none",
+                    "client_version": self.headers.get("User-Agent", "Unknown"),
+                    "fingerprint": "http",
+                }
+                clogger.log_event(
+                    "session_start",
+                    session_data,
+                    session_id=session_id,
+                    ip=client_ip,
                     protocol="http",
                 )
             except:
                 pass  # Already exists
 
-            db.log_interaction(
-                session_id,
-                "HTTP_ROOT",
-                cache_key,
-                content,
-                source=source_type,
-                request_md5=request_md5,
-            )
-
-            # Structured Log
-            # Unified JSON Log
-            EventLogger().log_interaction(
+            interaction_data = {
+                "cwd": "HTTP_ROOT",
+                "input": f"{method} {self.path}",
+                "response": content,
+                "source": source_type,
+                "request_md5": request_md5,
+                "user_agent": self.headers.get("User-Agent", "-"),
+            }
+            clogger.log_event(
+                "interaction",
+                interaction_data,
                 session_id=session_id,
                 ip=client_ip,
-                input_cmd=f"{method} {self.path}",
-                output_content=content,
                 protocol="http",
-                analysis=None,  # HTTP specific analysis not yet fully integrated in request loop
-                user_agent=self.headers.get("User-Agent", "-"),
             )
 
         except Exception as e:
@@ -466,7 +462,7 @@ def start_http_server(port, db, llm):
             # For now, binding :: usually does dual stack on Linux by default if not strictly disabled.
 
         log.info(
-            f"[*] Starting HTTP Honeypot on {bind_ip}:{port} ({config.get('http', 'server_header')}) [{family_str}]"
+            f"[HTTP] Starting Honeypot on {bind_ip}:{port} ({config.get('http', 'server_header')}) [{family_str}]"
         )
         # Perform Startup Cache Cleanup (Invalidate VFS overrides)
         web_root = config.get("http", "web_root") or "/var/www/html"

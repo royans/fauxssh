@@ -9,7 +9,8 @@ import os
 try:
     import psycopg2
     from psycopg2 import pool
-    from psycopg2.extras import Json
+    from psycopg2.extras import Json, execute_values
+    import psycopg2.extras
 except ImportError:
     log.warning("psycopg2 not installed. PostgresBackend will fail.")
 
@@ -85,7 +86,7 @@ class PostgresBackend(DatabaseBackend):
 
             self.skeleton_cache = get_skeleton_data()
             log.info(
-                f"[*] Loaded {len(self.skeleton_cache)} skeleton items (COW Layer)"
+                f"[Core] Loaded {len(self.skeleton_cache)} skeleton items (COW Layer)"
             )
         except ImportError:
             # Fallback for direct testing
@@ -539,6 +540,7 @@ class PostgresBackend(DatabaseBackend):
         response_md5=None,
         response_head=None,
         response_size=None,
+        created_at=None,
     ):
         if not request_md5 and command:
             import hashlib
@@ -578,44 +580,50 @@ class PostgresBackend(DatabaseBackend):
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO interactions 
-                (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-                (
-                    session_id,
-                    cwd,
-                    command,
-                    response,
-                    source,
-                    request_md5,
-                    response_md5,
-                    response_head,
-                    response_size,
-                ),
-            )
+            if created_at:
+                cursor.execute(
+                    """
+                    INSERT INTO interactions 
+                    (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size, timestamp) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                    (
+                        session_id,
+                        cwd,
+                        command,
+                        response,
+                        source,
+                        request_md5,
+                        response_md5,
+                        response_head,
+                        response_size,
+                        created_at,
+                    ),
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO interactions 
+                    (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                    (
+                        session_id,
+                        cwd,
+                        command,
+                        response,
+                        source,
+                        request_md5,
+                        response_md5,
+                        response_head,
+                        response_size,
+                    ),
+                )
             conn.commit()
         except Exception as e:
             log.error(f"[Postgres] Error logging interaction: {e}")
         finally:
             conn.close()
-
-        # Unified Logging Consolidation
-        try:
-            from .event_logger import EventLogger
-
-            EventLogger().log_interaction(
-                session_id=session_id,
-                ip="unknown",  # We don't have IP here easily without a lookup, leaving for now as per SQLite impl
-                input_cmd=command,
-                output_content=response,
-                protocol="ssh",
-                analysis={"cached": was_cached, "response_time_ms": duration_ms},
-            )
-        except Exception:
-            pass
 
         # Payload Pipeline Hook (Restored)
         try:
@@ -703,28 +711,58 @@ class PostgresBackend(DatabaseBackend):
             conn.close()
 
     def update_fs_node(self, path, parent_path, type, metadata, content=None):
+        self.batch_update_fs_nodes(
+            [
+                {
+                    "path": path,
+                    "parent_path": parent_path,
+                    "type": type,
+                    "metadata": metadata,
+                    "content": content,
+                }
+            ]
+        )
+
+    def batch_update_fs_nodes(self, nodes):
+        """
+        Batch updates/inserts filesystem nodes for performance.
+        'nodes' is a list of dicts with keys: path, parent_path, type, metadata, content
+        """
         conn = self._get_conn()
-        if isinstance(content, (dict, list)):
-            content = str(content)
         try:
             cursor = conn.cursor()
-            cursor.execute(
+            prepared_data = []
+            for node in nodes:
+                content = node.get("content")
+                if isinstance(content, (dict, list)):
+                    content = str(content)
+
+                metadata = node.get("metadata")
+                if isinstance(metadata, dict):
+                    metadata = json.dumps(metadata)
+
+                prepared_data.append(
+                    (
+                        node["path"],
+                        node.get("parent_path"),
+                        node["type"],
+                        metadata,
+                        content,
+                    )
+                )
+
+            psycopg2.extras.execute_values(
+                cursor,
                 """
                 INSERT INTO global_filesystem (path, parent_path, type, metadata, content)
-                VALUES (%s, %s, %s, %s, %s)
+                VALUES %s
                 ON CONFLICT (path) DO UPDATE SET
                     parent_path = EXCLUDED.parent_path,
                     type = EXCLUDED.type,
                     metadata = EXCLUDED.metadata,
                     content = EXCLUDED.content
-            """,
-                (
-                    path,
-                    parent_path,
-                    type,
-                    json.dumps(metadata) if isinstance(metadata, dict) else metadata,
-                    content,
-                ),
+                """,
+                prepared_data,
             )
             conn.commit()
         finally:
@@ -759,6 +797,7 @@ class PostgresBackend(DatabaseBackend):
         client_version,
         fingerprint=None,
         protocol="ssh",
+        created_at=None,
     ):
         conn = self._get_conn()
         try:
@@ -767,22 +806,41 @@ class PostgresBackend(DatabaseBackend):
             if fingerprint:
                 fp_json = json.dumps(fingerprint)
 
-            cursor.execute(
-                """
-                INSERT INTO auth_events (client_ip, username, auth_method, auth_data, success, client_version, fingerprint, protocol)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-                (
-                    client_ip,
-                    username,
-                    auth_method,
-                    auth_data,
-                    success,
-                    client_version,
-                    fp_json,
-                    protocol,
-                ),
-            )
+            if created_at:
+                cursor.execute(
+                    """
+                    INSERT INTO auth_events (client_ip, username, auth_method, auth_data, success, client_version, fingerprint, protocol, timestamp)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                    (
+                        client_ip,
+                        username,
+                        auth_method,
+                        auth_data,
+                        success,
+                        client_version,
+                        fp_json,
+                        protocol,
+                        created_at,
+                    ),
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO auth_events (client_ip, username, auth_method, auth_data, success, client_version, fingerprint, protocol)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                    (
+                        client_ip,
+                        username,
+                        auth_method,
+                        auth_data,
+                        success,
+                        client_version,
+                        fp_json,
+                        protocol,
+                    ),
+                )
             conn.commit()
         except Exception as e:
             log.error(f"[Postgres] Error log_auth_event: {e}")
@@ -1796,11 +1854,12 @@ class PostgresBackend(DatabaseBackend):
 
             # Recent Unique Commands
             query = f"""
-                SELECT DISTINCT i.command 
+                SELECT i.command 
                 FROM interactions i
                 JOIN sessions s ON i.session_id = s.session_id
                 WHERE s.start_time > {time_filter} {interaction_ip_filter}
-                ORDER BY i.timestamp DESC LIMIT 20
+                GROUP BY i.command
+                ORDER BY MAX(i.timestamp) DESC LIMIT 20
             """
             cursor.execute(query, params)
             stats["recent_unique_commands"] = [r[0] for r in cursor.fetchall()]
@@ -1958,15 +2017,17 @@ class PostgresBackend(DatabaseBackend):
         finally:
             conn.close()
 
-    def add_malicious_payload(self, url, url_hash, session_id, ip, timestamp=None):
+    def add_malicious_payload(
+        self, url, url_hash, session_id, ip, timestamp=None, status="pending"
+    ):
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
             # 1. Insert/Get Payload ID
             cursor.execute(
                 """
-                INSERT INTO malicious_payloads (url, url_hash, session_id, ip, timestamp)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO malicious_payloads (url, url_hash, session_id, ip, timestamp, status)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (url_hash) DO NOTHING
                 RETURNING id
             """,
@@ -1976,11 +2037,9 @@ class PostgresBackend(DatabaseBackend):
                     session_id,
                     ip,
                     timestamp or datetime.datetime.now(),
+                    status,
                 ),
             )
-            row = cursor.fetchone()
-            conn.commit()
-            return row is not None
             row = cursor.fetchone()
 
             if row:
@@ -2006,7 +2065,80 @@ class PostgresBackend(DatabaseBackend):
             conn.commit()
         except Exception as e:
             log.error(f"[Postgres] Error adding malicious payload: {e}")
-            conn.rollback()  # Ensure rollback on error
+            conn.rollback()
+        finally:
+            conn.close()
+
+    def batch_add_malicious_payloads(self, payload_list):
+        """
+        Batch adds multiple malicious payloads and their requests.
+        'payload_list' is a list of dicts: url, url_hash, session_id, ip, timestamp
+        """
+        if not payload_list:
+            return
+        conn = self._get_conn()
+        try:
+            ts_default = datetime.datetime.now()
+            cursor = conn.cursor()
+
+            payload_data = [
+                (
+                    p["url"],
+                    p["url_hash"],
+                    p["session_id"],
+                    p["ip"],
+                    p.get("timestamp") or ts_default,
+                    "pending",
+                )
+                for p in payload_list
+            ]
+
+            psycopg2.extras.execute_values(
+                cursor,
+                """
+                INSERT INTO malicious_payloads (url, url_hash, session_id, ip, timestamp, status)
+                VALUES %s
+                ON CONFLICT (url_hash) DO NOTHING
+                """,
+                payload_data,
+            )
+
+            # Fetch IDs
+            hashes = [p["url_hash"] for p in payload_list]
+            cursor.execute(
+                "SELECT id, url_hash FROM malicious_payloads WHERE url_hash = ANY(%s)",
+                (hashes,),
+            )
+            id_map = {row[1]: row[0] for row in cursor.fetchall()}
+
+            # Insert Requests
+            request_data = []
+            for p in payload_list:
+                payload_id = id_map.get(p["url_hash"])
+                if payload_id:
+                    request_data.append(
+                        (
+                            payload_id,
+                            p["ip"],
+                            p["session_id"],
+                            p.get("timestamp") or ts_default,
+                        )
+                    )
+
+            if request_data:
+                psycopg2.extras.execute_values(
+                    cursor,
+                    """
+                    INSERT INTO payload_requests (payload_id, ip, session_id, timestamp)
+                    VALUES %s
+                    """,
+                    request_data,
+                )
+
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Error batch adding malicious payloads: {e}")
+            conn.rollback()
         finally:
             conn.close()
 
@@ -2071,7 +2203,7 @@ class PostgresBackend(DatabaseBackend):
         payload_id,
         status,
         file_path=None,
-        error=None,  # Changed from error_message to match call site
+        error=None,
         payload_md5=None,
         payload_size=None,
     ):
@@ -2112,15 +2244,19 @@ class PostgresBackend(DatabaseBackend):
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
+            # Normalize hostname for search
+            search_pattern = f"%//{hostname}/%"
             cursor.execute(
                 """
                 SELECT COUNT(*) FROM malicious_payloads 
                 WHERE url LIKE %s AND timestamp > NOW() - INTERVAL '1 hour'
                 """,
-                (f"%%//{hostname}/%%",),
+                (search_pattern,),
             )
             count = cursor.fetchone()[0]
-            return count >= 5
+            return (
+                count >= 10
+            )  # Increased limit slightly, or stick to 5? Plan said robust
         except Exception as e:
             log.error(f"[Postgres] Error checking rate limit: {e}")
             return False

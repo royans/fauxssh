@@ -122,4 +122,4 @@ class SedCommand(BaseHandler):
                     # Let's assume the user command `s/^ *//` is valid (it is).
                     pass
 
-        return result_content, {}, {"source": "local", "cached": False}
+        return result_content, {}, {"source": "handler", "cached": False}

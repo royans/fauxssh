@@ -104,6 +104,10 @@ def random_response_delay(min_seconds=0.1, max_seconds=0.5):
     """
     import time
     import random
+    import os
+
+    if os.getenv("SSHPOT_TEST_MODE"):
+        return
 
     time.sleep(random.uniform(min_seconds, max_seconds))
 
@@ -132,6 +136,8 @@ def create_dual_stack_socket(bind_ip, port, backlog=64):
 
             log.warning(f"[Socket] Could not set IPV6_V6ONLY=0: {e}")
 
+            print(f"DEBUG: Binding to {bind_ip}:{port}")
+            sys.stderr.write(f"DEBUG: Binding to {bind_ip}:{port}\n")
     sock.bind((bind_ip, port))
     sock.listen(backlog)
     return sock

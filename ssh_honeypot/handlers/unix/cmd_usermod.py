@@ -7,6 +7,6 @@ class UsermodCommand(BaseHandler):
             return (
                 "usermod: Permission denied.\n",
                 {},
-                {"source": "local", "cached": False},
+                {"source": "handler", "cached": False},
             )
-        return "", {}, {"source": "local", "cached": False}
+        return "", {}, {"source": "handler", "cached": False}

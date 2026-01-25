@@ -13,7 +13,7 @@ class TestEchoCommand:
         cmd = "echo hello world"
         out, updates, meta = handle_echo(cmd, {})
         assert out == "hello world\n"
-        assert meta["source"] == "local"
+        assert meta["source"] == "handler"
 
     def test_echo_flag_e(self):
         # \x61 is 'a'

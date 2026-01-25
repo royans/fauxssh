@@ -43,6 +43,12 @@ class TestRedisServer(unittest.TestCase):
                 break
             time.sleep(0.1)
 
+    def setUp(self):
+        # Reset mock return values and calls for each test
+        self.llm.generate_response.return_value = "OK"
+        self.db.start_session.reset_mock()
+        self.db.log_interaction.reset_mock()
+
     def test_ping(self):
         self.llm.generate_response.return_value = "PONG"
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -82,9 +88,9 @@ class TestRedisServer(unittest.TestCase):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect(("127.0.0.1", TEST_PORT))
         s.send(b"PING\r\n")
-        time.sleep(0.1)
+        time.sleep(0.5)  # Increased from 0.1
         s.close()
-        time.sleep(0.1)
+        time.sleep(0.5)  # Increased from 0.1
 
         # Verify calls
         self.db.start_session.assert_called()

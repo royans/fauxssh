@@ -1,6 +1,8 @@
 import time
 import os
 import json
+import hashlib
+from urllib.parse import urlparse
 from datetime import datetime
 from ssh_honeypot.core.logging_setup import log
 from ssh_honeypot.core.config import config
@@ -47,7 +49,7 @@ def run_cleanup_job(db_instance):
 def run_analysis_batch(db_instance, llm_instance, alert_manager):
     """Analyzes a batch of commands."""
     try:
-        commands = db_instance.get_unanalyzed_commands(limit=10)
+        commands = db_instance.get_unanalyzed_commands(limit=50)
         if not commands:
             return
 
@@ -89,7 +91,7 @@ def run_session_analysis_batch(db_instance, llm_instance):
     try:
         from ssh_honeypot.core.session_analyzer import analyze_session
 
-        sessions = db_instance.get_unanalyzed_sessions(limit=5)
+        sessions = db_instance.get_unanalyzed_sessions(limit=20)
         if not sessions:
             return
 
@@ -219,13 +221,15 @@ def run_payload_recovery_job(db_instance):
         )
 
         if rows:
+            potential_payloads = []
+            seen_hashes = set()
+            host_rate_limit_cache = {}
+
             for row in rows:
                 cmd_id = row["id"]
                 cmd_text = row["command"]
                 sid = row["session_id"]
-                ip = row[
-                    "remote_ip"
-                ]  # Helper fetch might return None locally but join works
+                ip = row["remote_ip"]
 
                 # Update cursor
                 if cmd_id > _payload_recovery_cursor:
@@ -233,11 +237,43 @@ def run_payload_recovery_job(db_instance):
 
                 urls = pm.extract_urls(cmd_text)
                 for url in urls:
-                    pm.queue_payload(url, sid, ip)
+                    url_hash = hashlib.md5(url.encode()).hexdigest()
+
+                    if url_hash in seen_hashes:
+                        continue
+
+                    # Host Rate Limiting check
+                    parsed = urlparse(url)
+                    hostname = parsed.hostname
+                    if not hostname:
+                        continue
+
+                    if hostname in host_rate_limit_cache:
+                        if host_rate_limit_cache[hostname]:
+                            continue
+                    else:
+                        is_limited = db_instance.is_payload_host_rate_limited(hostname)
+                        host_rate_limit_cache[hostname] = is_limited
+                        if is_limited:
+                            continue
+
+                    potential_payloads.append(
+                        {
+                            "url": url,
+                            "url_hash": url_hash,
+                            "session_id": sid,
+                            "ip": ip,
+                            "timestamp": row.get("timestamp") or datetime.now(),
+                        }
+                    )
+                    seen_hashes.add(url_hash)
+
+            if potential_payloads:
+                db_instance.batch_add_malicious_payloads(potential_payloads)
 
             # Log progress so user sees activity
             log.debug(
-                f"[Recovery] Scanned {len(rows)} interactions (Cursor: {_payload_recovery_cursor}). queued={len(urls) if 'urls' in locals() else 'N/A'}"
+                f"[Recovery] Scanned {len(rows)} interactions (Cursor: {_payload_recovery_cursor}). Batch queued: {len(potential_payloads)}"
             )
 
     except Exception as e:

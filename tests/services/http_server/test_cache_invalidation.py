@@ -48,7 +48,7 @@ def test_cleanup_http_cache(honey_db):
     # Non-conflicting file
     honey_db.cache_response("HTTP GET /other.html", "HTTP_ROOT", "Cached Other")
     # POST request conflict
-    honey_db.cache_response("HTTP POST /index.html 123456", "HTTP_ROOT", "Cached POST")
+    honey_db.cache_response("HTTP POST /index.html", "HTTP_ROOT", "Cached POST")
 
     # Verify initial state
     assert (
@@ -71,10 +71,7 @@ def test_cleanup_http_cache(honey_db):
 
     # POST to /index.html should be gone
     # Note: get_cached_response does exact match on command key
-    assert (
-        honey_db.get_cached_response("HTTP POST /index.html 123456", "HTTP_ROOT")
-        is None
-    )
+    assert honey_db.get_cached_response("HTTP POST /index.html", "HTTP_ROOT") is None
 
     # /other.html should REMAIN
     assert (

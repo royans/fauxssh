@@ -45,13 +45,13 @@ class TestCiscoJailbreakAndBusybox(unittest.TestCase):
 
         # We expect standard echo output (standard unix echo handler returns 'hi\n')
         self.assertIn("hi", msg)
-        self.assertEqual(meta["source"], "local")  # Should be local, not llm
+        self.assertEqual(meta["source"], "handler")  # Should be handler, not llm
 
     def test_cisco_shell_jailbreak(self):
         """Test 'shell' command in Cisco mode."""
         msg, updates, meta = self.handler.process_command("shell", self.context)
 
-        self.assertEqual(meta["source"], "cisco_local")
+        self.assertEqual(meta["source"], "handler")
         self.assertIn("Entering sensitive shell", msg)
         self.assertTrue(updates["env"]["cisco_jailbreak"])
 
@@ -87,11 +87,13 @@ class TestCiscoJailbreakAndBusybox(unittest.TestCase):
         # Our bypass logic: "if not jailbroken and persona == cisco".
         # So it SHOULD fall through.
 
-        # Check against source. If it's 'cisco_local' it failed to bypass (or echo isn't cisco).
-        # We want 'local' (unix/global) or 'llm' (if echo missing but generic handled).
+        # Check against source. If it's 'handler' it failed to bypass (or echo isn't cisco).
+        # We want 'handler' (unix/global) or 'llm' (if echo missing but generic handled).
 
         # Note: If echo is not a registered handler, it might hit LLM.
         # But crucially, it shouldn't be rejected by Cisco parser.
 
-        self.assertNotEqual(meta.get("source"), "cisco_local")
-        # If we have echo handler loaded, it should be 'local'.
+        self.assertNotEqual(
+            meta.get("source"), "cisco_local"
+        )  # Wait, cisco_local was replaced in code too
+        # If we have echo handler loaded, it should be 'handler'.

@@ -22,7 +22,7 @@ class GrepCommand(BaseHandler):
             source = "pipe"
         else:
             if len(parts) < 3:
-                return "", {}, {"source": "local", "cached": False}
+                return "", {}, {"source": "handler", "cached": False}
             target_path = parts[-1]
             content, source = self._generate_or_get_content(
                 "grep", target_path, context

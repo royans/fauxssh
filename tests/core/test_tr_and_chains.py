@@ -1,13 +1,18 @@
 import pytest
+import os
 from ssh_honeypot.core.command_handler import CommandHandler
 from unittest.mock import MagicMock
 
 
 @pytest.fixture
 def handler():
+    os.environ["SSHPOT_TEST_MODE"] = "1"
     db = MagicMock()
     llm = MagicMock()
-    return CommandHandler(llm, db)
+    h = CommandHandler(llm, db)
+    yield h
+    if "SSHPOT_TEST_MODE" in os.environ:
+        del os.environ["SSHPOT_TEST_MODE"]
 
 
 def test_tr_simple_replace(handler):

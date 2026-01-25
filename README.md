@@ -12,20 +12,17 @@ FauxSSH deceptively emulates a realistic Linux server, engaging attackers in lon
 
 - **🧠 LLM-Powered Realism**: Uses Google Gemini to dynamically generate file contents (`cat`, `ls`), command responses (`ps aux`, `docker ps`), and error messages.
 - **🎭 Dynamic Persona Generation**: Create bespoke personas on-the-fly using natural language descriptions (e.g., "A secret build server for XYZ Corp"). The system generates a custom filesystem and behaves accordingly.
-- **✨ Researcher Intel Suite**: Includes **Common FS** (global honeytokens), **Smart Session Summary** (LLM-generated narratives & Risk Scores), and **MITRE ATT&CK** T-Code tagging.
-- **🛡️ Defcon-Grade Deception**: Features **Latency Jitter** (randomized network delays) and **Dynamic SSH Banners** (persona-specific strings) to evade scanner fingerprinting.
+- **✨ Researcher Intel Suite**: Includes **Common FS** (global honeytokens) and **Smart Session Summary** (LLM-generated narratives & Risk Scores).
+- **🛡️ Evasion Features**: Features **Latency Jitter** (randomized network delays) and **Dynamic SSH Banners** (persona-specific strings) to evade scanner fingerprinting.
 - **🔌 Telnet Support**: Optional Telnet listener to capture attacks on legacy protocols, sharing the same persona and intelligence engine.
 - **🌐 HTTP Honeypot**: A realistic web server (Port 8080) that dynamically generates HTML, logins, and error pages using the LLM.
 - **🟥 High-Interaction Redis**: A realistic Redis honeypot that supports standard commands (`PING`, `INFO`) and uses LLM hallucination for data store queries (`GET`, `SET`).
 - **🐬 LLM-Driven MySQL**: A realistic MySQL server (Port 3306) with a hybrid query engine. Simple queries (`SELECT @@version`) are handled locally for speed, while complex SQL (`SELECT * FROM users`) is forwarded to the LLM to generate realistic rows.
-- **🤖 MCP "Control Plane"**: Exposes a Model Context Protocol service (Port 8000) mimicking an internal DevOps control plane with fake diagnostic tools.
-- **📼 Session Replay**: Record full TTY sessions (input/output) in [asciinema](https://asciinema.org) format for playback.
 - **Network Emulation**: Simulates `curl`/`wget` with realistic delays and firewalls.
 - **IP Intelligence**: Automatically tracks and enriches attacker IPs with GeoIP, ASN, and ISP data (Rate-limited to 600 req/hr).
 - **Dynamic Filesystem**: Persists user changes per session.
 - **🔒 Safe & Isolated**: All uploaded files are sandboxed. The "filesystem" is virtual and strictly isolated from the host.
 - **🚨 Real-Time Alerting**: Stream high-risk sessions live to Discord or Slack.
-- **🦠 Malicious Payload Analysis**: Automatically detects, queues, downloads, and analyzes malware dropped via `curl`/`wget`. Tracks payloads by MD5 and origin URL.
 - **📊 Built-in Analytics**: CLI tools to visualize sessions, inspect malware, and correlate threat actors.
 
 ## Recent Improvements (Jan 23)
@@ -108,11 +105,7 @@ FauxSSH includes powerful CLI tools to visualize captured data. See [Logging & A
 Filter by IP (supports IPv4 and mapped IPv6), Session ID, or Protocol:
 `./tools/analyze.sh --ip 111.222.333.444`
 `./tools/analyze.sh --commands --session-id 49b8ac`
-`./tools/analyze.sh --sessions --protocol mcp`
-
-### Payload Analysis
-Track downloaded malware artifacts (automatic background collection):
-`./tools/analyze.sh --payloads`
+`./tools/analyze.sh --sessions --protocol telnet`
 
 ### Filesystem Forensics
 Inspect and manage attacker uploads in real-time.

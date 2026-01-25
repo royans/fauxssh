@@ -43,3 +43,10 @@ exclude = '''
   | personas
 )/
 '''
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "--maxfail=5"
+testpaths = [
+    "tests",
+]

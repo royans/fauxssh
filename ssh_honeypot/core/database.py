@@ -45,7 +45,7 @@ class SQLiteBackend(DatabaseBackend):
 
             self.skeleton_cache = get_skeleton_data()
             log.info(
-                f"[*] Loaded {len(self.skeleton_cache)} skeleton items (COW Layer)"
+                f"[Core] Loaded {len(self.skeleton_cache)} skeleton items (COW Layer)"
             )
         except ImportError:
             # Fallback for direct testing
@@ -143,6 +143,9 @@ class SQLiteBackend(DatabaseBackend):
             request_md5 TEXT,
             FOREIGN KEY(session_id) REFERENCES sessions(session_id)
         )"""
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_interactions_md5 ON interactions(request_md5)"
         )
 
         # Global Filesystem Table (Simulated File System)
@@ -405,6 +408,21 @@ class SQLiteBackend(DatabaseBackend):
             "CREATE INDEX IF NOT EXISTS idx_payload_md5 ON malicious_payloads(payload_md5)"
         )
 
+        # Payload Requests (Many-to-One Tracker, Jan 24 Fix)
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS payload_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            payload_id INTEGER,
+            ip TEXT,
+            session_id TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(payload_id) REFERENCES malicious_payloads(id)
+        )"""
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_payload_req_pid ON payload_requests(payload_id)"
+        )
+
         try:
             c.execute(
                 "ALTER TABLE malicious_payloads ADD COLUMN virustotal_result TEXT"
@@ -429,17 +447,32 @@ class SQLiteBackend(DatabaseBackend):
         return sqlite3.connect(self.db_path, timeout=30.0)
 
     def log_url_request(
-        self, session_id, url, method="GET", user_agent=None, command_text=None
+        self,
+        session_id,
+        url,
+        method="GET",
+        user_agent=None,
+        command_text=None,
+        created_at=None,
     ):
         conn = self._get_conn()
         try:
-            conn.execute(
-                """
-                INSERT INTO requested_urls (session_id, url, method, user_agent, command_text)
-                VALUES (?, ?, ?, ?, ?)
-            """,
-                (session_id, url, method, user_agent, command_text),
-            )
+            if created_at:
+                conn.execute(
+                    """
+                    INSERT INTO requested_urls (timestamp, session_id, url, method, user_agent, command_text)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                    (created_at, session_id, url, method, user_agent, command_text),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO requested_urls (session_id, url, method, user_agent, command_text)
+                    VALUES (?, ?, ?, ?, ?)
+                """,
+                    (session_id, url, method, user_agent, command_text),
+                )
             conn.commit()
         except Exception as e:
             log.error(f"[DB] Error logging URL request: {e}")
@@ -456,6 +489,7 @@ class SQLiteBackend(DatabaseBackend):
         client_version,
         fingerprint=None,
         protocol="ssh",
+        created_at=None,
     ):
         conn = None
         try:
@@ -465,22 +499,41 @@ class SQLiteBackend(DatabaseBackend):
 
             conn = self._get_conn()
             c = conn.cursor()
-            c.execute(
-                """
-                INSERT INTO auth_events (client_ip, username, auth_method, auth_data, success, client_version, fingerprint, protocol)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-                (
-                    client_ip,
-                    username,
-                    auth_method,
-                    auth_data,
-                    success,
-                    client_version,
-                    fp_json,
-                    protocol,
-                ),
-            )
+            if created_at:
+                c.execute(
+                    """
+                    INSERT INTO auth_events (timestamp, client_ip, username, auth_method, auth_data, success, client_version, fingerprint, protocol)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        created_at,
+                        client_ip,
+                        username,
+                        auth_method,
+                        auth_data,
+                        success,
+                        client_version,
+                        fp_json,
+                        protocol,
+                    ),
+                )
+            else:
+                c.execute(
+                    """
+                    INSERT INTO auth_events (client_ip, username, auth_method, auth_data, success, client_version, fingerprint, protocol)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        client_ip,
+                        username,
+                        auth_method,
+                        auth_data,
+                        success,
+                        client_version,
+                        fp_json,
+                        protocol,
+                    ),
+                )
             conn.commit()
         except Exception as e:
             log.error(f"[!] DB Error log_auth_event (Protocol: {protocol}): {e}")
@@ -600,6 +653,7 @@ class SQLiteBackend(DatabaseBackend):
         response_md5=None,
         response_head=None,
         response_size=None,
+        created_at=None,
     ):
         if not request_md5 and command:
             request_md5 = hashlib.md5(command.encode("utf-8")).hexdigest()
@@ -645,47 +699,50 @@ class SQLiteBackend(DatabaseBackend):
 
         conn = self._get_conn()
         try:
-            conn.execute(
-                """
-                INSERT INTO interactions 
-                (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-                (
-                    session_id,
-                    cwd,
-                    command,
-                    response,
-                    source,
-                    request_md5,
-                    response_md5,
-                    response_head,
-                    response_size,
-                ),
-            )
+            if created_at:
+                conn.execute(
+                    """
+                    INSERT INTO interactions 
+                    (timestamp, session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        created_at,
+                        session_id,
+                        cwd,
+                        command,
+                        response,
+                        source,
+                        request_md5,
+                        response_md5,
+                        response_head,
+                        response_size,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO interactions 
+                    (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        session_id,
+                        cwd,
+                        command,
+                        response,
+                        source,
+                        request_md5,
+                        response_md5,
+                        response_head,
+                        response_size,
+                    ),
+                )
             conn.commit()
         except Exception as e:
             log.error(f"[DB] Error logging interaction: {e}")
         finally:
             conn.close()
-
-        # Unified Logging Consolidation (Jan 16)
-        # Instead of writing to a separate ad-hoc file, we route this through the EventLogger
-        try:
-            from .event_logger import EventLogger
-
-            # Reconstruct legacy fields for backward compat in the data block
-            # But mostly we want the standardized 'interaction' event
-            EventLogger().log_interaction(
-                session_id=session_id,
-                ip=ip if "ip" in locals() else "unknown",
-                input_cmd=command,
-                output_content=response,
-                protocol="ssh",  # We assume SSH here, maybe pass it in if available
-                analysis={"cached": was_cached, "response_time_ms": duration_ms},
-            )
-        except Exception as e:
-            log.error(f"Error logging to Unified EventLogger: {e}")
 
         # Payload Pipeline Hook (Restored)
         try:
@@ -786,25 +843,51 @@ class SQLiteBackend(DatabaseBackend):
             conn.close()
 
     def update_fs_node(self, path, parent_path, type, metadata, content=None):
+        self.batch_update_fs_nodes(
+            [
+                {
+                    "path": path,
+                    "parent_path": parent_path,
+                    "type": type,
+                    "metadata": metadata,
+                    "content": content,
+                }
+            ]
+        )
+
+    def batch_update_fs_nodes(self, nodes):
+        """
+        Batch updates/inserts filesystem nodes for performance.
+        'nodes' is a list of dicts with keys: path, parent_path, type, metadata, content
+        """
         conn = self._get_conn()
-
-        # Ensure content is string (handle LLM returning dicts in generic handlers)
-        if isinstance(content, (dict, list)):
-            content = str(content)
-
         try:
-            conn.execute(
+            prepared_data = []
+            for node in nodes:
+                content = node.get("content")
+                if isinstance(content, (dict, list)):
+                    content = str(content)
+
+                metadata = node.get("metadata")
+                if isinstance(metadata, dict):
+                    metadata = json.dumps(metadata)
+
+                prepared_data.append(
+                    (
+                        node["path"],
+                        node.get("parent_path"),
+                        node["type"],
+                        metadata,
+                        content,
+                    )
+                )
+
+            conn.executemany(
                 """
                 INSERT OR REPLACE INTO global_filesystem (path, parent_path, type, metadata, content)
                 VALUES (?, ?, ?, ?, ?)
-            """,
-                (
-                    path,
-                    parent_path,
-                    type,
-                    json.dumps(metadata) if isinstance(metadata, dict) else metadata,
-                    content,
-                ),
+                """,
+                prepared_data,
             )
             conn.commit()
         finally:
@@ -1262,6 +1345,13 @@ class SQLiteBackend(DatabaseBackend):
                     )
                     deleted_count += c.rowcount
 
+                    # Invalidate In-Memory Cache (if enabled)
+                    if cache:
+                        # Invalidate common methods for this path
+                        for method in ["GET", "POST", "HEAD"]:
+                            cmd_key = f"HTTP {method} {rel_path}"
+                            cache.delete_content(cmd_key, "HTTP_ROOT")
+
                     # 2. Index Logic
                     # If file is index.html/php/htm, also invalidate directory root
                     # e.g. /index.html -> /
@@ -1285,6 +1375,14 @@ class SQLiteBackend(DatabaseBackend):
                                 "DELETE FROM command_cache WHERE command LIKE 'HTTP % / %' AND cwd='HTTP_ROOT'"
                             )
                             deleted_count += c.rowcount
+
+                            # Invalidate Cache Root
+                            if cache:
+                                for method in ["GET", "POST", "HEAD"]:
+                                    cache.delete_content(
+                                        f"HTTP {method} /", "HTTP_ROOT"
+                                    )
+
                         else:
                             # For subdir /foo/index.html -> /foo/
                             # Remove trailing slash for uniformity in basic requests?
@@ -1307,6 +1405,17 @@ class SQLiteBackend(DatabaseBackend):
                                     (p2,),
                                 )
                                 deleted_count += c.rowcount
+
+                            # Invalidate Cache Dir
+                            if cache:
+                                for method in ["GET", "POST", "HEAD"]:
+                                    cache.delete_content(
+                                        f"HTTP {method} {dir_path}", "HTTP_ROOT"
+                                    )
+                                    if not dir_path.endswith("/"):
+                                        cache.delete_content(
+                                            f"HTTP {method} {dir_path}/", "HTTP_ROOT"
+                                        )
 
             if deleted_count > 0:
                 conn.commit()
@@ -1393,18 +1502,28 @@ class SQLiteBackend(DatabaseBackend):
 
     # --- IP Intelligence Methods ---
 
-    def log_ip_visit(self, ip):
+    def log_ip_visit(self, ip, created_at=None):
         """Records an IP visit. Inserts new record or updates last_seen."""
         conn = self._get_conn()
         try:
-            conn.execute(
-                """
-                INSERT INTO ip_intelligence (ip, first_seen, last_seen, enriched)
-                VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
-                ON CONFLICT(ip) DO UPDATE SET last_seen = CURRENT_TIMESTAMP
-            """,
-                (ip,),
-            )
+            if created_at:
+                conn.execute(
+                    """
+                    INSERT INTO ip_intelligence (ip, first_seen, last_seen, enriched)
+                    VALUES (?, ?, ?, 0)
+                    ON CONFLICT(ip) DO UPDATE SET last_seen = ?
+                """,
+                    (ip, created_at, created_at, created_at),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO ip_intelligence (ip, first_seen, last_seen, enriched)
+                    VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
+                    ON CONFLICT(ip) DO UPDATE SET last_seen = CURRENT_TIMESTAMP
+                """,
+                    (ip,),
+                )
             conn.commit()
         except Exception as e:
             log.error(f"[DB] Error logging IP visit {ip}: {e}")
@@ -2510,23 +2629,124 @@ class SQLiteBackend(DatabaseBackend):
         return "\n".join(report)
 
     # --- Malicious Payload Methods (Jan 10) ---
-    def add_malicious_payload(self, url, url_hash, session_id, ip, timestamp=None):
+    def add_malicious_payload(
+        self, url, url_hash, session_id, ip, timestamp=None, status="pending"
+    ):
         conn = self._get_conn()
         try:
             ts = timestamp or datetime.datetime.now()
-            conn.execute(
+            cursor = conn.cursor()
+
+            # 1. Insert/Get Payload ID
+            cursor.execute(
                 """
                 INSERT INTO malicious_payloads (url, url_hash, session_id, ip, timestamp, status)
                 VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (url_hash) DO NOTHING
             """,
-                (url, url_hash, session_id, ip, ts, "pending"),
+                (url, url_hash, session_id, ip, ts, status),
             )
+
+            # Fetch the ID (either newly inserted or existing)
+            cursor.execute(
+                "SELECT id FROM malicious_payloads WHERE url_hash = ?", (url_hash,)
+            )
+            row = cursor.fetchone()
+            payload_id = row[0] if row else None
+
+            # 2. Track Request (Always)
+            if payload_id:
+                cursor.execute(
+                    """
+                    INSERT INTO payload_requests (payload_id, ip, session_id, timestamp)
+                    VALUES (?, ?, ?, ?)
+                """,
+                    (payload_id, ip, session_id, ts),
+                )
+
             conn.commit()
             return True
-        except sqlite3.IntegrityError:
-            return False  # Already exists distinct by url_hash
         except Exception as e:
             log.error(f"[DB] Error adding payload: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def batch_add_malicious_payloads(self, payload_list):
+        """
+        Batch adds multiple malicious payloads and their requests.
+        'payload_list' is a list of dicts: url, url_hash, session_id, ip, timestamp
+        """
+        if not payload_list:
+            return
+        conn = self._get_conn()
+        try:
+            ts_default = datetime.datetime.now()
+            # 1. Insert into malicious_payloads
+            # We must include status='pending' to match single-insert behavior if needed
+            payload_data = [
+                (
+                    p["url"],
+                    p["url_hash"],
+                    p["session_id"],
+                    p["ip"],
+                    p.get("timestamp") or ts_default,
+                    "pending",
+                )
+                for p in payload_list
+            ]
+
+            cursor = conn.cursor()
+            cursor.executemany(
+                """
+                INSERT INTO malicious_payloads (url, url_hash, session_id, ip, timestamp, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (url_hash) DO NOTHING
+                """,
+                payload_data,
+            )
+
+            # 2. Fetch IDs
+            hashes = [p["url_hash"] for p in payload_list]
+            # Batch this if too large, but for backfill let's assume it's okay or needs chunking if > 999 (Sqlite limit)
+            # Actually, let's just do it in chunks.
+            id_map = {}
+            for i in range(0, len(hashes), 900):
+                chunk = hashes[i : i + 900]
+                placeholders = ",".join(["?"] * len(chunk))
+                cursor.execute(
+                    f"SELECT id, url_hash FROM malicious_payloads WHERE url_hash IN ({placeholders})",
+                    chunk,
+                )
+                for row in cursor.fetchall():
+                    id_map[row[1]] = row[0]
+
+            # 3. Insert Requests
+            request_data = []
+            for p in payload_list:
+                payload_id = id_map.get(p["url_hash"])
+                if payload_id:
+                    request_data.append(
+                        (
+                            payload_id,
+                            p["ip"],
+                            p["session_id"],
+                            p.get("timestamp") or ts_default,
+                        )
+                    )
+
+            if request_data:
+                cursor.executemany(
+                    """
+                    INSERT INTO payload_requests (payload_id, ip, session_id, timestamp)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    request_data,
+                )
+
+            conn.commit()
+        except Exception as e:
+            log.error(f"[DB] Error batch adding malicious payloads: {e}")
         finally:
             conn.close()
 
@@ -2567,7 +2787,8 @@ class SQLiteBackend(DatabaseBackend):
             cur.execute(
                 "SELECT * FROM malicious_payloads WHERE url_hash = ?", (url_hash,)
             )
-            return cur.fetchone()
+            row = cur.fetchone()
+            return dict(row) if row else None
         finally:
             conn.close()
 

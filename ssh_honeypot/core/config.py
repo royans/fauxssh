@@ -85,6 +85,17 @@ DEFAULT_CONFIG_DICT = {
         "json_log_file": os.path.join(get_data_dir(), "events.json.log"),
         "enable_session_replay": False,
         "modules": {},
+        "centralized": {
+            "enabled": True,
+            "mode": "local",  # [local, remote, both]
+            "server_name": "hp-default",
+            "remote_url": "",
+            "api_key": "",
+            "batch_size": 50,
+            "batch_timeout": 10,
+            "compression": True,
+        },
+        "disable_batching": False,
     },
     "upload": {
         "max_file_size": 1048576,
@@ -118,6 +129,7 @@ class ConfigManager:
         self.config_path = config_path
         # Use deepcopy to ensure we don't mutate the global default
         self._raw_config = copy.deepcopy(DEFAULT_CONFIG_DICT)
+        self._persona_cache = {}  # Cache for loaded persona YAMLs
 
         # 0. Load .env (Project Root or Parent)
         self._load_env()
@@ -350,7 +362,14 @@ class ConfigManager:
         for p_dir in search_dirs:
             candidate = os.path.join(p_dir, name_or_path, "persona.yaml")
             if os.path.exists(candidate):
-                return self._load_yaml_fs(candidate)
+                # Check cache first
+                if candidate in self._persona_cache:
+                    return copy.deepcopy(self._persona_cache[candidate])
+
+                data = self._load_yaml_fs(candidate)
+                if data:
+                    self._persona_cache[candidate] = copy.deepcopy(data)
+                return data
 
         return None
 

@@ -6,6 +6,7 @@ import logging
 from ssh_honeypot.core.logging_setup import log
 from ssh_honeypot.core.command_handler import CommandHandler
 from ssh_honeypot.core.config import config
+from ssh_honeypot.core.clogging import clogger
 
 
 # Telnet Constants
@@ -159,7 +160,7 @@ def handle_telnet_session(client_sock, addr, db, llm):
         return
 
     try:
-        log.info(f"[*] New Telnet Connection from {ip}")
+        log.info(f"[Telnet] New Connection from {ip}")
         # 1. Basic Telnet Negotiation
         # Load Cisco IOS Persona
         persona_config = config.get_persona_by_name("cisco_ios")
@@ -239,7 +240,6 @@ def handle_telnet_session(client_sock, addr, db, llm):
             break
 
         # --- PASSWORD MASKING END ---
-        # --- PASSWORD MASKING END ---
         # We stay in WILL ECHO mode (Server Handles Echo)
         # But we start actually echoing in the shell loop.
         # We re-affirm WILL ECHO just in case client state drifted,
@@ -259,6 +259,15 @@ def handle_telnet_session(client_sock, addr, db, llm):
             # Simulate generic login failure or disconnect
             client_sock.sendall(b"\r\nLogin incorrect\r\n")
             client_sock.close()
+            auth_data = {
+                "username": username,
+                "password": password,
+                "success": False,
+                "method": "password",
+                "client_version": "telnet_simple",
+                "fingerprint": "telnet",
+            }
+            clogger.log_event("auth", auth_data, ip=ip, protocol="telnet")
             db.log_auth_event(
                 ip,
                 username,
@@ -271,6 +280,15 @@ def handle_telnet_session(client_sock, addr, db, llm):
             )
             return
 
+        auth_data = {
+            "username": username,
+            "password": password,
+            "success": True,
+            "method": "password",
+            "client_version": "telnet_simple",
+            "fingerprint": "telnet",
+        }
+        clogger.log_event("auth", auth_data, ip=ip, protocol="telnet")
         db.log_auth_event(
             ip,
             username,
@@ -281,13 +299,18 @@ def handle_telnet_session(client_sock, addr, db, llm):
             fingerprint="telnet",
             protocol="telnet",
         )
-        db.start_session(
-            session_id,
-            ip,
-            username,
-            password,
-            "telnet_client",
-            fingerprint="telnet",
+
+        session_data = {
+            "username": username,
+            "password": password,
+            "client_version": "telnet_client",
+            "fingerprint": "telnet",
+        }
+        clogger.log_event(
+            "session_start",
+            session_data,
+            session_id=session_id,
+            ip=ip,
             protocol="telnet",
         )
 
@@ -307,9 +330,8 @@ def handle_telnet_session(client_sock, addr, db, llm):
         env = {}
         llm_call_count = 0
 
-        handler = CommandHandler(llm, db)
+        handler = CommandHandler(llm, db, allow_all_commands=True)
 
-        # Initial Message
         # Initial Message (MOTD)
         # Only show Linux banner if NOT a specialized network device
         is_network_device = False
@@ -339,9 +361,6 @@ def handle_telnet_session(client_sock, addr, db, llm):
         # Command Loop
         cmd_buffer = ""
 
-        # NOTE: Reverted to logic from original implementation (Step 36)
-        # Assuming client is back in default mode (Local Echo / Line Mode often)
-
         while True:
             try:
                 chunk = client_sock.recv(1024)
@@ -368,102 +387,17 @@ def handle_telnet_session(client_sock, addr, db, llm):
                     i += 1
                     continue
 
-                # Handle Return
-                if byte == b"\r":
-                    # Telnet sends CR LF or CR NUL.
-                    # We treat CR as "Prepare to Execute", wait for potential LF.
-                    # IF the NEXT byte is NOT LF, we should execute anyway (CR as Enter).
-                    # Current logic: Skip CR, wait for LF.
-                    # ISSUE: If client sends CR NUL (Char mode standard for Enter sometimes),
-                    # we skip CR, then process NUL as char?
-
-                    # Improved: Treat CR as Enter if we decide.
-                    # But safest: Lookahead?
-                    # Or just Flag it.
-                    # Simple fix for user: If we see CR, we can trigger execute too?
-                    # But if LF follows, we execute twice (one empty).
-
-                    # Hybrid:
-                    # If we see CR, peek? We can't easily peek chunk.
-                    # Let's just treat CR as newline too, and ignore LF if buffer empty/consecutive?
-
-                    # Safer approach for "Enter doesn't work":
-                    # If we see CR, we set flag `cr_seen`.
-                    # If next is LF, ignore. If next is valid char, treat CR as Enter.
-
-                    # Actually, simply:
-                    # Treat CR as Newline.
-                    # Treat LF as Newline.
-                    # If buffer is empty (double newline), maybe just reprint prompt?
-
-                    # Let's try: Treat CR as Execute.
-                    pass  # Fallthrough to execute logic below? No, byte is CR.
-
-                    # Let's force execution on CR too.
-                    byte = b"\n"  # Remap CR to LF logic
-
-                    # Check if next char in chunk is LF, if so, consume it to skip double exec
-                    if i + 1 < len(chunk) and chunk[i + 1 : i + 2] == b"\n":
-                        i += 1
-
-                    # Now fallthrough to 'if byte == b'\n': ' logic?
-                    # No, we need to manually trigger it or change structure.
-
-                    # Let's just use the logic block:
-                    cmd = cmd_buffer.strip()
-                    client_sock.sendall(b"\r\n")
-                    # ... Copy execute logic? Or refactor?
-                    # Refactor is risky in single tool call without full view.
-
-                    # Minimal Change:
-                    # Just changing the `if byte == b'\r':` block to NOT continue,
-                    # but check if we should execute.
-
-                    # Actually, wait.
-                    # If lines 197-200 just SKIP CR, and client sends CR NUL...
-                    # Then loop hits NUL (Normal Char). buffer += \0.
-                    # User sees nothing happens. correct.
-
-                    # Fix:
-                    # if byte == CR:
-                    #    if next is LF: skip CR (LF will trigger).
-                    #    else (CR NUL or just CR): Trigger Execute.
-
-                    trigger_exec = False
-                    if i + 1 < len(chunk) and chunk[i + 1 : i + 2] == b"\n":
-                        i += 1  # Skip CR, let LF handle it
-                        continue
-                    else:
-                        # CR followed by something else (NUL?) or end of chunk.
-                        # Treat as Enter.
-                        trigger_exec = True
-
-                    if trigger_exec:
-                        # Fallthrough to execute logic?
-                        # We need to jump to execute logic.
-                        pass
-
-                    # This is messy.
-                    # Better:
-                    # Replace `if byte == b'\n':` with `if byte == b'\n' or trigger_exec:`
-                    # But structure is `if .. continue`.
-
-                    # Let's rewrite the block to handle \r or \n
-
+                # Handle Newlines (Robust CR/LF/CR-NUL)
                 is_newline = False
                 if byte == b"\n":
                     is_newline = True
                 elif byte == b"\r":
                     if i + 1 < len(chunk) and chunk[i + 1 : i + 2] == b"\n":
-                        i += (
-                            1  # Consumed. Handled by next iter? No, we just skipped LF.
-                        )
-                        # So CR LF -> CR consumed here. Next iter is LF -> is_newline=True.
-                        # Wait, if we consume LF here (i+=1), then next char in loop is AFTER LF.
-                        # So we effectively collapse CR LF to just "Newline Now".
-                        is_newline = True
+                        # CR followed by LF: Skip CR, let next iteration (LF) handle it
+                        i += 1
+                        continue
                     else:
-                        # CR alone (or CR NUL).
+                        # CR alone or CR NUL: Treat as Newline
                         is_newline = True
 
                 if is_newline:
@@ -500,6 +434,11 @@ def handle_telnet_session(client_sock, addr, db, llm):
                             "session_id": session_id,
                             "persona_config": persona_config,
                         }
+
+                        # Command Delay (Throttling)
+                        from ssh_honeypot.core.utils import random_response_delay
+
+                        random_response_delay(0.5, 2.0)
 
                         start_time = time.time()
                         # Resilient Unpacking
@@ -543,13 +482,19 @@ def handle_telnet_session(client_sock, addr, db, llm):
                             )
 
                         # Log
-                        db.log_interaction(
-                            session_id,
-                            cwd,
-                            cmd,
-                            resp_text,
-                            source=str(metadata.get("source")),
-                            duration_ms=round(duration * 1000, 2),
+                        interaction_data = {
+                            "cwd": cwd,
+                            "input": cmd,
+                            "response": resp_text,
+                            "source": str(metadata.get("source")),
+                            "duration_ms": round(duration * 1000, 2),
+                        }
+                        clogger.log_event(
+                            "interaction",
+                            interaction_data,
+                            session_id=session_id,
+                            ip=ip,
+                            protocol="telnet",
                         )
 
                     cmd_buffer = ""
@@ -597,10 +542,7 @@ def handle_telnet_session(client_sock, addr, db, llm):
                 try:
                     char = byte.decode("utf-8")
                     cmd_buffer += char
-                    # Use unconditional echo here as per "Rollback" request request
-                    # If the user's client negotiates successfully back to Local Echo, this might double echo
-                    # But if the user was happy with the first version, this is what they had.
-                    client_sock.sendall(byte)  # Original behavior
+                    client_sock.sendall(byte)
                 except:
                     pass
 
@@ -638,7 +580,7 @@ def start_telnet_server(port, db, llm):
             family_str = (
                 "IPv6 (Dual Stack)" if sock.family == socket.AF_INET6 else "IPv4"
             )
-            log.info(f"[*] Starting Telnet Honeypot on {bind_ip}:{port} ({family_str})")
+            log.info(f"[Telnet] Starting Honeypot on {bind_ip}:{port} ({family_str})")
 
             while True:
                 client, addr = sock.accept()

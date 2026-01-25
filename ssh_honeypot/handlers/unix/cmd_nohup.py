@@ -34,4 +34,8 @@ class NohupCommand:
             # Recursively process the command
             return executor(cmd_stripped, context)
         else:
-            return "nohup: missing operand\n", {}, {"source": "local", "cached": False}
+            return (
+                "nohup: missing operand\n",
+                {},
+                {"source": "handler", "cached": False},
+            )

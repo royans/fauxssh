@@ -14,7 +14,7 @@ def handle_echo(cmd, context):
         parts = cmd.split()
 
     if not parts:
-        return "\n", {}, {"source": "local", "cached": False}
+        return "\n", {}, {"source": "handler", "cached": False}
 
     # parts[0] is 'echo'
     args = parts[1:]
@@ -69,4 +69,4 @@ def handle_echo(cmd, context):
     if not no_newline:
         output += "\n"
 
-    return output, {}, {"source": "local", "cached": False}
+    return output, {}, {"source": "handler", "cached": False}

@@ -6,6 +6,7 @@ from ssh_honeypot.services.mysql.context import client_ip_ctx
 from ssh_honeypot.services.mysql.dummy_data import SYSTEM_VARIABLES, DUMMY_DATABASES
 import sqlglot
 from sqlglot import exp
+from ssh_honeypot.core.clogging import clogger
 
 log = logging.getLogger("ssh_honeypot")
 
@@ -72,12 +73,17 @@ class HoneyMySQLSession(MysqlSession):
         # log.info(f"[*] MySQL Connection from {self.client_address}")
 
         # Start session in DB
-        self.honey_db.start_session(
+        session_data = {
+            "username": self.username or "unknown",
+            "password": None,
+            "client_version": "unknown",
+            "fingerprint": "mysql",
+        }
+        clogger.log_event(
+            "session_start",
+            session_data,
             session_id=self.session_id,
             ip=self.client_address[0] if self.client_address else "unknown",
-            username=self.username or "unknown",
-            password=None,  # No password yet at init
-            client_version="unknown",
             protocol="mysql",
         )
 
@@ -186,12 +192,34 @@ class HoneyMySQLSession(MysqlSession):
             else:
                 res_str = "Empty result set / Success"
 
-            self.honey_db.log_interaction(
-                self.session_id, "mysql", sql, res_str, source="mysql"
+            interaction_data = {
+                "cwd": "mysql",
+                "input": sql,
+                "response": res_str,
+                "source": "mysql",
+            }
+            clogger.log_event(
+                "interaction",
+                interaction_data,
+                session_id=self.session_id,
+                ip=self.client_address[0] if self.client_address else "unknown",
+                protocol="mysql",
             )
         except Exception as le:
             log.error(f"[MySQL] Error logging results: {le}")
-            self.honey_db.log_interaction(self.session_id, "mysql", sql, None)
+            interaction_data = {
+                "cwd": "mysql",
+                "input": sql,
+                "response": None,
+                "source": "mysql",
+            }
+            clogger.log_event(
+                "interaction",
+                interaction_data,
+                session_id=self.session_id,
+                ip=self.client_address[0] if self.client_address else "unknown",
+                protocol="mysql",
+            )
 
         return results
 

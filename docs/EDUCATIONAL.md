@@ -49,7 +49,7 @@ If you are studying honeypots, try these experiments with FauxSSH:
 *   **Goal**: Determine if a human attacker can distinguish FauxSSH from a real Ubuntu server within 5 minutes.
 *   **Method**: Have a colleague log in without telling them it's a honeypot. Watch their commands. When do they realize?
 
-### Experiment B: Payload Analysis
+### Experiment B: Malware Forensics
 *   **Goal**: Observe how the honeypot handles file uploads.
 *   **Method**: upload a benign test file using `scp`. Note that it is isolated in `data/uploaded_files` and never executed, even if you run `./payload`. The "execution" is just the LLM *pretending* to run it.
 

@@ -1,4 +1,5 @@
 import pytest
+import unittest.mock
 from unittest.mock import MagicMock
 import sys
 import os
@@ -56,17 +57,14 @@ class TestLongCommands:
     def test_semicolon_pass(self, handler):
         # 4. Simple semicolon chain (Should NOT trigger if <= 30 semicolons)
         cmd = "echo A ; echo B"
-        # Mock handle_echo
-        handler.handle_echo = MagicMock(
-            return_value=("echo_out", {}, {"source": "local"})
-        )
         handler.handle_generic.reset_mock()
 
         resp, _, meta = handler.process_command(cmd, {})
 
         handler.handle_generic.assert_not_called()
-        # Should split and call echo twice
-        assert handler.handle_echo.call_count == 2
+        # Real echo should return A and B
+        assert "A" in resp
+        assert "B" in resp
 
     def test_full_chain_offloading_integration(self):
         """
@@ -137,5 +135,5 @@ class TestLongCommands:
         mock_llm.generate_response.assert_not_called()  # Should NOT hit LLM
 
         assert resp == "CACHED_OUTPUT"
-        assert meta["source"] == "cache"
+        assert meta["source"] == "llm-cache"
         assert meta["cached"] is True

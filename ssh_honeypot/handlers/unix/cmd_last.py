@@ -94,4 +94,4 @@ class LastCommand(BaseHandler):
 
         # wtmp begins header
         output.append("\nwtmp begins Wed Jan 01 00:00:00 2026")
-        return "\n".join(output) + "\n", {}, {"source": "local", "cached": False}
+        return "\n".join(output) + "\n", {}, {"source": "handler", "cached": False}

@@ -3,18 +3,19 @@
 ## Weekly Changelog: Jan 25th 2026
 
 ### New Features
-- **Risk Scoring Normalization**: Standardized all internal and external risk scores to the 0-100 scale, improving alerting precision and UI clarity.
-- **Advanced Analytics Functions**:
-    - **Top Command Analysis**: New `--top` flag in `analyze.py` for command frequency clustering and sample response display.
-    - **Time-Window Filtering**: Added `--duration` support (e.g., `15m`, `14h`, `3d`) to isolate recent activity during triage.
+- **Risk Scoring Normalization**: Standardized risk scoring across all services to a 0-100 scale, significantly improving alerting accuracy and reporting consistency.
+- **Advanced Data Triage**:
+    - **Top Command Analysis**: New analytics capabilities to identify and group the most frequent attacker command patterns.
+    - **Time-Window Filtering**: Added granular time-based filtering to isolation recent attack surges.
 
 ### Enhancements
-- **Enhanced Test Automation**: Smart test runner (`run_tests_smart.sh`) now includes an automated styling fix loop for `black` formatting, preventing deployment blocks.
-- **Database Performance**: Added `idx_interactions_md5` to PostgreSQL backend for faster correlation analysis on high-volume logs.
+- **Multi-Protocol Persistence**: Unified database abstraction layer now supports PostgreSQL and SQLite with consistent schema enforcement.
+- **Service Resilience**: Integrated a low-interaction MySQL honeypot and hardened Telnet session handling.
 
-### Reliability
-- **CI/CD Integration**: Integrated `pylint` and `pytest-testmon` for faster, higher-quality test cycles.
-- **Bug Fixes**: Resolved Redis test flakiness and fixed `--output` clipping in aggregated analytics views.
+### Reliability & Quality
+- **Automated Quality Assurance**: Integrated smart test monitors and linting into the deployment pipeline to ensure zero-regression releases.
+- **Performance Optimization**: Enhanced database indexing for high-volume execution streams.
+- **Bug Fixes**: Resolved critical session hanging and analytics clipping issues.
 
 
 ### New Features
@@ -30,8 +31,6 @@
 - **Dependencies**: Added `psycopg2-binary` for PostgreSQL support.
 - **MySQL Service**: Added low-interaction MySQL honeypot (port 3306) with LLM query support.
 - **Throttling**: Fixed `DoSProtector` configuration (disabled defaults) and added explicit connection limits to `Telnet`.
-- **Payload Extraction**: Enabled real-time extraction of malicious URLs in the analysis loop.
-- **Service Integration**: Moved `PayloadManager` to `background_tasks` for continuous monitoring.
 - **Installer**: Enhanced `install.sh` with interactive API key validation and automatic persona generation.
 
 ## Weekly Changelog: Jan 11th 2026
@@ -45,8 +44,7 @@
 - **Deep Hardware Simulation**: `PersonaGenerator` now extracts and simulates precise CPU, RAM, Disk, GPU, and Service details.
 - **🌐 HTTP Honeypot**: Added a new service (Port 8080) mimicking Apache/Nginx with LLM-generated content and caching.
 - **🔌 Telnet Support**: Added full Telnet protocol support (optional listener).
-- **📼 Session Replay**: Implemented full TTY session recording in `asciinema` v2 format.
-- **🦠 Malicious Payload Analysis**: Automated detection, queuing, downloading, and isolation of dropped payloads.
+- **Deep Hardware Simulation**: `PersonaGenerator` now extracts and simulates precise CPU, RAM, Disk, GPU, and Service details.
 - **IP Intelligence**: Integrated `ip-api.com` and `python-whois` to enrich attacker IP data.
 - **IPv6 Support**: Improved analytics filtering for IPv4-mapped addresses.
 - **Network Configuration**: Personas now support detailed network settings (Type, CIDR, Gateway, DNS) for enhanced `ip a` simulation.
@@ -84,7 +82,7 @@
 ### New Features
 - **🔔 Real-time Alerting**: Implemented Webhook integration and Keyword-based Discord alerts.
 - **📁 Native SCP & Forensic Tooling**: Full SCP upload/download support, "Access Tracking" for files, and enhanced `fs_inspector` for managing malware.
-- **🦠 Malware Analysis**: Uploaded files are quarantined but can be "executed" (simulated) for behavioral study.
+- **📁 Native SCP & Forensic Tooling**: Full SCP upload/download support, "Access Tracking" for files, and enhanced `fs_inspector` for managing malware.
 - **🖥️ Hardware Emulation**: Handlers for `dmidecode`/`lspci` simulating High-Performance Computing (H100) hardware.
 
 ### Enhancements

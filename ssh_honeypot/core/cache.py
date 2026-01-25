@@ -10,6 +10,7 @@ class CacheManager:
         if cls._instance is None:
             cls._instance = super(CacheManager, cls).__new__(cls)
             cls._instance.client = None
+            cls._instance._fallback_cache = {}
             cls._instance._connect()
         return cls._instance
 
@@ -45,29 +46,33 @@ class CacheManager:
             return False
 
     def set_content(self, key, scope, content, ttl=86400):
-        if not self.client:
-            return
-        # Hash unique key combo for safety
         import hashlib
 
         cache_key = (
             f"content:{hashlib.md5((key + list_sep + scope).encode()).hexdigest()}"
         )
+        if not self.client:
+            self._fallback_cache[cache_key] = content
+            return
+
         try:
             # Memcache usually handles bytes or strings if configured, but default client handles bytes best or string.
             # We store strings.
-            self.client.set(cache_key, content, expire=ttl)
+            success = self.client.set(cache_key, content, expire=ttl)
+            if not success:
+                self._fallback_cache[cache_key] = content
         except Exception:
-            pass
+            self._fallback_cache[cache_key] = content
 
     def get_content(self, key, scope):
-        if not self.client:
-            return None
         import hashlib
 
         cache_key = (
             f"content:{hashlib.md5((key + list_sep + scope).encode()).hexdigest()}"
         )
+        if not self.client:
+            return self._fallback_cache.get(cache_key)
+
         try:
             val = self.client.get(cache_key)
             if val is not None:
@@ -75,9 +80,26 @@ class CacheManager:
                 if isinstance(val, bytes):
                     return val.decode("utf-8")
                 return val
+            # Try fallback if memcache miss or failure
+            return self._fallback_cache.get(cache_key)
         except Exception:
-            pass
-        return None
+            return self._fallback_cache.get(cache_key)
+
+    def delete_content(self, key, scope):
+        import hashlib
+
+        cache_key = (
+            f"content:{hashlib.md5((key + list_sep + scope).encode()).hexdigest()}"
+        )
+        if self.client:
+            try:
+                self.client.delete(cache_key)
+            except Exception:
+                pass
+
+        # Always try fallback
+        if cache_key in self._fallback_cache:
+            del self._fallback_cache[cache_key]
 
 
 list_sep = ":"

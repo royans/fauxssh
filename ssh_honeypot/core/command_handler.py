@@ -57,9 +57,35 @@ except ImportError as e:
 
 
 class CommandHandler:
-    def __init__(self, llm_interface, db):
+    CACHABLE_HANDLERS = {
+        "echo",
+        "uname",
+        "hostname",
+        "whoami",
+        "id",
+        # "pwd",  <-- Removed because it depends on CWD and cache is CWD-agnostic
+        "groups",
+        "arch",
+        "nproc",
+        "false",
+        "true",
+    }
+
+    CACHABLE_CISCO_HANDLERS = {
+        "version",
+        "inventory",
+        "ip interface brief",  # Multi-word match logic needed
+        "ping",
+        "traceroute",
+    }
+
+    def __init__(self, llm_interface, db, allow_all_commands=False):
         self.llm = llm_interface
         self.db = db
+        self.allow_all_commands = allow_all_commands
+        from .payload_manager import PayloadManager
+
+        self.payload_manager = PayloadManager(db)
         self.ls_handler = LSCommand(db)
 
         self.honey_db = db  # Alias for newer handlers
@@ -217,6 +243,8 @@ class CommandHandler:
             "w",
             "last",
             "openssl",
+            "false",
+            "true",
         }
 
         self.HONEYTOKENS = {"aws_keys.txt", "id_rsa_backup", "wallet.dat"}
@@ -315,7 +343,7 @@ class CommandHandler:
             return (
                 "bash: time: usage: time COMMAND [ARGS...]\n",
                 {},
-                {"source": "local", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         sub_cmd = parts[1]
@@ -354,10 +382,10 @@ class CommandHandler:
                 return (
                     " ".join(parts[1:]) + "\\n",
                     {},
-                    {"source": "local", "cached": False},
+                    {"source": "handler", "cached": False},
                 )
             except:
-                return cmd[5:] + "\\n", {}, {"source": "local", "cached": False}
+                return cmd[5:] + "\\n", {}, {"source": "handler", "cached": False}
 
     def handle_fdisk(self, cmd, context):
         """
@@ -368,7 +396,7 @@ class CommandHandler:
             return (
                 "fdisk: usage: fdisk [options] <disk>    change partition table\n       fdisk [options] -l <disk> list partition table(s)\n",
                 {},
-                {"source": "local", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         # Simulated Output
@@ -387,7 +415,7 @@ Disk /dev/sdb: 10 GiB, 10737418240 bytes, 20971520 sectors
 Units: sectors of 1 * 512 = 512 bytes
 Sector size (logical/physical): 512 bytes / 512 bytes
 """
-        return output, {}, {"source": "local", "cached": False}
+        return output, {}, {"source": "handler", "cached": False}
 
     def handle_ls(self, cmd, context):
         # 0. Active Repair: Fix potentially corrupt directories before listing
@@ -413,14 +441,14 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
         if "-c" in cmd:
             history.clear()
-            return "", {}, {"source": "local", "cached": False}
+            return "", {}, {"source": "handler", "cached": False}
 
         # List history
         lines = []
         for i, (c, _) in enumerate(history):
             lines.append(f" {i+1}  {c}")
 
-        return "\n".join(lines) + "\n", {}, {"source": "local", "cached": False}
+        return "\n".join(lines) + "\n", {}, {"source": "handler", "cached": False}
 
     def handle_sudo(self, cmd, context):
         """
@@ -440,7 +468,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             # Check if target user is self
             # sudo su user
             if len(parts) > 2 and parts[2] == user:
-                return "", {}, {"source": "local", "cached": False}  # Success (no-op)
+                return "", {}, {"source": "handler", "cached": False}  # Success (no-op)
 
             if len(parts) == 2 or (len(parts) > 2 and parts[2] == "-"):
                 # sudo su / sudo su - (Root)
@@ -453,7 +481,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 return (
                     f"[sudo] password for {user}: \nSorry, try again.\n[sudo] password for {user}: \n",
                     {},
-                    {"source": "local", "cached": False},
+                    {"source": "handler", "cached": False},
                 )
 
         if "-i" in parts or "/bin/bash" in cmd or "sh" in cmd:
@@ -464,7 +492,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             return (
                 f"{user} is not in the sudoers file.  This incident will be reported.\n",
                 {},
-                {"source": "local", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         # Sudo Passthrough for Whitelisted Commands
@@ -498,7 +526,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         return (
             f"sudo: a password is required\n",
             {},
-            {"source": "local", "cached": False},
+            {"source": "handler", "cached": False},
         )
 
     def handle_sys_status(self, cmd, context):
@@ -607,7 +635,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         Input: cmd (str), context (dict)
         Output: (response_text_for_user, updates_dict, metadata)
         updates_dict = {'new_cwd': str, 'file_modifications': list}
-        metadata = {'source': 'llm'|'cache'|'local', 'cached': bool}
+        metadata = {'source': 'llm'|'llm-cache'|'handler'|'handler-cache'|'chain', 'cached': bool}
         """
         cwd = context.setdefault("cwd", "/")
         vfs = context.get("vfs", {})
@@ -670,6 +698,12 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
         log.debug(f"[CMD_TRACE] Post-Subshell cmd: '{cmd}'")
 
+        # --- URL Exclusion Check ---
+        # Do not cache commands containing URLs (malicious payload logging requirement)
+        has_url = bool(re.search(r"http[s]?://|ftp://", cmd, re.IGNORECASE))
+        if has_url:
+            log.debug(f"[Security] URL detected in command, skipping cache for: {cmd}")
+
         # 0.1 Busybox Dispatch
         # Global: Strip 'busybox' prefix to support "busybox <cmd>" or "/bin/busybox <cmd>"
         parts = cmd.split()
@@ -686,7 +720,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 return (
                     "BusyBox v1.30.1 multi-call binary.\nUsage: busybox [function] [arguments]...\n",
                     {},
-                    {"source": "local", "cached": False},
+                    {"source": "handler", "cached": False},
                 )
 
         # 0.1a Nohup Dispatch
@@ -708,14 +742,14 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             if cisco_handlers:
                 parts = cmd.split()
                 if not parts:
-                    return "", {}, {"source": "cisco", "cached": False}
+                    return "", {}, {"source": "handler", "cached": False}
                 base = parts[0]
             else:
                 log.error("Cisco persona active but cisco_handlers module not loaded.")
                 return (
                     "% Error: System configuration issue (Handlers missing).\r\n",
                     {},
-                    {"source": "error", "cached": False},
+                    {"source": "handler", "cached": False},
                 )
 
             if cisco_handlers:  # redundancy cleanup
@@ -777,7 +811,50 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
                 # Aliases & Anti-Error_func:
                 if handler_func:
-                    return handler_func(cmd, context)
+                    # Caching logic for Cisco commands
+                    is_cachable = False
+                    # Extract the part after the base command if it's 'show'
+                    cmd_to_check = cmd.lower().strip()
+
+                    for cachable in self.CACHABLE_CISCO_HANDLERS:
+                        # Match 'show version' or just 'ping'
+                        if cachable in cmd_to_check:
+                            is_cachable = True
+                            break
+
+                    if is_cachable:
+                        from .cache import cache
+
+                        try:
+                            if cache:
+                                cached = cache.get_content(cmd, "cisco-handler")
+                                if cached:
+                                    log.debug(f"[Cache] Cisco Handler HIT for '{cmd}'")
+                                    return (
+                                        cached,
+                                        {},
+                                        {"source": "handler-cache", "cached": True},
+                                    )
+                        except Exception as e:
+                            log.debug(f"[Cache] Cisco Handler lookup error: {e}")
+
+                    res = handler_func(cmd, context)
+
+                    if (
+                        is_cachable
+                        and cache
+                        and len(res) >= 1
+                        and isinstance(res[0], str)
+                        and not res[1]
+                    ):
+                        try:
+                            # Use 1 hour TTL for Cisco status commands
+                            cache.set_content(cmd, "cisco-handler", res[0], ttl=3600)
+                            log.debug(f"[Cache] Cisco Handler STORE for '{cmd}'")
+                        except Exception as e:
+                            log.debug(f"[Cache] Cisco Handler store error: {e}")
+
+                    return res
 
                 # If command not found in local cisco handlers, fall through to LLM?
                 # Or return invalid input usage?
@@ -834,14 +911,14 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     "env": new_env,
                     "file_modifications": updates.get("file_modifications", []),
                 },
-                {"source": "var_assign", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         # 0. Complex Command Chains (Simple Heuristic)
         try:
             base_cmd = cmd.split()[0]
         except IndexError:
-            return "", {}, {"source": "local", "cached": False}
+            return "", {}, {"source": "handler", "cached": False}
 
         is_complex = (
             (len(cmd) > 4096)
@@ -866,30 +943,47 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
                 final_out = []
                 final_updates = {}
+                sub_metas = []
                 current_context = context.copy()
                 for part in parts:
                     out, updates, meta = self.process_command(part, current_context)
                     if not isinstance(out, str):
                         out = str(out)
                     final_out.append(out)
+                    sub_metas.append(meta)
                     if updates:
                         if updates.get("new_cwd"):
                             current_context["cwd"] = updates["new_cwd"]
                         for k, v in updates.items():
                             if k == "new_cwd":
                                 final_updates[k] = v
+                                current_context["cwd"] = v
+                            elif k == "env":
+                                final_updates[k] = v
+                                current_context["env"] = v
+                            elif k == "vfs":
+                                final_updates[k] = v
+                                current_context["vfs"] = v
                             elif k == "file_modifications":
                                 if "file_modifications" not in final_updates:
                                     final_updates["file_modifications"] = []
-                                if v:  # Check if v is not None/Empty
+                                if v:
                                     final_updates["file_modifications"].extend(v)
-                            elif k == "env":
-                                current_context["env"] = v
-                                final_updates["env"] = v
+
+                num_cached = sum(1 for m in sub_metas if m.get("cached"))
+                source = "chain"
+                if num_cached == len(parts) and len(parts) > 0:
+                    source = "chain-cache"
+                elif num_cached > 0:
+                    source = "chain-pcache"
+
                 return (
                     "".join(final_out),
                     final_updates,
-                    {"source": "chain", "cached": False},
+                    {
+                        "source": source,
+                        "cached": num_cached == len(parts) and len(parts) > 0,
+                    },
                 )
 
         # 0.1 Command Chaining Support (&&)
@@ -900,36 +994,51 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
                 final_out = []
                 final_updates = {}
+                sub_metas = []
                 current_context = context.copy()
                 for part in parts:
                     out, updates, meta = self.process_command(part, current_context)
                     if not isinstance(out, str):
                         out = str(out)
                     final_out.append(out)
+                    sub_metas.append(meta)
                     if out.startswith("bash:") or "command not found" in out:
-                        return (
-                            "".join(final_out),
-                            final_updates,
-                            {"source": "chain_abort", "cached": False},
-                        )
+                        break
+
                     if updates:
                         if updates.get("new_cwd"):
                             current_context["cwd"] = updates["new_cwd"]
                         for k, v in updates.items():
                             if k == "new_cwd":
                                 final_updates[k] = v
+                                current_context["cwd"] = v
+                            elif k == "env":
+                                final_updates[k] = v
+                                current_context["env"] = v
+                            elif k == "vfs":
+                                final_updates[k] = v
+                                current_context["vfs"] = v
                             elif k == "file_modifications":
                                 if "file_modifications" not in final_updates:
                                     final_updates["file_modifications"] = []
-                                if v:  # Check if v is not None/Empty
+                                if v:
                                     final_updates["file_modifications"].extend(v)
-                            elif k == "env":
-                                current_context["env"] = v
-                                final_updates["env"] = v
+
+                num_cached = sum(1 for m in sub_metas if m.get("cached"))
+                executed_parts = len(sub_metas)
+                source = "chain"
+                if num_cached == executed_parts and executed_parts > 0:
+                    source = "chain-cache"
+                elif num_cached > 0:
+                    source = "chain-pcache"
+
                 return (
                     "".join(final_out),
                     final_updates,
-                    {"source": "chain", "cached": False},
+                    {
+                        "source": source,
+                        "cached": num_cached == executed_parts and executed_parts > 0,
+                    },
                 )
 
         # 0.2 Command Chaining Support (||)
@@ -1030,7 +1139,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
             new_env = context["env"].copy()
             new_env[var_name] = val
-            return "", {"env": new_env}, {"source": "var_assign", "cached": False}
+            return "", {"env": new_env}, {"source": "handler", "cached": False}
 
         # 0.6 Redirection Support (> and >>)
         redirect_pos = -1
@@ -1089,7 +1198,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 return (
                     f"bash: {right_file}: Permission denied\n",
                     {},
-                    {"source": "local", "cached": False},
+                    {"source": "handler", "cached": False},
                 )
 
             # Handle Write
@@ -1130,7 +1239,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 updates["file_modifications"] = []
             updates["file_modifications"].append({"action": "create", "path": abs_path})
 
-            return "", updates, {"source": "redirection", "cached": False}
+            return "", updates, {"source": "handler", "cached": False}
 
         # 0. Variable Substitution ($VAR) - LATE BINDING
         # Performed AFTER structural parsing (pipes, chains) to mimic shell behavior
@@ -1147,14 +1256,14 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             return (
                 f"bash: command blocked by security policy: {reason}\n",
                 {},
-                {"source": "security", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         # 0.1 Hidden Stats Command
         if cmd.strip() == "sys_status":
             stats_resp = self.handle_sys_status(cmd, context)
             if stats_resp:
-                return stats_resp, {}, {"source": "local", "cached": False}
+                return stats_resp, {}, {"source": "handler", "cached": False}
 
         # 0.2 Debug Env Command (Hidden)
         if cmd.strip() == "debug_env":
@@ -1165,7 +1274,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 return (
                     f"DEBUG ENV: {env_str}\n",
                     {},
-                    {"source": "debug", "cached": False},
+                    {"source": "handler", "cached": False},
                 )
 
         # 0.3 Debug Cmd Info (Hidden)
@@ -1186,7 +1295,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     f"Meta Source: {meta.get('source')}\n"
                     f"----------------------------------\n"
                 )
-                return debug_out, {}, {"source": "debug", "cached": False}
+                return debug_out, {}, {"source": "handler", "cached": False}
 
         # 0.4 Admin Debug Utilities (Restricted)
         if cmd.startswith("debug_"):
@@ -1202,7 +1311,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 return (
                     f"bash: {op}: command not found\n",
                     {},
-                    {"source": "stealth_block", "cached": False},
+                    {"source": "simulated", "cached": False},
                 )
             else:
                 parts = cmd.split()
@@ -1234,7 +1343,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                             return (
                                 report + "\n",
                                 {},
-                                {"source": "debug", "cached": False},
+                                {"source": "handler", "cached": False},
                             )
 
                         # If arg provided
@@ -1244,7 +1353,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                         if isinstance(report, list):
                             report = "\n".join(report)
 
-                        return report + "\n", {}, {"source": "debug", "cached": False}
+                        return report + "\n", {}, {"source": "handler", "cached": False}
                     except Exception as e:
                         log.error(f"Error in debug_vfs: {e}")
                         import traceback
@@ -1253,7 +1362,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                         return (
                             f"Error executing debug_vfs: {e}\n",
                             {},
-                            {"source": "debug", "cached": False},
+                            {"source": "handler", "cached": False},
                         )
 
                 elif op == "debug_vfs_ls":
@@ -1264,7 +1373,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     report = self.db.inspect_dir(
                         client_ip, context.get("user"), abs_path
                     )
-                    return report + "\n", {}, {"source": "debug", "cached": False}
+                    return report + "\n", {}, {"source": "handler", "cached": False}
 
                 elif op == "debug_context":
                     # Inspect current context passed to handlers
@@ -1274,20 +1383,20 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     output += f"User: {context.get('user')}\n"
                     output += f"Client IP: {context.get('client_ip')}\n"
                     output += f"File List ({len(file_list)} items): {file_list}\n"
-                    return output, {}, {"source": "debug", "cached": False}
+                    return output, {}, {"source": "handler", "cached": False}
 
                 elif op == "debug_env":
                     return (
                         f"DEBUG ENV: {context.get('env')}\n",
                         {},
-                        {"source": "debug", "cached": False},
+                        {"source": "handler", "cached": False},
                     )
 
                 else:
                     return (
                         f"Debug command '{op}' not recognized.\nAvailable: debug_vfs [path], debug_vfs_ls [dir], debug_context, debug_env\n",
                         {},
-                        {"source": "debug", "cached": False},
+                        {"source": "handler", "cached": False},
                     )
 
         # 0.7 Execution Simulation (Malware/Script Execution)
@@ -1316,14 +1425,14 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     return (
                         f"bash: {base_cmd}: Permission denied\n",
                         {},
-                        {"source": "local", "cached": False},
+                        {"source": "handler", "cached": False},
                     )
 
                 if len(content) > 10000:
                     return (
                         f"bash: {base_cmd}: text file busy (simulated)\n",
                         {},
-                        {"source": "local", "cached": False},
+                        {"source": "handler", "cached": False},
                     )
 
                 log.info(f"[Execution] Simulating script via LLM: {abs_path}")
@@ -1343,7 +1452,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 )
                 j, t = self._extract_json_or_text(resp)
                 out, ups = self._process_llm_json(j, t)
-                return out, ups, {"source": "llm_exec", "cached": False}
+                return out, ups, {"source": "llm", "cached": False}
 
         # 1. Access Control
         # Bypass allowlist for Cisco Persona (let specific handlers or LLM decide)
@@ -1356,11 +1465,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if context.get("force_unix_handlers"):
             is_cisco = False
 
-        if not is_cisco and not self._is_allowed(cmd):
+        if not self.allow_all_commands and not is_cisco and not self._is_allowed(cmd):
             return (
                 f"bash: {base_cmd}: command not found",
                 {},
-                {"source": "denied", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         # 2. Cache Check Moved to handle_generic to allow overrides
@@ -1370,7 +1479,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             return (
                 "bash: fork: retry: Resource temporarily unavailable",
                 {},
-                {"source": "ratelimit", "cached": False},
+                {"source": "simulated", "cached": False},
             )
 
         # 4. Dispatch to Specific Handlers (or generic LLM)
@@ -1392,16 +1501,54 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         )
 
         if handler_name and hasattr(self, handler_name):
+            # 4.1 Handler-Cache check (In-Memory/Memcache only)
+            if (
+                base_cmd in self.CACHABLE_HANDLERS
+                and not has_url
+                and not os.getenv("SSHPOT_TEST_MODE")
+            ):
+                try:
+                    from .cache import cache
+
+                    if cache:
+                        cached = cache.get_content(cmd, "handler")
+                        if cached:
+                            log.debug(f"[Cache] Handler HIT for '{cmd}'")
+                            return (
+                                cached,
+                                {},
+                                {"source": "handler-cache", "cached": True},
+                            )
+                except Exception as e:
+                    log.debug(f"[Cache] Handler lookup error: {e}")
+
             # Deception: Add random delay to local commands to match LLM latency timing
             if not os.getenv("SSHPOT_TEST_MODE"):
                 random_response_delay(0.5, 1.5)
             res = getattr(self, handler_name)(cmd, context)
 
+            # 4.2 Save to Handler-Cache if successful and cachable
+            if (
+                base_cmd in self.CACHABLE_HANDLERS
+                and not has_url
+                and not os.getenv("SSHPOT_TEST_MODE")
+            ):
+                try:
+                    from .cache import cache
+
+                    if cache and len(res) >= 1 and isinstance(res[0], str):
+                        # Only cache if NO state updates (updates dict is empty)
+                        if len(res) >= 2 and not res[1]:
+                            cache.set_content(cmd, "handler", res[0])
+                            log.debug(f"[Cache] Handler STORE for '{cmd}'")
+                except Exception as e:
+                    log.debug(f"[Cache] Handler store error: {e}")
+
             # Allow handlers to return custom metadata (esp. for hybrid handlers like cat)
             if len(res) == 3:
                 return res[0], res[1], res[2]
             else:
-                return res[0], res[1], {"source": "local", "cached": False}
+                return res[0], res[1], {"source": "handler", "cached": False}
         else:
             # Fallback: Try basename (e.g. /bin/ls -> ls, /bin/./uname -> uname)
             normalized_base = os.path.basename(base_cmd)
@@ -1424,13 +1571,8 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 res = getattr(self, handler_name_norm)(cmd, context)
                 if len(res) == 3:
                     return res[0], res[1], res[2]
-                return res[0], res[1], {"source": "local", "cached": False}
-                res = getattr(self, handler_name_norm)(cmd, context)
-                # Allow handlers to return custom metadata (esp. for hybrid handlers like cat)
-                if len(res) == 3:
-                    return res[0], res[1], res[2]
-                else:
-                    return res[0], res[1], {"source": "local", "cached": False}
+                return res[0], res[1], {"source": "handler", "cached": False}
+                return res[0], res[1], {"source": "handler", "cached": False}
 
             return self.handle_generic(cmd, context)
 
@@ -1541,7 +1683,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 out, up = self._process_llm_json(
                     response_json, response_text, vfs=vfs, cwd=cwd, user=user
                 )
-                return out, up, {"source": "cache", "cached": True}
+                return out, up, {"source": "llm-cache", "cached": True}
 
         log.debug(f"[Session: {session_id}] [Cache] MISS")
         log.info(
@@ -1863,23 +2005,23 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
     def handle_nproc(self, cmd, context):
         out, updates = self.system_handler.handle_nproc(cmd, context)
-        return out, updates, {"source": "local", "cached": False}
+        return out, updates, {"source": "handler", "cached": False}
 
     def handle_lscpu(self, cmd, context):
         out, updates = self.system_handler.handle_lscpu(cmd, context)
-        return out, updates, {"source": "local", "cached": False}
+        return out, updates, {"source": "handler", "cached": False}
 
     def handle_lspci(self, cmd, context):
         out, updates = self.system_handler.handle_lspci(cmd, context)
-        return out, updates, {"source": "local", "cached": False}
+        return out, updates, {"source": "handler", "cached": False}
 
     def handle_dmidecode(self, cmd, context):
         out, updates = self.system_handler.handle_dmidecode(cmd, context)
-        return out, updates, {"source": "local", "cached": False}
+        return out, updates, {"source": "handler", "cached": False}
 
     def handle_last(self, cmd, context):
         out, updates = self.system_handler.handle_last(cmd, context)
-        return out, updates, {"source": "local", "cached": False}
+        return out, updates, {"source": "handler", "cached": False}
 
     def _generate_or_get_content(self, cmd_name, target_path, context):
         session_id = context.get("session_id", "unknown")
@@ -1894,27 +2036,27 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         user_node = self.db.get_user_node(client_ip, user, abs_path)
         if user_node and (user_node.get("content") is not None):
             # print(f"[Session: {session_id}] [{cmd_name}] User DB HIT for {abs_path}")
-            return user_node["content"], "local"
+            return user_node["content"], "handler"
 
         # Check Static/Dynamic Persona Files
         if hasattr(self, "system_handler"):
             dyn_content = self.system_handler.get_dynamic_file(abs_path)
             if dyn_content:
-                return dyn_content, "local"
+                return dyn_content, "handler"
 
             static_content = self.system_handler.get_static_file(abs_path)
             if static_content:
-                return static_content, "local"
+                return static_content, "handler"
 
         # Check Global FS
         node = self.db.get_fs_node(abs_path)
         if node and (node.get("content") is not None):
             # print(f"[Session: {session_id}] [{cmd_name}] DB HIT for {abs_path}")
-            return node["content"], "local"
+            return node["content"], "handler"
 
         # 1. Hardcoded Secret
         if "notes.txt" in target_path:
-            return "Hint: RudolphsRedNose2025!", "local"
+            return "Hint: RudolphsRedNose2025!", "handler"
 
         log.debug(
             f"[Session: {session_id}] [{cmd_name}] DB MISS for {abs_path}. Calling LLM."
@@ -2212,7 +2354,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         """
         parts = cmd.split()
         if len(parts) < 2:
-            return "md5sum: missing operand\n", {}, {"source": "local", "cached": False}
+            return (
+                "md5sum: missing operand\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         target_path = parts[-1]  # Simplistic arg parsing
         cwd = context.get("cwd", "/")
@@ -2285,7 +2431,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             return f"sleep: invalid time interval '{parts[1]}'\n", {}
         except Exception:
             pass
-        return "", {}, {"source": "local", "cached": False}
+        return "", {}, {"source": "handler", "cached": False}
 
     def handle_ifconfig(self, cmd, context):
         # Delegate to network_handlers
@@ -2701,7 +2847,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             return (
                 "curl: (28) Connection timed out after 5001 milliseconds\n",
                 {},
-                {"source": "firewall", "cached": False},
+                {"source": "simulated", "cached": False},
             )
 
         import shlex
@@ -2897,7 +3043,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
     def handle_uname(self, cmd, context):
         out, updates = self.system_handler.handle_uname(cmd, context)
-        return out, updates, {"source": "local", "cached": False}
+        return out, updates, {"source": "handler", "cached": False}
 
     def handle_nvidia_smi(self, cmd, context):
         output = """Wed Dec 31 19:12:44 2025       
@@ -2925,7 +3071,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 |  No running processes found                                                 |
 +-----------------------------------------------------------------------------+
 """
-        return output, {}, {"source": "local", "cached": False}
+        return output, {}, {"source": "handler", "cached": False}
 
     def handle_ps(self, cmd, context):
         # 1. Parse Flags
@@ -3335,6 +3481,33 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
                         print(
                             f"[SCP] Uploaded {filename} to {final_path} ({size} bytes) [User Isolated]"
                         )
+                        # Log specific transfer interaction
+                        try:
+                            self.db.log_interaction(
+                                context.get("session_id", "unknown"),
+                                f"SCP Upload: {filename}",
+                                f"Saved to {final_path} ({size} bytes)",
+                                source="scp_handler",
+                            )
+                        except:
+                            pass
+
+                        # Update VFS in context for immediate visibility
+                        vfs = context.get("vfs")
+                        if vfs is not None:
+                            target_dir = os.path.dirname(final_path)
+                            if target_dir not in vfs:
+                                vfs[target_dir] = []
+                            if filename not in vfs[target_dir]:
+                                vfs[target_dir].append(filename)
+
+                        # Integrate into Payload Analysis
+                        self.payload_manager.queue_upload(
+                            filename,
+                            content,
+                            context.get("session_id", "unknown"),
+                            client_ip,
+                        )
                     except UnicodeDecodeError:
                         print(
                             f"[SCP] Uploaded BINARY {filename} to {final_path} (skipped text save)"
@@ -3441,7 +3614,7 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
             return (
                 "base64: missing file operand\n",
                 {},
-                {"source": "local", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         try:
@@ -3472,7 +3645,11 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
         # Always fail authentication
         # Simulate delay
         time.sleep(1.5)
-        return "su: Authentication failure\n", {}, {"source": "local", "cached": False}
+        return (
+            "su: Authentication failure\n",
+            {},
+            {"source": "handler", "cached": False},
+        )
 
     def handle_perl(self, cmd, context):
         return self._handle_interpreter(cmd, context, "perl")

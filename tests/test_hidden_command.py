@@ -60,4 +60,4 @@ class TestHiddenCommand:
         # Should return strict tuple
         out, updates, meta = handler.process_command(cmd, context)
         assert "SSHPot Status" in out
-        assert meta["source"] == "local"
+        assert meta["source"] == "handler"

@@ -74,8 +74,8 @@ class AwkCommand(BaseHandler):
         if "NF" in script and "print" in script and "exit" in script:
             for line in content.splitlines():
                 if line.strip():
-                    return line + "\n", {}, {"source": "local", "cached": False}
-            return "", {}, {"source": "local", "cached": False}
+                    return line + "\n", {}, {"source": "handler", "cached": False}
+            return "", {}, {"source": "handler", "cached": False}
 
         # Case 2: Simple Print $N
         # '{print $2}'
@@ -92,7 +92,7 @@ class AwkCommand(BaseHandler):
                     out.append(fields[idx])
                 else:
                     out.append("")
-            return "\n".join(out) + "\n", {}, {"source": "local", "cached": False}
+            return "\n".join(out) + "\n", {}, {"source": "handler", "cached": False}
 
         # Case 3: The complex cpuinfo extraction
         if "/Model name/" in script:
@@ -102,8 +102,8 @@ class AwkCommand(BaseHandler):
                     if len(fields) >= 2:
                         val = fields[1]
                         val = val.strip()
-                        return val + "\n", {}, {"source": "local", "cached": False}
-            return "", {}, {"source": "local", "cached": False}
+                        return val + "\n", {}, {"source": "handler", "cached": False}
+            return "", {}, {"source": "handler", "cached": False}
 
         # Fallback to current Generic/LLM handler
         content_hash = hashlib.md5(content.encode("utf-8", "ignore")).hexdigest()

@@ -48,8 +48,8 @@ class TestHeadersIntegration(unittest.TestCase):
 
     @patch("ssh_honeypot.services.http_server.server.config")
     @patch("ssh_honeypot.services.http_server.server.dos_protector")
-    @patch("ssh_honeypot.services.http_server.server.EventLogger")
-    def test_custom_headers_integration(self, mock_logger, mock_dos, mock_config):
+    @patch("ssh_honeypot.services.http_server.server.clogger")
+    def test_custom_headers_integration(self, mock_clogger, mock_dos, mock_config):
         # Configure Mocks
         def config_side_effect(section, key):
             if section == "http" and key == "headers":

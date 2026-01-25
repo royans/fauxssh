@@ -5,6 +5,8 @@ import logging
 import zlib
 
 from ssh_honeypot.core.config import get_data_dir
+from ssh_honeypot.core.logging_setup import log
+from ssh_honeypot.core.payload_manager import PayloadManager
 
 UPLOAD_DIR = os.path.join(get_data_dir(), "uploaded_files")
 
@@ -22,7 +24,7 @@ class HoneySFTPHandle(paramiko.SFTPHandle):
         if self.upload_fp:
             try:
                 self.upload_fp.close()
-                print(f"[SFTP] Upload Completed: {self.path}")
+                log.info(f"[SFTP] Upload Completed: {self.path}")
 
                 # Update VFS
                 if self.vfs_ref is not None and self.vfs_dir_key is not None:
@@ -35,7 +37,9 @@ class HoneySFTPHandle(paramiko.SFTPHandle):
                 # Save content to DB
                 if hasattr(self, "real_path") and os.path.exists(self.real_path):
                     size = os.path.getsize(self.real_path)
-                    print(f"[SFTP] Persisting content for {self.path} ({size} bytes)")
+                    log.info(
+                        f"[SFTP] Persisting content for {self.path} ({size} bytes)"
+                    )
 
                     if size < 1024 * 1024:
                         try:
@@ -66,14 +70,26 @@ class HoneySFTPHandle(paramiko.SFTPHandle):
                                     meta,
                                     content,
                                 )
-                                print(
+                                log.info(
                                     f"[SFTP] User-DB Updated for {self.path} ({self.server_obj.username}@{self.server_obj.client_ip})"
                                 )
+
+                                # Integrate into Payload Analysis
+                                try:
+                                    pm = PayloadManager(self.server_obj.db)
+                                    pm.queue_upload(
+                                        self.filename_only,
+                                        content,
+                                        self.server_obj.session_id,
+                                        self.server_obj.client_ip,
+                                    )
+                                except Exception as pm_e:
+                                    log.error(f"[SFTP] Payload Queue Error: {pm_e}")
                         except Exception as db_e:
-                            print(f"[SFTP] DB Persist Error: {db_e}")
+                            log.error(f"[SFTP] DB Persist Error: {db_e}")
 
             except Exception as e:
-                print(f"[SFTP] Close Error: {e}")
+                log.error(f"[SFTP] Close Error: {e}")
 
         super(HoneySFTPHandle, self).close()
 
@@ -84,8 +100,8 @@ class HoneySFTPHandle(paramiko.SFTPHandle):
                 if hasattr(self, "max_file_size"):
                     cur_pos = self.upload_fp.tell()
                     if cur_pos + len(data) > self.max_file_size:
-                        print(
-                            f"[!] SFTP Write blocked: Exceeds size limit ({self.max_file_size})"
+                        log.warning(
+                            f"[SFTP] [!] Write blocked: Exceeds size limit ({self.max_file_size})"
                         )
                         return paramiko.SFTP_PERMISSION_DENIED
 
@@ -155,7 +171,7 @@ class HoneySFTPServer(paramiko.SFTPServerInterface):
 
     def list_folder(self, path):
         path = self._resolve(path)
-        print(f"[SFTP] List: {path}")
+        log.info(f"[SFTP] List: {path}")
         files = self.vfs.get(path)
         if files is None:
             return paramiko.SFTP_NO_SUCH_FILE
@@ -198,7 +214,7 @@ class HoneySFTPServer(paramiko.SFTPServerInterface):
 
     def open(self, path, flags, attr):
         path = self._resolve(path)
-        print(f"[SFTP] Open: {path} Flags: {flags}")
+        log.info(f"[SFTP] Open: {path} Flags: {flags}")
         if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT):
             # Load Limits from Config
             from ssh_honeypot.core.config import config
@@ -223,8 +239,8 @@ class HoneySFTPServer(paramiko.SFTPServerInterface):
                     self.server_obj.client_ip
                 )
                 if current_usage >= MAX_QUOTA:
-                    print(
-                        f"[!] SFTP Limit: Quota Exceeded for {self.server_obj.client_ip} ({current_usage}/{MAX_QUOTA})"
+                    log.warning(
+                        f"[SFTP] [!] Limit: Quota Exceeded for {self.server_obj.client_ip} ({current_usage}/{MAX_QUOTA})"
                     )
                     return paramiko.SFTP_PERMISSION_DENIED
 
@@ -239,18 +255,20 @@ class HoneySFTPServer(paramiko.SFTPServerInterface):
 
             try:
                 handle.upload_fp = open(real_path, "wb")
-                print(f"[*] Started Upload to: {real_path}")
+                log.info(f"[SFTP] Started Upload to: {real_path}")
                 if hasattr(self.server_obj, "db") and self.server_obj.db:
                     try:
                         self.server_obj.db.log_interaction(
                             self.session_id,
+                            None,  # No CWD in SFTP context typically or use self.cwd
                             f"SFTP Upload: {path}",
                             f"Saved to {real_path}",
+                            source="handler",
                         )
                     except:
                         pass
             except Exception as e:
-                print(f"[!] Upload Error: {e}")
+                log.error(f"[SFTP] Upload Error: {e}")
                 return paramiko.SFTP_PERMISSION_DENIED
             return handle
         return HoneySFTPHandle(flags)

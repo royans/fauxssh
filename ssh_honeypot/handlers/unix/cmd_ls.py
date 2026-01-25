@@ -334,4 +334,4 @@ or available locally via: info '(coreutils) ls invocation'
 
             output = "  ".join(names) + "\n"
 
-        return output, {}, {"source": "local", "cached": False}
+        return output, {}, {"source": "handler", "cached": False}

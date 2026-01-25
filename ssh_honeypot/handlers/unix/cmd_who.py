@@ -53,4 +53,4 @@ class WhoCommand(BaseHandler):
             line = f"{s['user']:<8} {s['tty']:<12} {time_str} ({s['ip']})"
             output.append(line)
 
-        return "\n".join(output) + "\n", {}, {"source": "local", "cached": False}
+        return "\n".join(output) + "\n", {}, {"source": "handler", "cached": False}

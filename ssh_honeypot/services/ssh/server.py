@@ -19,12 +19,7 @@ from ssh_honeypot.core.alert_manager import AlertManager
 from ssh_honeypot.core.session_logger import SessionLogger
 from ssh_honeypot.core.logging_setup import log
 from ssh_honeypot.core.persona_validator import validate_active_persona
-
-# Settings
-# SERVER_BANNER is now dynamic
-HOST_KEY_FILE = os.path.join(get_data_dir(), "host.key")
-
-from ssh_honeypot.core.event_logger import EventLogger
+from ssh_honeypot.core.clogging import clogger
 
 
 # --- Logging Filter for Paramiko Noise ---
@@ -47,6 +42,9 @@ logging.getLogger("paramiko.transport").addFilter(ParamikoFilter())
 MAX_CONCURRENT_SESSIONS = 20
 MAX_SESSIONS_PER_IP = 3
 MAX_FILES_PER_SESSION = 50
+
+# Shared Constants
+HOST_KEY_FILE = os.path.join(get_data_dir(), "host.key")
 
 active_sessions = 0
 active_sessions_lock = threading.Lock()
@@ -166,19 +164,19 @@ class HoneypotServer(paramiko.ServerInterface):
         ignored_ips = get_ignored_ips()
         if self.client_ip in ignored_ips:
             allow_root = True
-            log.info(f"[Auth] Allowing root login from Trusted IP: {self.client_ip}")
+            log.info(f"[SSH] Allowing root login from Trusted IP: {self.client_ip}")
 
         # Root Desperation Check
         if username == "root":
             desperation = db.check_root_desperation(self.client_ip)
             if desperation == "BLOCK":
                 log.info(
-                    f"[Auth] Root Blocked (Desperation Rule): {self.client_ip} has prior non-root access."
+                    f"[SSH] Root Blocked (Desperation Rule): {self.client_ip} has prior non-root access."
                 )
                 allow_root = False
             elif desperation == "ALLOW":
                 log.info(
-                    f"[Auth] Root Allowed (Desperation Rule): {self.client_ip} 3rd attempt granted."
+                    f"[SSH] Root Allowed (Desperation Rule): {self.client_ip} 3rd attempt granted."
                 )
                 allow_root = True
 
@@ -192,6 +190,17 @@ class HoneypotServer(paramiko.ServerInterface):
             client_version = self.transport_ref.remote_version
 
         fp = self._extract_fingerprint()
+
+        auth_data = {
+            "username": username,
+            "password": password,
+            "success": success,
+            "method": "password",
+            "client_version": client_version,
+            "fingerprint": fp,
+        }
+
+        clogger.log_event("auth", auth_data, session_id="pre-auth", ip=self.client_ip)
         db.log_auth_event(
             self.client_ip,
             username,
@@ -199,18 +208,6 @@ class HoneypotServer(paramiko.ServerInterface):
             password,
             success,
             client_version,
-            fingerprint=fp,
-            protocol="ssh",
-        )
-
-        EventLogger().log_auth(
-            session_id="pre-auth",
-            ip=self.client_ip,
-            username=username,
-            password=password,
-            success=success,
-            method="password",
-            client_version=client_version,
             fingerprint=fp,
         )
 
@@ -247,6 +244,15 @@ class HoneypotServer(paramiko.ServerInterface):
                         break
 
         fp = self._extract_fingerprint()
+        auth_data = {
+            "username": username,
+            "password": auth_data,  # Use auth_data which is the b64 key for publickey
+            "success": authorized,
+            "method": "publickey",
+            "client_version": client_version,
+            "fingerprint": fp,
+        }
+        clogger.log_event("auth", auth_data, session_id="pre-auth", ip=self.client_ip)
         db.log_auth_event(
             self.client_ip,
             username,
@@ -255,12 +261,11 @@ class HoneypotServer(paramiko.ServerInterface):
             authorized,
             client_version,
             fingerprint=fp,
-            protocol="ssh",
         )
 
         if authorized:
             log.info(
-                f"[Auth] Public Key Login SUCCESS for '{username}' from {self.client_ip}"
+                f"[SSH] Public Key Login SUCCESS for '{username}' from {self.client_ip}"
             )
             return paramiko.AUTH_SUCCESSFUL
         else:
@@ -413,14 +418,14 @@ def handle_connection(client, addr, db_inst, llm_inst):
     with active_sessions_lock:
         if active_sessions >= MAX_CONCURRENT_SESSIONS:
             log.warning(
-                f"[!] Dropping connection from {ip}: Max sessions reached ({MAX_CONCURRENT_SESSIONS})"
+                f"[SSH] Dropping connection from {ip}: Max sessions reached ({MAX_CONCURRENT_SESSIONS})"
             )
             client.close()
             return
 
         if ip_connection_counts[ip] >= MAX_SESSIONS_PER_IP:
             log.warning(
-                f"[!] Dropping connection from {ip}: Max sessions per IP reached ({MAX_SESSIONS_PER_IP})"
+                f"[SSH] Dropping connection from {ip}: Max sessions per IP reached ({MAX_SESSIONS_PER_IP})"
             )
             client.close()
             return
@@ -432,7 +437,7 @@ def handle_connection(client, addr, db_inst, llm_inst):
         try:
             _handle_connection_logic(client, addr, db_inst, llm_inst)
         except Exception as e:
-            log.error(f"Handle Connection Error: {e}")
+            log.error(f"[SSH] Handle Connection Error: {e}")
     finally:
         with active_sessions_lock:
             active_sessions -= 1
@@ -462,7 +467,7 @@ def _handle_connection_logic(client, addr, db, llm):
     try:
         host_key = paramiko.RSAKey(filename=HOST_KEY_FILE)
     except FileNotFoundError:
-        log.info("Generating new host key...")
+        log.info("[SSH] Generating new host key...")
         host_key = paramiko.RSAKey.generate(2048)
         host_key.write_private_key_file(HOST_KEY_FILE)
     except Exception as e:
@@ -509,18 +514,16 @@ def _handle_connection_logic(client, addr, db, llm):
         pass
 
     try:
-        db.start_session(
-            session_id,
-            ip,
-            server.username,
-            server.password,
-            transport.remote_version,
-            fingerprint=json.dumps(fingerprint),
-            protocol="ssh",
-        )
-        log.info(f"[*] New Session {session_id} from {ip} as {server.username} (SSH)")
+        session_data = {
+            "username": server.username,
+            "password": server.password,
+            "client_version": transport.remote_version,
+            "fingerprint": fingerprint,
+        }
+        clogger.log_event("session_start", session_data, session_id=session_id, ip=ip)
+        log.info(f"[SSH] New Session {session_id} from {ip} as {server.username}")
     except Exception as e:
-        log.error(f"[!] Critical Error starting session: {e}")
+        log.error(f"[SSH] Critical Error starting session: {e}")
 
     user = server.username if server.username else "alabaster"
     if user == "root":
@@ -542,7 +545,7 @@ def _handle_connection_logic(client, addr, db, llm):
     server.db = db
 
     if server.subsystem == "sftp":
-        log.info(f"[*] Starting SFTP Handler for {session_id}")
+        log.info(f"[SSH] Starting SFTP Handler for {session_id}")
         try:
             sftp = paramiko.SFTPServer(chan, session_id, server, HoneySFTPServer)
             sftp.start()
@@ -581,7 +584,26 @@ def _handle_connection_logic(client, addr, db, llm):
         }
 
         if cmd.strip().startswith("scp "):
-            log.info(f"[*] Starting SCP Handler for {session_id} (cmd: {cmd})")
+            log.info(f"[SSH] Starting SCP Handler for {session_id} (cmd: {cmd})")
+
+            # Log the SCP command itself as an interaction
+            try:
+                cmd_hash = hashlib.md5(cmd.encode("utf-8")).hexdigest()
+                interaction_data = {
+                    "cwd": cwd,
+                    "input": cmd,
+                    "response": "[SCP Transfer Initiated]",
+                    "request_md5": str(cmd_hash),
+                    "duration_ms": 0,
+                    "source": "handler",
+                    "cached": False,
+                }
+                clogger.log_event(
+                    "interaction", interaction_data, session_id=session_id, ip=ip
+                )
+            except:
+                pass
+
             try:
                 handler.handle_scp_interactive(cmd, chan, context)
                 chan.send_exit_status(0)
@@ -600,17 +622,18 @@ def _handle_connection_logic(client, addr, db, llm):
         except:
             cmd_hash = "unknown"
 
-        log.debug(f"[DEBUG] Exec '{cmd}' -> Response Len: {len(resp_text)}")
-        db.log_interaction(
-            session_id,
-            cwd,
-            cmd,
-            resp_text,
-            source=str(metadata.get("source", "unknown")),
-            was_cached=metadata.get("cached", False),
-            duration_ms=duration_ms,
-            request_md5=str(cmd_hash),
-        )
+        log.debug(f"[SSH] Exec '{cmd}' -> Response Len: {len(resp_text)}")
+
+        interaction_data = {
+            "cwd": cwd,
+            "input": cmd,
+            "response": resp_text,
+            "request_md5": str(cmd_hash),
+            "duration_ms": duration_ms,
+            "source": str(metadata.get("source", "unknown")),
+            "cached": metadata.get("cached", False),
+        }
+        clogger.log_event("interaction", interaction_data, session_id=session_id, ip=ip)
 
         if resp_text:
             try:
@@ -649,9 +672,9 @@ def _handle_connection_logic(client, addr, db, llm):
     try:
         if config.get("logging", "enable_session_replay"):
             logger = SessionLogger(session_id, user, ip)
-            log.info(f"Session recording started: {session_id}.cast")
+            log.info(f"[SSH] Session recording started: {session_id}.cast")
     except Exception as e:
-        log.error(f"Failed to start session logger: {e}")
+        log.error(f"[SSH] Failed to start session logger: {e}")
 
     try:
         while True:
@@ -780,26 +803,20 @@ def _handle_connection_logic(client, addr, db, llm):
                         if logger:
                             logger.log_event("o", "\r\n")
 
-                    db.log_interaction(
-                        session_id,
-                        cwd,
-                        cmd,
-                        resp_text,
-                        source=str(metadata.get("source", "unknown")),
-                        was_cached=metadata.get("cached", False),
-                        duration_ms=duration_ms,
-                        request_md5=str(cmd_hash),
-                    )
-
-                    analysis_result = None
-                    EventLogger().log_interaction(
+                    interaction_data = {
+                        "cwd": cwd,
+                        "input": cmd,
+                        "response": resp_text,
+                        "request_md5": str(cmd_hash),
+                        "duration_ms": duration_ms,
+                        "source": str(metadata.get("source", "unknown")),
+                        "cached": metadata.get("cached", False),
+                    }
+                    clogger.log_event(
+                        "interaction",
+                        interaction_data,
                         session_id=session_id,
                         ip=addr[0],
-                        input_cmd=cmd,
-                        output_content=resp_text,
-                        protocol="ssh",
-                        analysis=analysis_result,
-                        user_agent=None,
                     )
 
                     try:
@@ -887,6 +904,9 @@ llm = None
 
 
 def start_ssh_server(port, db_instance, llm_instance):
+    import sys
+
+    sys.stderr.write(f"DEBUG: start_ssh_server entry port={port}\n")
     """
     Start the SSH Honeypot Server.
     Run this in a thread or separate process.
@@ -909,7 +929,7 @@ def start_ssh_server(port, db_instance, llm_instance):
     try:
         sock = create_dual_stack_socket(BIND_IP, port, backlog=100)
         family_str = "IPv6 (Dual Stack)" if sock.family == socket.AF_INET6 else "IPv4"
-        log.info(f"[*] SSH Honeypot listening on {BIND_IP}:{port} ({family_str})")
+        log.info(f"[SSH] Listening on {BIND_IP}:{port} ({family_str})")
     except Exception as e:
         log.error(f"[!] Failed to bind SSH port {port} on {BIND_IP}: {e}")
         return
@@ -917,6 +937,10 @@ def start_ssh_server(port, db_instance, llm_instance):
     while True:
         try:
             client, addr = sock.accept()
+            import sys
+
+            sys.stderr.write(f"DEBUG: Server accepted connection from {addr}\n")
+            sys.stderr.flush()
             # Launch thread handling connection, passing db and llm explicitly (globals to allow mocking)
             t = threading.Thread(target=handle_connection, args=(client, addr, db, llm))
             t.daemon = True

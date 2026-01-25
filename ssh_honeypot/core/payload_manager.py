@@ -11,7 +11,6 @@ from urllib.parse import urlparse
 from datetime import datetime, timedelta
 
 from ssh_honeypot.core.database import HoneyDB
-from ssh_honeypot.core.database import HoneyDB
 from ssh_honeypot.core.config import config, get_data_dir
 
 try:
@@ -96,13 +95,6 @@ class PayloadManager:
             # 1. Deduplicate by exact URL (processed already?)
             url_hash = hashlib.md5(url.encode()).hexdigest()
 
-            existing = self.db.get_payload_by_hash(url_hash)
-            if existing:
-                # Already tracked in main table, but we want to log the request
-                # So we continue to add_malicious_payload which handles deduplication
-                # while adding to payload_requests table.
-                pass
-
             # 2. Host Rate Limiting (1 per day)
             parsed = urlparse(url)
             hostname = parsed.hostname
@@ -130,6 +122,67 @@ class PayloadManager:
 
         except Exception as e:
             logger.error(f"Error queuing payload {url}: {e}")
+            return False
+
+    def queue_upload(self, filename, content, session_id, ip, timestamp=None):
+        """
+        Integrates an uploaded file into the payload analysis system.
+        Skips downloading since we already have the content.
+        """
+        try:
+            if not content:
+                return False
+
+            if isinstance(content, str):
+                content_bytes = content.encode("utf-8")
+            else:
+                content_bytes = content
+
+            md5 = hashlib.md5(content_bytes).hexdigest()
+            size = len(content_bytes)
+
+            # Use filename in the "URL" column to identify source
+            url = f"upload://{filename}"
+            url_hash = hashlib.md5(url.encode()).hexdigest()
+
+            # Save to payload directory
+            storage_filename = f"dangerous_{md5}.txt"
+            file_path = os.path.join(PAYLOAD_DIR, storage_filename)
+
+            if not os.path.exists(file_path):
+                with open(file_path, "wb") as f:
+                    f.write(content_bytes)
+                logger.info(f"[PayloadManager] Saved uploaded payload to {file_path}")
+
+            # Add to DB as 'completed' (ready for analysis)
+            added = self.db.add_malicious_payload(
+                url=url,
+                url_hash=url_hash,
+                session_id=session_id,
+                ip=ip,
+                timestamp=timestamp or datetime.now(),
+                status="completed",
+            )
+
+            if added:
+                # We need the ID to update status with file path/md5
+                payload = self.db.get_payload_by_hash(url_hash)
+                if payload:
+                    self.db.update_payload_status(
+                        payload["id"],
+                        "completed",
+                        payload_md5=md5,
+                        payload_size=size,
+                        file_path=file_path,
+                    )
+                logger.info(
+                    f"[PayloadManager] Queued uploaded file for analysis: {filename}"
+                )
+                return True
+            return False
+
+        except Exception as e:
+            logger.error(f"Error queuing upload {filename}: {e}")
             return False
 
     def process_queue(self):
@@ -164,7 +217,7 @@ class PayloadManager:
 
                 if os.path.exists(file_path):
                     logger.info(
-                        f"[PayloadManager] Payload {url} is duplicate of existing {filename}"
+                        f"[PayloadManager] Payload {url} is duplicate of existing {filename} (MD5: {md5}). Skipping download/save."
                     )
                     # Update DB to point to existing file
                 else:
@@ -407,6 +460,7 @@ class PayloadManager:
     def backfill_from_interactions(self):
         """
         One-time scan of interactions table to find missed URLs.
+        Optimized with batch processing.
         """
         logger.info("[PayloadManager] Starting historical backfill...")
         try:
@@ -414,23 +468,66 @@ class PayloadManager:
             # but for this specific "remove in 1 week" task, we'll strip it simple.
             # Only fetch meaningful commands (e.g. contain http)
             rows = self.db.get_interactions_with_http()
+            if not rows:
+                return
 
+            potential_payloads = []
+            seen_hashes = set()
+            host_rate_limit_cache = {}
             total_potential = 0
-            added_count = 0
+
             for row in rows:
                 sid = row["session_id"]
                 cmd = row["command"]
                 ts = row["timestamp"]
+                ip = row.get("remote_ip")
 
                 urls = self.extract_urls(cmd)
                 for u in urls:
                     total_potential += 1
-                    ip = row.get("remote_ip")
-                    if self.queue_payload(u, sid, ip, timestamp=ts):
-                        added_count += 1
+                    url_hash = hashlib.md5(u.encode()).hexdigest()
+
+                    # Avoid duplicate processing in the same loop
+                    if url_hash in seen_hashes:
+                        continue
+
+                    # Host Rate Limiting check
+                    parsed = urlparse(u)
+                    hostname = parsed.hostname
+                    if not hostname:
+                        continue
+
+                    if hostname in host_rate_limit_cache:
+                        if host_rate_limit_cache[hostname]:
+                            continue
+                    else:
+                        is_limited = self.db.is_payload_host_rate_limited(hostname)
+                        host_rate_limit_cache[hostname] = is_limited
+                        if is_limited:
+                            continue
+
+                    potential_payloads.append(
+                        {
+                            "url": u,
+                            "url_hash": url_hash,
+                            "session_id": sid,
+                            "ip": ip,
+                            "timestamp": ts,
+                        }
+                    )
+                    seen_hashes.add(url_hash)
+
+                    # Batch flush to DB
+                    if len(potential_payloads) >= 500:
+                        self.db.batch_add_malicious_payloads(potential_payloads)
+                        potential_payloads = []
+
+            # Final batch
+            if potential_payloads:
+                self.db.batch_add_malicious_payloads(potential_payloads)
 
             logger.info(
-                f"[PayloadManager] Backfill complete. Scanned {len(rows)} commands, found {total_potential} URLs, queued {added_count} new payloads."
+                f"[PayloadManager] Backfill complete. Scanned {len(rows)} commands, found {total_potential} URLs, queued in batches."
             )
 
         except Exception as e:

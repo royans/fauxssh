@@ -5,6 +5,10 @@ import time
 import socket
 import sys
 import asyncio
+import cProfile
+import pstats
+import io
+import signal
 
 # Imports from Core
 from ssh_honeypot.core.database import HoneyDB, get_db_backend
@@ -38,10 +42,38 @@ def main(argv=None):
         action="store_true",
         help="Run a single pass of the analysis loop and exit",
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Run for 30 seconds with cProfile and dump stats",
+    )
     args = parser.parse_args(argv)
 
     # 0. Apply logging config immediately after loading (config was imported at module level)
     apply_config_to_logging(config)
+
+    # Profiling Setup
+    profiler = None
+    if args.profile:
+        log.info("[Profiling] Starting cProfile session (Auto-stop in 90s)...")
+        profiler = cProfile.Profile()
+        profiler.enable()
+
+        def stop_profiling():
+            log.info("[Profiling] 90 seconds elapsed. Stopping and dumping stats...")
+            profiler.disable()
+            s = io.StringIO()
+            sortby = "cumulative"
+            ps = pstats.Stats(profiler, stream=s).sort_stats(sortby)
+            ps.print_stats(20)  # Top 20
+            print("\n" + "=" * 60)
+            print(" RUNTIME PROFILING RESULTS (Top 20 Cumulative Time)")
+            print("=" * 60)
+            print(s.getvalue())
+            print("=" * 60 + "\n")
+            os._exit(0)
+
+        threading.Timer(90.0, stop_profiling).start()
 
     # Initialize LLM early if needed for generation
     api_key = os.getenv("GOOGLE_API_KEY")
@@ -74,7 +106,7 @@ def main(argv=None):
             config.load_persona(new_persona)
             # State is saved inside generate_persona
         except Exception as e:
-            log.critical(f"Failed to generate persona: {e}")
+            log.critical(f"[Core] Failed to generate persona: {e}")
             exit(1)
 
     # Handle Logical Persona Loading (Order matters)
@@ -132,7 +164,7 @@ def main(argv=None):
 
     # Initialize DB and Core
     db = get_db_backend()
-    log.info(f"[*] Database: {db.get_connection_info()}")
+    log.info(f"[Core] Database: {db.get_connection_info()}")
 
     # Startup cleanup: deduplicate payloads
     try:
@@ -214,7 +246,7 @@ def main(argv=None):
 
     # Start SSH Server (Main Service)
     # We run SSH in a thread so we can start others too, or keep main thread for healthchecks
-    log.info(f"[*] Attempting to start SSH service on port {ssh_port}...")
+    log.info(f"[SSH] Attempting to start service on port {ssh_port}...")
     ssh_thread = threading.Thread(target=start_ssh_server, args=(ssh_port, db, llm))
     ssh_thread.daemon = True
     ssh_thread.start()
@@ -222,7 +254,7 @@ def main(argv=None):
     # Start Telnet Server (Optional)
     if str(os.getenv("FAUXSSH_ENABLE_TELNET", "true")).lower() == "true":
         t_port = int(os.getenv("FAUXSSH_TELNET_PORT", 2323))
-        log.info(f"[*] Attempting to start Telnet service on port {t_port}...")
+        log.info(f"[Telnet] Attempting to start service on port {t_port}...")
         start_telnet_server(t_port, db, llm)
 
     # Start Redis Server (Optional)
@@ -231,7 +263,7 @@ def main(argv=None):
         from ssh_honeypot.services.redis.server import start_redis_server
         from ssh_honeypot.core.utils import create_dual_stack_socket
 
-        log.info(f"[*] Attempting to start Redis service on port {r_port}...")
+        log.info(f"[Redis] Attempting to start service on port {r_port}...")
         redis_thread = threading.Thread(
             target=start_redis_server, args=(r_port, db, llm, bind_ip)
         )
@@ -264,12 +296,12 @@ def main(argv=None):
 
                     # We need to run the Start logic
                     loop.run_until_complete(handler.serve(port=port, sock=sock))
-                    log.info(f"[*] MySQL Service running on dual-stack port {port}")
+                    log.info(f"[MySQL] Service running on dual-stack port {port}")
                     loop.run_forever()
                 except Exception as ex:
                     log.critical(f"[!] MySQL Thread CRASHED: {ex}", exc_info=True)
 
-            log.info(f"[*] Attempting to start MySQL service on port {m_port}...")
+            log.info(f"[MySQL] Attempting to start service on port {m_port}...")
             mysql_thread = threading.Thread(
                 target=start_mysql_wrapper, args=(m_port, db, llm, config, bind_ip)
             )
@@ -298,7 +330,7 @@ def main(argv=None):
                 except Exception as ex:
                     log.critical(f"[!] MCP Thread CRASHED: {ex}", exc_info=True)
 
-            log.info(f"[*] Attempting to start MCP service on port {mcp_port}...")
+            log.info(f"[MCP] Attempting to start service on port {mcp_port}...")
             mcp_thread = threading.Thread(
                 target=start_mcp_wrapper, args=(mcp_port, db, llm, bind_ip)
             )
@@ -318,7 +350,7 @@ def main(argv=None):
         try:
             from ssh_honeypot.services.http_server.server import start_http_server
 
-            log.info(f"[*] Attempting to start HTTP service on port {h_port}...")
+            log.info(f"[HTTP] Attempting to start service on port {h_port}...")
             http_thread = threading.Thread(
                 target=start_http_server, args=(h_port, db, llm)
             )
@@ -329,7 +361,7 @@ def main(argv=None):
         except Exception as e:
             log.error(f"[!] HTTP Service Failed to Start: {e}")
 
-    log.info(f"[*] Honeypot services initialization complete.")
+    log.info(f"[Core] Honeypot services initialization complete.")
 
     # Keep Main Thread Alive
     try:

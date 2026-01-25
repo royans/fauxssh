@@ -45,4 +45,4 @@ class HeadCommand(BaseHandler):
             content = c
 
         lines = content.splitlines(keepends=True)
-        return "".join(lines[:num_lines]), {}, {"source": "local", "cached": False}
+        return "".join(lines[:num_lines]), {}, {"source": "handler", "cached": False}

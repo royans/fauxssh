@@ -42,7 +42,7 @@ class TestLSHandler:
         resp, _, meta = handler.handle_ls(cmd, context)
 
         assert "old_file.txt" in resp
-        assert meta["source"] == "local"
+        assert meta["source"] == "handler"
         handler.db.list_user_dir.assert_called()
 
     def test_ls_wildcard(self, handler):

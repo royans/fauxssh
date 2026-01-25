@@ -23,11 +23,7 @@ FAUXSSH_TELNET_PORT=2323
 FAUXSSH_ENABLE_REDIS=true
 FAUXSSH_REDIS_PORT=6379
 
-# Optional: MCP Control Plane (Default: On)
-FAUXSSH_ENABLE_MCP=true
-FAUXSSH_MCP_PORT=8000
-FAUXSSH_MCP_MAX_LLM_CALLS=20      # Limit LLM calls per session
-FAUXSSH_MCP_THROTTLE_DELAY=2.0    # Delay (sec) for throttling
+# Optional: Service Fallbacks
 
 # Optional: HTTP Honeypot (Default: On, Port 8080)
 FAUXSSH_ENABLE_HTTP=true

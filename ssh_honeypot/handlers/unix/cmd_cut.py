@@ -70,4 +70,8 @@ class CutCommand(BaseHandler):
             else:
                 output_lines.append(line)
 
-        return "\n".join(output_lines) + "\n", {}, {"source": "local", "cached": False}
+        return (
+            "\n".join(output_lines) + "\n",
+            {},
+            {"source": "handler", "cached": False},
+        )

@@ -5,6 +5,7 @@ from mysql_mimic.auth import NativePasswordAuthPlugin
 from ssh_honeypot.services.mysql.session import HoneyMySQLSession
 from ssh_honeypot.services.mysql.context import client_ip_ctx
 from ssh_honeypot.core.database import HoneyDB
+from ssh_honeypot.core.clogging import clogger
 
 log = logging.getLogger("ssh_honeypot")
 
@@ -85,18 +86,16 @@ class HoneyAuthPlugin(NativePasswordAuthPlugin):
                     log.info(f"[MySQL] Allow Any Triggered (Rate: {rate})")
 
         # Log Result
-        self.honey_db.log_auth_event(
-            client_ip=ip,
-            username=username,
-            auth_method="password",
-            auth_data=(
+        auth_data = {
+            "username": username,
+            "password": (
                 caught_cleartext if caught_cleartext else f"HASH:{password_repr[:8]}..."
             ),
-            success=is_valid,
-            client_version="unknown",
-            fingerprint="mysql",
-            protocol="mysql",
-        )
+            "success": is_valid,
+            "client_version": "unknown",
+            "fingerprint": "mysql",
+        }
+        clogger.log_event("auth", auth_data, ip=ip, protocol="mysql")
 
         log.info(f"[MySQL] Auth Result: {is_valid} (User: {username}, IP: {ip})")
 
@@ -180,8 +179,8 @@ class HoneyMySQLHandler(MysqlServer):
 
     async def serve(self, host="0.0.0.0", port=3306, sock=None):
         if sock:
-            log.info(f"[*] Starting MySQL Honeypot on pre-bound socket (port {port})")
+            log.info(f"[MySQL] Starting Honeypot on pre-bound socket (port {port})")
             await self.start_server(sock=sock)
         else:
-            log.info(f"[*] Starting MySQL Honeypot on {host}:{port}")
+            log.info(f"[MySQL] Starting Honeypot on {host}:{port}")
             await self.start_server(host=host, port=port)

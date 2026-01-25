@@ -24,7 +24,7 @@ class TestMissingHelper(unittest.TestCase):
             out, updates, meta = handler.process_command("enable", context)
 
             self.assertIn("% Error: System configuration issue", out)
-            self.assertEqual(meta["source"], "error")
+            self.assertEqual(meta["source"], "handler")
 
 
 if __name__ == "__main__":

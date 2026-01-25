@@ -53,4 +53,4 @@ class WCommand(BaseHandler):
             line = f"{user:<8} {tty:<8} {ip:<16} {login_at:<8} {idle:<6} {jcpu:<6} {pcpu:<6} {what}"
             output.append(line)
 
-        return "\n".join(output) + "\n", {}, {"source": "local", "cached": False}
+        return "\n".join(output) + "\n", {}, {"source": "handler", "cached": False}

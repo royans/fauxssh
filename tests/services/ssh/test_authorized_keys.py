@@ -11,13 +11,20 @@ from ssh_honeypot.services.ssh.server import HoneypotServer
 
 
 class TestAuthorizedKeys(unittest.TestCase):
+    @patch("ssh_honeypot.services.ssh.server.clogger")
     @patch("ssh_honeypot.services.ssh.server.db")
-    def test_authorized_keys_success(self, mock_db):
+    def test_authorized_keys_success(self, mock_db, mock_clogger):
         # Setup Server (mocking socket/transport)
         server = HoneypotServer("1.2.3.4")
         # server.client_ip = '1.2.3.4'  # Already set by init
         server.transport_ref = MagicMock()
         server.transport_ref.remote_version = "SSH-2.0-TestClient"
+        # Fix for JSON serialization error in clogger: ensure fingerprint attributes return strings, not mocks
+        server.transport_ref.remote_cipher = "aes128-ctr"
+        server.transport_ref.remote_mac = "hmac-sha2-256"
+        server.transport_ref.remote_compression = "none"
+        server.transport_ref.kex_alg = "diffie-hellman-group14-sha1"
+        server.transport_ref._latest_kex_init = None
 
         # Define Test Key
         # We need a valid paramiko PKey. RSA is easiest to mock or create.
@@ -50,15 +57,27 @@ class TestAuthorizedKeys(unittest.TestCase):
         self.assertEqual(server.username, username)
 
         # Check that proper logging happened with success=True
-        mock_db.log_auth_event.assert_called()
-        args = mock_db.log_auth_event.call_args[0]
-        self.assertEqual(args[1], username)
-        self.assertEqual(args[2], "publickey")
-        self.assertTrue(args[4])  # authorized=True
+        mock_clogger.log_event.assert_called()
+        args, kwargs = mock_clogger.log_event.call_args
+        event_type = args[0]
+        data = args[1]
+        self.assertEqual(event_type, "auth")
+        self.assertEqual(data["username"], username)
+        self.assertEqual(data["method"], "publickey")
+        self.assertTrue(data["success"])
 
+    @patch("ssh_honeypot.services.ssh.server.clogger")
     @patch("ssh_honeypot.services.ssh.server.db")
-    def test_authorized_keys_failure(self, mock_db):
+    def test_authorized_keys_failure(self, mock_db, mock_clogger):
         server = HoneypotServer("1.2.3.4")
+        server.transport_ref = MagicMock()
+        server.transport_ref.remote_version = "SSH-2.0-TestClient"
+        # Fix for JSON serialization error
+        server.transport_ref.remote_cipher = "aes128-ctr"
+        server.transport_ref.remote_mac = "hmac-sha2-256"
+        server.transport_ref.remote_compression = "none"
+        server.transport_ref.kex_alg = "diffie-hellman-group14-sha1"
+        server.transport_ref._latest_kex_init = None
 
         mock_key = MagicMock()
         mock_key.get_name.return_value = "ssh-rsa"
@@ -75,9 +94,10 @@ class TestAuthorizedKeys(unittest.TestCase):
 
         result = server.check_auth_publickey(username, mock_key)
         self.assertEqual(result, paramiko.AUTH_FAILED)
-        mock_db.log_auth_event.assert_called()
-        args = mock_db.log_auth_event.call_args[0]
-        self.assertFalse(args[4])  # authorized=False
+        mock_clogger.log_event.assert_called()
+        args, kwargs = mock_clogger.log_event.call_args
+        data = args[1]
+        self.assertFalse(data["success"])
 
     @patch("ssh_honeypot.services.ssh.server.db")
     def test_authorized_keys_no_file(self, mock_db):

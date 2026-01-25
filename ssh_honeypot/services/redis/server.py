@@ -9,7 +9,7 @@ import hashlib
 
 def handle_redis_client(client_sock, addr, db, llm):
     ip = addr[0]
-    log.info(f"[*] New Redis connection from {ip}")
+    log.info(f"[Redis] New connection from {ip}")
 
     session_id = os.urandom(8).hex()
     try:
@@ -90,7 +90,7 @@ def start_redis_server(port, db, llm, bind_ip="0.0.0.0"):
     try:
         server.bind((bind_ip, port))
         server.listen(5)
-        log.info(f"[*] Redis Honeypot listening on {bind_ip}:{port}")
+        log.info(f"[Redis] Listening on {bind_ip}:{port}")
 
         while True:
             client, addr = server.accept()

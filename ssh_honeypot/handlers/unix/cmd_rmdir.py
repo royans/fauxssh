@@ -10,7 +10,11 @@ class RmdirCommand(BaseHandler):
         """
         parts = cmd.split()
         if len(parts) < 2:
-            return "rmdir: missing operand\n", {}, {"source": "local", "cached": False}
+            return (
+                "rmdir: missing operand\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         target_path = parts[1]
         if target_path.startswith("-"):
@@ -20,7 +24,7 @@ class RmdirCommand(BaseHandler):
                 return (
                     "rmdir: flags not fully supported\n",
                     {},
-                    {"source": "local", "cached": False},
+                    {"source": "handler", "cached": False},
                 )
 
         cwd = context.get("cwd", "/")
@@ -36,7 +40,7 @@ class RmdirCommand(BaseHandler):
             return (
                 f"rmdir: failed to remove '{target_path}': Permission denied\n",
                 {},
-                {"source": "local", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         client_ip = context.get("client_ip")
@@ -46,7 +50,7 @@ class RmdirCommand(BaseHandler):
             return (
                 "Internal Error: DB not available\n",
                 {},
-                {"source": "local", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         # Check if exists and is dir
@@ -55,14 +59,14 @@ class RmdirCommand(BaseHandler):
             return (
                 f"rmdir: failed to remove '{target_path}': No such file or directory\n",
                 {},
-                {"source": "local", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         if curr.get("type") != "dir":
             return (
                 f"rmdir: failed to remove '{target_path}': Not a directory\n",
                 {},
-                {"source": "local", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         # Check if empty from user FS perspective
@@ -71,12 +75,12 @@ class RmdirCommand(BaseHandler):
             return (
                 f"rmdir: failed to remove '{target_path}': Directory not empty\n",
                 {},
-                {"source": "local", "cached": False},
+                {"source": "handler", "cached": False},
             )
 
         self.db.delete_user_file(client_ip, user, abs_path)
         return (
             "",
             {"file_modifications": [{"action": "delete", "path": abs_path}]},
-            {"source": "local", "cached": False},
+            {"source": "handler", "cached": False},
         )

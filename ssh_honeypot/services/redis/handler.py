@@ -2,7 +2,7 @@ import hashlib
 import json
 import time
 from ssh_honeypot.core.utils import random_response_delay
-from ssh_honeypot.core.event_logger import EventLogger
+from ssh_honeypot.core.clogging import clogger
 
 
 class RedisHandler:
@@ -33,15 +33,13 @@ class RedisHandler:
         response = self._handle_command_internal(command, client_ip)
 
         # Log Interaction
-        # Unified JSON Log
-        EventLogger().log_interaction(
-            session_id="redis-session",  # Redis is stateless in this handler context
+        interaction_data = {"cwd": "redis", "input": command, "response": str(response)}
+        clogger.log_event(
+            "interaction",
+            interaction_data,
+            session_id="redis-session",
             ip=client_ip,
-            input_cmd=command,
-            output_content=str(response),  # Convert bytes to str representation
             protocol="redis",
-            analysis=None,
-            user_agent=None,
         )
         return response
 

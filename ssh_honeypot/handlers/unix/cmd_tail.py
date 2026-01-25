@@ -42,5 +42,9 @@ class TailCommand(BaseHandler):
 
         lines = content.splitlines(keepends=True)
         if len(lines) > num_lines:
-            return "".join(lines[-num_lines:]), {}, {"source": "local", "cached": False}
-        return "".join(lines), {}, {"source": "local", "cached": False}
+            return (
+                "".join(lines[-num_lines:]),
+                {},
+                {"source": "handler", "cached": False},
+            )
+        return "".join(lines), {}, {"source": "handler", "cached": False}
