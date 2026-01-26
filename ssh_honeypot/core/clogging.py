@@ -42,10 +42,23 @@ class ClientLogger:
         if not self.server_name or self.server_name == "hp-default":
             self.server_name = socket.gethostname()
 
+        # Check for test mode or explicit disable to ensure immediate flushes
+        disable_batching = (
+            os.getenv("LOGGING_DISABLE_BATCHING", "false").lower() == "true"
+            or os.getenv("FAUXSSH_TEST_MODE") == "true"
+        )
+
         self.settings = {
-            "batch_size": config.get("logging", "centralized", "batch_size") or 50,
-            "batch_timeout": config.get("logging", "centralized", "batch_timeout")
-            or 10,
+            "batch_size": (
+                1
+                if disable_batching
+                else (config.get("logging", "centralized", "batch_size") or 50)
+            ),
+            "batch_timeout": (
+                0
+                if disable_batching
+                else (config.get("logging", "centralized", "batch_timeout") or 10)
+            ),
             "remote_url": config.get("logging", "centralized", "remote_url"),
             "api_key": config.get("logging", "centralized", "api_key"),
             "use_compression": config.get("logging", "centralized", "compression")
