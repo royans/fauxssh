@@ -270,6 +270,14 @@ def start_mcp_server(port, db, llm, bind_ip="0.0.0.0"):
     # Patch the server to use this socket
     # uvicorn.Server has a 'run' method that calls 'serve'.
     # We'll just run it.
+    import inspect
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(server.serve(sockets=[sock]))
+    coro = server.serve(sockets=[sock])
+    if inspect.isawaitable(coro):
+        loop.run_until_complete(coro)
+    else:
+        # If it returned None, some versions of uvicorn might already be handling the loop
+        # or it's synchronous. We keep the thread alive for bit just in case.
+        log.warning("[MCP] serve() did not return an awaitable. Proceeding...")

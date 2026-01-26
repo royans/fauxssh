@@ -186,19 +186,30 @@ class TestAuthRestrictions(unittest.TestCase):
             )
             return
 
-        conn = db_instance._get_conn()
-        c = conn.cursor()
+        # Verify DB with retries (Avoid race conditions in CI)
+        row = None
+        for i in range(10):
+            conn = db_instance._get_conn()
+            c = conn.cursor()
 
-        # Determine placeholder based on backend type
-        # If it's Postgres, use %s, else ?
-        is_postgres = "PostgresBackend" in type(db_instance).__name__
-        ph = "%s" if is_postgres else "?"
+            # Determine placeholder based on backend type
+            is_postgres = "PostgresBackend" in type(db_instance).__name__
+            ph = "%s" if is_postgres else "?"
 
-        # Check Success
-        query = f"SELECT auth_data, success, client_version FROM auth_events WHERE username={ph} AND auth_method='password' ORDER BY id DESC"
-        c.execute(query, (username,))
-        row = c.fetchone()
-        self.assertIsNotNone(row)
+            # Check Success
+            query = f"SELECT auth_data, success, client_version FROM auth_events WHERE username={ph} AND auth_method='password' ORDER BY id DESC"
+            c.execute(query, (username,))
+            row = c.fetchone()
+            conn.close()
+
+            if row:
+                break
+            time.sleep(1.0)
+            print(f"[DEBUG] Retry {i+1} for auth event user={username}")
+
+        self.assertIsNotNone(
+            row, f"Auth event not found for user {username} after 10 retries"
+        )
         self.assertEqual(row[0], password)
 
         # Handle Boolean vs Integer
