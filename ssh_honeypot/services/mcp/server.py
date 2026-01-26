@@ -280,4 +280,4 @@ def start_mcp_server(port, db, llm, bind_ip="0.0.0.0"):
     else:
         # If it returned None, some versions of uvicorn might already be handling the loop
         # or it's synchronous. We keep the thread alive for bit just in case.
-        log.warning("[MCP] serve() did not return an awaitable. Proceeding...")
+        core_log.warning("[MCP] serve() did not return an awaitable. Proceeding...")

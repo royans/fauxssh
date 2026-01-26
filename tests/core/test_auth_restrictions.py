@@ -188,6 +188,8 @@ class TestAuthRestrictions(unittest.TestCase):
 
         # Verify DB with retries (Avoid race conditions in CI)
         row = None
+        conn = None
+        c = None
         for i in range(10):
             conn = db_instance._get_conn()
             c = conn.cursor()
@@ -200,10 +202,11 @@ class TestAuthRestrictions(unittest.TestCase):
             query = f"SELECT auth_data, success, client_version FROM auth_events WHERE username={ph} AND auth_method='password' ORDER BY id DESC"
             c.execute(query, (username,))
             row = c.fetchone()
-            conn.close()
 
             if row:
                 break
+
+            conn.close()
             time.sleep(1.0)
             print(f"[DEBUG] Retry {i+1} for auth event user={username}")
 
