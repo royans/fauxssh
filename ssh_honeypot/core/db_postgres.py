@@ -601,12 +601,31 @@ class PostgresBackend(DatabaseBackend):
                     ),
                 )
             else:
+                # Ensure session exists (handle race condition where session record isn't committed yet)
+                cursor = conn.cursor()
                 cursor.execute(
-                    """
-                    INSERT INTO interactions 
-                    (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size) 
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
+                    "SELECT 1 FROM sessions WHERE session_id = %s", (session_id,)
+                )
+                if not cursor.fetchone():
+                    # Session not found? We might want to create a dummy session or retry
+                    # For now, let's retry once if it's likely a commit lag
+                    time.sleep(0.1)
+                    cursor.execute(
+                        "SELECT 1 FROM sessions WHERE session_id = %s", (session_id,)
+                    )
+                    if not cursor.fetchone():
+                        # Still not found? Log as debug and skip to avoid FK violation crash
+                        log.debug(
+                            f"[Postgres] Warning: Session {session_id} not found for interaction. Skipping interaction log."
+                        )
+                        return
+
+                query = """
+                    INSERT INTO interactions (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size, duration_ms, timestamp)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
+                cursor.execute(
+                    query,
                     (
                         session_id,
                         cwd,
@@ -617,11 +636,14 @@ class PostgresBackend(DatabaseBackend):
                         response_md5,
                         response_head,
                         response_size,
+                        duration_ms,
+                        created_at if created_at else datetime.now(),
                     ),
                 )
             conn.commit()
         except Exception as e:
             log.error(f"[Postgres] Error logging interaction: {e}")
+            conn.rollback()
         finally:
             conn.close()
 
@@ -1634,15 +1656,14 @@ class PostgresBackend(DatabaseBackend):
             "top_ssh_commands": [],
             "top_telnet_commands": [],
             "top_mysql_commands": [],
-            "top_http_commands": [],  # Added HTTP
+            "top_http_commands": [],
             "top_redis_commands": [],
             "top_mcp_commands": [],
             "top_passwords": [],
             "top_ssh_users": [],
             "top_ssh_risk": [],
             "total_payloads": 0,
-            "protocol_activity": {},  # For sorting in UI
-            "multi_window": {},  # Added for 24H, 48H, 1W, 2W
+            "protocol_activity": {},
         }
         try:
             cursor = conn.cursor()
@@ -1663,14 +1684,15 @@ class PostgresBackend(DatabaseBackend):
                 placeholders = ",".join(["%s" for _ in ignore_ips])
                 interaction_ip_filter = f"AND s.remote_ip NOT IN ({placeholders})"
 
-            # --- TOTALS & TRENDS ---
+            # Helper for metrics
             def get_window_stats(start_expr, end_expr=None):
                 e_part = f" AND start_time <= {end_expr}" if end_expr else ""
                 cursor.execute(
                     f"SELECT COUNT(DISTINCT remote_ip), COUNT(*) FROM sessions WHERE start_time > {start_expr} {e_part} {ip_filter}",
                     params,
                 )
-                ips, sessions = cursor.fetchone()
+                row = cursor.fetchone()
+                ips, sessions = (row[0] or 0, row[1] or 0) if row else (0, 0)
 
                 ei_part = f" AND i.timestamp <= {end_expr}" if end_expr else ""
                 cursor.execute(
@@ -1681,9 +1703,9 @@ class PostgresBackend(DatabaseBackend):
                 """,
                     params,
                 )
-                commands = cursor.fetchone()[0] or 0
+                row = cursor.fetchone()
+                commands = row[0] if row and row[0] is not None else 0
 
-                # Count unique networks (ORGs)
                 cursor.execute(
                     f"""
                     SELECT COUNT(DISTINCT intel.org) 
@@ -1693,27 +1715,17 @@ class PostgresBackend(DatabaseBackend):
                 """,
                     params,
                 )
-                networks = cursor.fetchone()[0] or 0
+                row = cursor.fetchone()
+                networks = row[0] if row and row[0] is not None else 0
 
                 return {
-                    "ips": ips or 0,
-                    "sessions": sessions or 0,
+                    "ips": ips,
+                    "sessions": sessions,
                     "commands": commands,
                     "networks": networks,
                 }
 
-            # Multi-window Metrics (Task 3)
-            windows = {"24H": 24, "48H": 48, "1W": 168, "2W": 336}
-            for label, h in windows.items():
-                w_filter = f"NOW() - INTERVAL '{h} hours'"
-                w_stats = get_window_stats(w_filter)
-                stats["multi_window"][label] = {
-                    "ips": w_stats["ips"],
-                    "networks": w_stats["networks"],
-                    "interactions": w_stats["commands"],
-                    "sessions": w_stats["sessions"],
-                }
-
+            # Current window totals
             current_window = get_window_stats(time_filter)
             prev_window = get_window_stats(prev_time_filter, time_filter)
 
@@ -1732,7 +1744,8 @@ class PostgresBackend(DatabaseBackend):
             # Total Payloads
             query = f"SELECT COUNT(*) FROM malicious_payloads WHERE timestamp > {time_filter}"
             cursor.execute(query)
-            stats["total_payloads"] = cursor.fetchone()[0] or 0
+            row = cursor.fetchone()
+            stats["total_payloads"] = row[0] if row and row[0] is not None else 0
 
             # --- PROTOCOL DISTRIBUTION ---
             query = f"""
@@ -1745,11 +1758,12 @@ class PostgresBackend(DatabaseBackend):
             """
             cursor.execute(query, params)
             for r in cursor.fetchall():
-                proto = r[0]
-                stats["service_dist"].append(
-                    {"protocol": proto, "sessions": r[1], "commands": r[2]}
-                )
-                stats["protocol_activity"][proto] = r[2]
+                if len(r) >= 3:
+                    proto = r[0]
+                    stats["service_dist"].append(
+                        {"protocol": proto, "sessions": r[1], "commands": r[2]}
+                    )
+                    stats["protocol_activity"][proto] = r[2]
 
             # --- TOP TABLES ---
 
@@ -1795,6 +1809,7 @@ class PostgresBackend(DatabaseBackend):
             stats["top_ssh_users"] = [
                 {"username": r[0], "count": r[1], "ips": r[2]}
                 for r in cursor.fetchall()
+                if len(r) >= 3
             ]
 
             # Top Passwords
@@ -1809,12 +1824,14 @@ class PostgresBackend(DatabaseBackend):
             stats["top_passwords"] = [
                 {"password": r[0], "count": r[1], "ips": r[2]}
                 for r in cursor.fetchall()
+                if len(r) >= 3
             ]
 
             # Generic Top Command Fetcher
             def get_top_commands(proto, limit=50):
                 q = f"""
-                    SELECT i.command, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips
+                    SELECT i.command, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips,
+                           SUBSTRING(MAX(i.response) FROM 1 FOR 1000) as sample_response
                     FROM interactions i
                     JOIN sessions s ON i.session_id = s.session_id
                     WHERE i.timestamp > {time_filter} AND s.protocol = %s {interaction_ip_filter}
@@ -1822,10 +1839,27 @@ class PostgresBackend(DatabaseBackend):
                     ORDER BY unique_ips DESC, count DESC LIMIT %s
                 """
                 cursor.execute(q, [proto] + params + [limit])
-                return [
-                    {"command": r[0], "count": r[1], "ips": r[2]}
-                    for r in cursor.fetchall()
-                ]
+                res = []
+                for r in cursor.fetchall():
+                    if len(r) >= 4:
+                        res.append(
+                            {
+                                "command": r[0],
+                                "count": r[1],
+                                "ips": r[2],
+                                "response": r[3],
+                            }
+                        )
+                    elif len(r) >= 3:
+                        res.append(
+                            {
+                                "command": r[0],
+                                "count": r[1],
+                                "ips": r[2],
+                                "response": "",
+                            }
+                        )
+                return res
 
             stats["top_ssh_commands"] = get_top_commands("ssh")
             stats["top_telnet_commands"] = get_top_commands("telnet")
@@ -1834,10 +1868,9 @@ class PostgresBackend(DatabaseBackend):
             stats["top_redis_commands"] = get_top_commands("redis")
             stats["top_mcp_commands"] = get_top_commands("mcp")
 
-            # Top SSH Commands by Risk (Freq and unique IP counts)
-            # Improved sorting: Risk first, then unique IPs, then total count
             query = f"""
-                SELECT i.command, COALESCE(MAX(ca.risk_score), 0) as max_risk, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips
+                SELECT i.command, COALESCE(MAX(ca.risk_score), 0) as max_risk, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips,
+                       SUBSTRING(MAX(i.response) FROM 1 FOR 1000) as sample_response
                 FROM interactions i
                 JOIN sessions s ON i.session_id = s.session_id
                 JOIN command_analysis ca ON i.request_md5 = ca.command_hash
@@ -1847,10 +1880,18 @@ class PostgresBackend(DatabaseBackend):
                 LIMIT 50
             """
             cursor.execute(query, params)
-            stats["top_ssh_risk"] = [
-                {"command": r[0], "risk": r[1], "count": r[2], "ips": r[3]}
-                for r in cursor.fetchall()
-            ]
+            stats["top_ssh_risk"] = []
+            for r in cursor.fetchall():
+                if len(r) >= 5:
+                    stats["top_ssh_risk"].append(
+                        {
+                            "command": r[0],
+                            "risk": r[1],
+                            "count": r[2],
+                            "ips": r[3],
+                            "response": r[4],
+                        }
+                    )
 
             # Recent Unique Commands
             query = f"""
@@ -1862,7 +1903,9 @@ class PostgresBackend(DatabaseBackend):
                 ORDER BY MAX(i.timestamp) DESC LIMIT 20
             """
             cursor.execute(query, params)
-            stats["recent_unique_commands"] = [r[0] for r in cursor.fetchall()]
+            stats["recent_unique_commands"] = [
+                r[0] for r in cursor.fetchall() if len(r) >= 1
+            ]
 
             # Manual vs Bot
             query = f"""
@@ -1879,7 +1922,7 @@ class PostgresBackend(DatabaseBackend):
             """
             cursor.execute(query, params)
             row = cursor.fetchone()
-            if row:
+            if row and len(row) >= 2:
                 stats["manual_vs_bot"] = {
                     "manual": int(row[0] or 0),
                     "bot": int(row[1] or 0),
@@ -1894,7 +1937,9 @@ class PostgresBackend(DatabaseBackend):
                 ORDER BY count DESC LIMIT 50
             """
             cursor.execute(query, params)
-            stats["top_ips"] = [{"ip": r[0], "count": r[1]} for r in cursor.fetchall()]
+            stats["top_ips"] = [
+                {"ip": r[0], "count": r[1]} for r in cursor.fetchall() if len(r) >= 2
+            ]
 
         except Exception as e:
             log.error(f"[Postgres] Error fetching infographic stats: {e}")
@@ -1914,14 +1959,44 @@ class PostgresBackend(DatabaseBackend):
                 cursor.execute(
                     f"SELECT COUNT(*) FROM sessions WHERE start_time > {day_start} AND start_time <= {day_end}"
                 )
-                count = cursor.fetchone()[0] or 0
+                row_c = cursor.fetchone()
+                count = row_c[0] if row_c else 0
 
                 # Get label like 'Jan 21'
                 cursor.execute(f"SELECT TO_CHAR(NOW() - INTERVAL '{i} days', 'Mon DD')")
-                label = cursor.fetchone()[0]
+                row_label = cursor.fetchone()
+                label = row_label[0] if row_label else f"Day-{i}"
                 res.append({"label": label, "count": count})
         except Exception as e:
             log.error(f"[Postgres] Error fetching daily session counts: {e}")
+        finally:
+            conn.close()
+        return res
+
+    def get_hourly_session_counts(self, hours=24):
+        """Returns session counts for each of the last X hours (Postgres)."""
+        conn = self._get_conn()
+        res = []
+        try:
+            cursor = conn.cursor()
+            for i in range(hours - 1, -1, -1):
+                hour_start = f"NOW() - INTERVAL '{i+1} hours'"
+                hour_end = f"NOW() - INTERVAL '{i} hours'"
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM sessions WHERE start_time > {hour_start} AND start_time <= {hour_end}"
+                )
+                row_c = cursor.fetchone()
+                count = row_c[0] if row_c else 0
+
+                # Get label like '14:00'
+                cursor.execute(
+                    f"SELECT TO_CHAR(NOW() - INTERVAL '{i} hours', 'HH24:MI')"
+                )
+                row_label = cursor.fetchone()
+                label = row_label[0] if row_label else f"H-{i}"
+                res.append({"label": label, "count": count})
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching hourly session counts: {e}")
         finally:
             conn.close()
         return res

@@ -8,6 +8,7 @@ import logging
 from datetime import datetime
 from ssh_honeypot.core.config import config
 from ssh_honeypot.core.logging_setup import log
+from ssh_honeypot.core.utils import sanitize_obj
 from ssh_honeypot.core.event_logger import EventLogger
 
 
@@ -59,7 +60,7 @@ class ClientLogger:
             "session_id": session_id,
             "protocol": protocol,
             "type": event_type,
-            "data": data,
+            "data": sanitize_obj(data),
             "remote_ip": ip,
         }
 
@@ -81,10 +82,14 @@ class ClientLogger:
         if buffer_len >= self.batch_size:
             self.flush()
 
-    def flush(self):
+    def flush(self, force=False):
         """Triggers a manual flush of the buffer."""
         with self._lock:
+            if not self._buffer and not force:
+                self._last_flush = time.time()  # Reset timer anyway
+                return
             if not self._buffer:
+                self._last_flush = time.time()
                 return
             batch = list(self._buffer)
             self._buffer = []
@@ -94,6 +99,8 @@ class ClientLogger:
 
     def _dispatch(self, batch):
         """Sends the batch to its destination."""
+        if not batch:
+            return
         if self.log_mode in ("local", "both"):
             # Call slogging directly
             try:
@@ -123,6 +130,7 @@ class ClientLogger:
         """Background thread to flush based on timeout."""
         while not self._shutdown:
             time.sleep(1)
+            # Only flush if timeout reached
             if time.time() - self._last_flush >= self.batch_timeout:
                 self.flush()
 

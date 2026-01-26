@@ -102,7 +102,7 @@ def run_session_analysis_batch(db_instance, llm_instance):
 
 
 def run_stats_generation_job(db_instance):
-    """Generates infographic data and saves to JSON."""
+    """Generates composite infographic data across multiple windows and resolutions."""
     try:
         if not config.get("http", "showstats"):
             return
@@ -110,19 +110,21 @@ def run_stats_generation_job(db_instance):
         from ssh_honeypot.core.utils import get_ignored_ips
 
         ignore_ips = get_ignored_ips()
-        stats = db_instance.get_infographic_stats(hours=24, ignore_ips=ignore_ips)
-        stats["daily_trends"] = db_instance.get_daily_session_counts(days=7)
-        stats["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Write to web_root/status_data.json
-        web_root = config.get("http", "web_root") or "/var/www/html"
+        # Fetch full stats for 1H, 1D, 1W
+        stats_1h = db_instance.get_infographic_stats(hours=1, ignore_ips=ignore_ips)
+        stats_1d = db_instance.get_infographic_stats(hours=24, ignore_ips=ignore_ips)
+        stats_1w = db_instance.get_infographic_stats(hours=168, ignore_ips=ignore_ips)
 
-        # Ensure directory exists (local path vs VFS path is usually same if deployed)
-        # But for the honeypot, we might want to store it in a dedicated data dir if not real FS.
-        # However, the HTTP server reads from DB (VFS) or LOCAL.
-        # The user said: "/status_data.json should load the json file which is updated on an hourly basis"
-        # I will store it in a place where the HTTP server can serve it.
-        # If I use a Local Handler in server.py, I can just store it in the project root or data dir.
+        composite = {
+            "windows": {"1H": stats_1h, "1D": stats_1d, "1W": stats_1w},
+            "graphs": {
+                "hourly_24h": db_instance.get_hourly_session_counts(hours=24),
+                "daily_7d": db_instance.get_daily_session_counts(days=7),
+                "daily_21d": db_instance.get_daily_session_counts(days=21),
+            },
+            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
         from ssh_honeypot.core.utils import PROJECT_ROOT
 
@@ -130,9 +132,9 @@ def run_stats_generation_job(db_instance):
         os.makedirs(os.path.dirname(data_path), exist_ok=True)
 
         with open(data_path, "w") as f:
-            json.dump(stats, f, indent=2)
+            json.dump(composite, f, indent=2)
 
-        log.info(f"[StatsJob] Generated stats infographic data in {data_path}")
+        log.info(f"[StatsJob] Generated multi-window stats in {data_path}")
     except Exception as e:
         log.error(f"[StatsJob] Error: {e}")
 

@@ -33,8 +33,27 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
         return self.client_address[0]
 
     def log_message(self, format, *args):
-        # Override to use our central logger instead of stderr
-        log.info(f"[HTTP] {self.get_client_ip()} - {format%args}")
+        try:
+            # Sanitize args to prevent binary data from messing up logs
+            cleaned_args = []
+            for arg in args:
+                if isinstance(arg, str):
+                    # Replace non-printable characters or high-bytes
+                    cleaned_args.append(
+                        "".join(
+                            c if (32 <= ord(c) <= 126) else f"\\x{ord(c):02x}"
+                            for c in arg
+                        )
+                    )
+                else:
+                    cleaned_args.append(arg)
+            log.info(f"[HTTP] {self.get_client_ip()} - {format % tuple(cleaned_args)}")
+        except Exception:
+            # Fallback if formatting fails (e.g. malformed format string from http.server)
+            try:
+                log.info(f"[HTTP] {self.get_client_ip()} - {format} {args}")
+            except:
+                pass
 
     def do_GET(self):
         self.handle_honey_request("GET")
@@ -93,8 +112,16 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
         self.close_connection = True
         client_ip = self.get_client_ip()
 
-        # 0. DoS Protection (Silent Drop)
+        # 0. DoS Protection
         if not dos_protector.is_allowed(client_ip, "HTTP"):
+            try:
+                self.send_response(429)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(b"Too Many Requests")
+            except:
+                pass
             return
 
         # 0.5 Local Handlers (Stats Infographic)

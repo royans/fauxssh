@@ -49,8 +49,11 @@ ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --foreground|-f|--help|-h|--create-persona)
+        --foreground|-f)
             FOREGROUND=true
+            shift
+            ;;
+        --help|-h|--create-persona)
             ARGS+=("$1")
             shift
             ;;

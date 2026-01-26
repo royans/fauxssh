@@ -425,10 +425,11 @@ def handle_telnet_session(client_sock, addr, db, llm):
                             "honeypot_ip": "192.168.1.55",
                             "llm_call_count": llm_call_count,
                             "file_list": [
-                                os.path.basename(x["path"])
-                                for x in db.list_user_dir(ip, user, cwd)
+                                os.path.basename(x.get("path", ""))
+                                for x in db.list_user_dir(ip, user, cwd or "/")
+                                if x and x.get("path")
                             ],
-                            "known_paths": list(vfs.keys()),
+                            "known_paths": list(vfs.keys()) if vfs else ["/"],
                             "prompt": prompt,
                             "protocol": "telnet",
                             "session_id": session_id,

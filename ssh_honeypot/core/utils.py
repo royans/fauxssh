@@ -112,6 +112,46 @@ def random_response_delay(min_seconds=0.1, max_seconds=0.5):
     time.sleep(random.uniform(min_seconds, max_seconds))
 
 
+def sanitize_path(text):
+    """
+    Masks absolute paths containing the data directory or project root
+    with placeholders to prevent internal structure leakage.
+    Works dynamically regardless of where the app is deployed.
+    """
+    if not text or not isinstance(text, str):
+        return text
+
+    data_dir = get_data_dir()
+    # Mask Data Dir (Priority, as it's most sensitive)
+    if data_dir in text:
+        text = text.replace(data_dir, "<DATA_DIR>")
+
+    # Mask Project Root
+    if PROJECT_ROOT in text:
+        text = text.replace(PROJECT_ROOT, "<ROOT>")
+
+    # Optional: Mask home directoy if still present (e.g. /home/royans)
+    home_dir = os.path.expanduser("~")
+    if home_dir and len(home_dir) > 5 and home_dir in text:
+        text = text.replace(home_dir, "<HOME>")
+
+    return text
+
+
+def sanitize_obj(obj):
+    """
+    Recursively scans a dict or list and sanitizes all string values
+    using sanitize_path.
+    """
+    if isinstance(obj, str):
+        return sanitize_path(obj)
+    if isinstance(obj, list):
+        return [sanitize_obj(i) for i in obj]
+    if isinstance(obj, dict):
+        return {k: sanitize_obj(v) for k, v in obj.items()}
+    return obj
+
+
 def create_dual_stack_socket(bind_ip, port, backlog=64):
     """
     Creates and binds a socket that supports dual-stack (IPv4+IPv6) if bind_ip is '::'.

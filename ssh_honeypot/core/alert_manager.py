@@ -94,7 +94,7 @@ class AlertManager:
         # We might need to extend WebhookNotifier or abuse send_alert.
         # Let's inspect WebhookNotifier. Assuming send_alert(session_id, ip, explanation, risk)
         # We can pass "SYSTEM" as session_id.
-        self.notifier.send_alert("SYSTEM", ip, f"DoS Ban: {reason} ({duration}s)", 100)
+        self.notifier.send_alert("SYSTEM", ip, f"DoS Ban: {reason} ({duration}s)", 50)
 
     def reload_config(self):
         """Reloads config from manager (useful if .env changes dynamically, though unlikely)"""

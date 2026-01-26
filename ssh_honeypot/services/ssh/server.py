@@ -16,7 +16,6 @@ from ssh_honeypot.core.session_analyzer import analyze_session
 from ssh_honeypot.core.config import config, get_data_dir
 from ssh_honeypot.services.ssh.sftp import HoneySFTPServer
 from ssh_honeypot.core.alert_manager import AlertManager
-from ssh_honeypot.core.session_logger import SessionLogger
 from ssh_honeypot.core.logging_setup import log
 from ssh_honeypot.core.persona_validator import validate_active_persona
 from ssh_honeypot.core.clogging import clogger
@@ -311,7 +310,7 @@ def latency_jitter():
 
 
 # Handlers needed for loop
-def handle_tab_completion(chan, command_buffer, vfs, cwd, prompt, logger):
+def handle_tab_completion(chan, command_buffer, vfs, cwd, prompt):
     parts = command_buffer.split()
     if not parts and not command_buffer:
         prefix = ""
@@ -332,33 +331,21 @@ def handle_tab_completion(chan, command_buffer, vfs, cwd, prompt, logger):
         remainder = match[len(prefix) :]
         command_buffer += remainder
         chan.send(remainder)
-        if logger:
-            logger.log_event("o", remainder)
         return command_buffer
 
     elif len(candidates) > 1:
         chan.send(b"\r\n")
-        if logger:
-            logger.log_event("o", "\r\n")
         output_list = "  ".join(candidates)
         chan.send(output_list.encode("utf-8"))
-        if logger:
-            logger.log_event("o", output_list)
         chan.send(b"\r\n")
-        if logger:
-            logger.log_event("o", "\r\n")
         chan.send(prompt)
-        if logger:
-            logger.log_event("o", prompt)
         chan.send(command_buffer.encode("utf-8"))
-        if logger:
-            logger.log_event("o", command_buffer)
         return command_buffer
 
     return command_buffer
 
 
-def stream_output(chan, text, logger=None):
+def stream_output(chan, text):
     """
     Simulates realistic terminal output by streaming lines with micro-delays.
     """
@@ -368,8 +355,6 @@ def stream_output(chan, text, logger=None):
     # Heuristic: If short, dump immediately
     if len(text) < 500 and text.count("\r\n") < 10:
         chan.send(text)
-        if logger:
-            logger.log_event("o", text)
         return
 
     # Long output: Stream line by line (or chunk by chunk)
@@ -389,8 +374,6 @@ def stream_output(chan, text, logger=None):
         # Send
         try:
             chan.send(chunk)
-            if logger:
-                logger.log_event("o", chunk)
         except:
             break
 
@@ -668,39 +651,23 @@ def _handle_connection_logic(client, addr, db, llm):
     command_buffer = ""
     env = {}
 
-    logger = None
-    try:
-        if config.get("logging", "enable_session_replay"):
-            logger = SessionLogger(session_id, user, ip)
-            log.info(f"[SSH] Session recording started: {session_id}.cast")
-    except Exception as e:
-        log.error(f"[SSH] Failed to start session logger: {e}")
-
     try:
         while True:
             char = chan.recv(1)
-            if logger and char:
-                logger.log_event("i", char)
 
             if not char:
                 break
 
             if char == b"\x03":  # Ctrl+C
                 chan.send(b"^C\r\n")
-                if logger:
-                    logger.log_event("o", "^C\r\n")
                 command_buffer = ""
                 history_cursor = len(history)
                 chan.send(prompt)
-                if logger:
-                    logger.log_event("o", prompt)
 
             elif char == b"\r" or char == b"\n":
                 if char == b"\n" and command_buffer == "":
                     continue
                 chan.send(b"\r\n")
-                if logger:
-                    logger.log_event("o", "\r\n")
                 cmd = command_buffer.strip()
                 command_buffer = ""
                 history_cursor = len(history)
@@ -796,12 +763,10 @@ def _handle_connection_logic(client, addr, db, llm):
                     latency_jitter()
 
                     # Stream Output (Typing Effect)
-                    stream_output(chan, fmt_resp, logger)
+                    stream_output(chan, fmt_resp)
 
                     if fmt_resp and not fmt_resp.endswith("\r\n"):
                         chan.send(b"\r\n")
-                        if logger:
-                            logger.log_event("o", "\r\n")
 
                     interaction_data = {
                         "cwd": cwd,
@@ -832,8 +797,6 @@ def _handle_connection_logic(client, addr, db, llm):
                     prompt_symbol = "$"
                 prompt = f"{user}@{hostname}:{cwd}{prompt_symbol} "
                 chan.send(prompt)
-                if logger:
-                    logger.log_event("o", prompt)
                 history_cursor = len(history)
 
             elif char == b"\x08" or char == b"\x7f":
@@ -870,7 +833,7 @@ def _handle_connection_logic(client, addr, db, llm):
 
             elif char == b"\t":
                 command_buffer = handle_tab_completion(
-                    chan, command_buffer, vfs, cwd, prompt, logger
+                    chan, command_buffer, vfs, cwd, prompt
                 )
 
             else:
@@ -893,8 +856,6 @@ def _handle_connection_logic(client, addr, db, llm):
             log.error(f"Analysis Error: {e}")
 
         db.end_session(session_id)
-        if logger:
-            logger.close()
         transport.close()
 
 

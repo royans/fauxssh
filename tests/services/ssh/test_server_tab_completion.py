@@ -20,7 +20,7 @@ class TestTabCompletion(unittest.TestCase):
         prompt = "$ "
 
         # Action
-        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
+        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt)
 
         # Assert: No change, no sends
         self.assertEqual(new_buffer, "testfile")
@@ -35,7 +35,7 @@ class TestTabCompletion(unittest.TestCase):
         prompt = "$ "
 
         # Action
-        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
+        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt)
 
         # Assert: Completed to "system.log"
         self.assertEqual(new_buffer, "system.log")
@@ -51,7 +51,7 @@ class TestTabCompletion(unittest.TestCase):
         prompt = "$ "
 
         # Action
-        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
+        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt)
 
         # Assert: Completed last word
         self.assertEqual(new_buffer, "ls system.log")
@@ -66,7 +66,7 @@ class TestTabCompletion(unittest.TestCase):
         prompt = "$ "
 
         # Action
-        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
+        new_buffer = handle_tab_completion(chan, buffer, vfs, cwd, prompt)
 
         # Assert: Buffer unchanged
         self.assertEqual(new_buffer, "te")
@@ -88,7 +88,7 @@ class TestTabCompletion(unittest.TestCase):
         cwd = "/"
         prompt = "$ "
 
-        handle_tab_completion(chan, buffer, vfs, cwd, prompt, None)
+        handle_tab_completion(chan, buffer, vfs, cwd, prompt)
 
         # Expect listing of 'a  b'
         calls = [c[0][0] for c in chan.send.call_args_list]

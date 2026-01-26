@@ -9,10 +9,12 @@ try:
     from .db_interface import DatabaseBackend
     from .logging_setup import log
     from .config import get_data_dir
+    from .utils import sanitize_path
 except ImportError:
     from db_interface import DatabaseBackend
     from ssh_honeypot.core.logging_setup import log
     from config_manager import get_data_dir
+    from ssh_honeypot.core.utils import sanitize_path
 
 try:
     from .cache import cache
@@ -696,6 +698,10 @@ class SQLiteBackend(DatabaseBackend):
                     response_head = str(response)[:100]
                 except:
                     pass
+
+        # Global Sanitization: Mask internal paths
+        command = sanitize_path(command)
+        response = sanitize_path(response)
 
         conn = self._get_conn()
         try:
@@ -1892,7 +1898,8 @@ class SQLiteBackend(DatabaseBackend):
             # Generic Top Command Fetcher
             def get_top_commands(proto, limit=50):
                 q = f"""
-                    SELECT i.command, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips
+                    SELECT i.command, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips,
+                           SUBSTR(MAX(i.response), 1, 1000) as sample_response
                     FROM interactions i
                     JOIN sessions s ON i.session_id = s.session_id
                     WHERE i.timestamp > {time_filter} AND s.protocol = ? {interaction_ip_filter}
@@ -1901,7 +1908,8 @@ class SQLiteBackend(DatabaseBackend):
                 """
                 c.execute(q, [proto] + params + [limit])
                 return [
-                    {"command": r[0], "count": r[1], "ips": r[2]} for r in c.fetchall()
+                    {"command": r[0], "count": r[1], "ips": r[2], "response": r[3]}
+                    for r in c.fetchall()
                 ]
 
             stats["top_ssh_commands"] = get_top_commands("ssh")
@@ -1914,7 +1922,8 @@ class SQLiteBackend(DatabaseBackend):
             # Top SSH Commands by Risk (Freq and unique IP counts)
             # Improved sorting: Risk first, then unique IPs, then total count
             query = f"""
-                SELECT i.command, COALESCE(MAX(ca.risk_score), 0) as max_risk, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips
+                SELECT i.command, COALESCE(MAX(ca.risk_score), 0) as max_risk, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips,
+                       SUBSTR(MAX(i.response), 1, 1000) as sample_response
                 FROM interactions i
                 JOIN sessions s ON i.session_id = s.session_id
                 JOIN command_analysis ca ON i.request_md5 = ca.command_hash
@@ -1925,7 +1934,13 @@ class SQLiteBackend(DatabaseBackend):
             """
             c.execute(query, params)
             stats["top_ssh_risk"] = [
-                {"command": r[0], "risk": r[1], "count": r[2], "ips": r[3]}
+                {
+                    "command": r[0],
+                    "risk": r[1],
+                    "count": r[2],
+                    "ips": r[3],
+                    "response": r[4],
+                }
                 for r in c.fetchall()
             ]
 
@@ -1995,6 +2010,30 @@ class SQLiteBackend(DatabaseBackend):
                 res.append({"label": label, "count": count})
         except Exception as e:
             log.error(f"[SQLite] Error fetching daily session counts: {e}")
+        finally:
+            conn.close()
+        return res
+
+    def get_hourly_session_counts(self, hours=24):
+        """Returns session counts for each of the last X hours."""
+        conn = self._get_conn()
+        res = []
+        try:
+            c = conn.cursor()
+            for i in range(hours - 1, -1, -1):
+                hour_start = f"datetime('now', '-{i+1} hours')"
+                hour_end = f"datetime('now', '-{i} hours')"
+                c.execute(
+                    f"SELECT COUNT(*) FROM sessions WHERE start_time > {hour_start} AND start_time <= {hour_end}"
+                )
+                count = c.fetchone()[0] or 0
+
+                # Get label like '14:00'
+                c.execute(f"SELECT strftime('%H:%M', 'now', '-{i} hours')")
+                label = c.fetchone()[0]
+                res.append({"label": label, "count": count})
+        except Exception as e:
+            log.error(f"[SQLite] Error fetching hourly session counts: {e}")
         finally:
             conn.close()
         return res
@@ -2637,6 +2676,9 @@ class SQLiteBackend(DatabaseBackend):
             ts = timestamp or datetime.datetime.now()
             cursor = conn.cursor()
 
+            # Global Sanitization
+            url = sanitize_path(url)
+
             # 1. Insert/Get Payload ID
             cursor.execute(
                 """
@@ -2686,7 +2728,7 @@ class SQLiteBackend(DatabaseBackend):
             # We must include status='pending' to match single-insert behavior if needed
             payload_data = [
                 (
-                    p["url"],
+                    sanitize_path(p["url"]),
                     p["url_hash"],
                     p["session_id"],
                     p["ip"],
@@ -2829,7 +2871,7 @@ class SQLiteBackend(DatabaseBackend):
                 params.append(payload_size)
             if file_path:
                 sql += ", file_path = ?"
-                params.append(file_path)
+                params.append(sanitize_path(file_path))
             if error:
                 sql += ", error_message = ?"
                 params.append(error)

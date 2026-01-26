@@ -1,25 +1,40 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FauxSSH | Threat Intelligence Dashboard</title>
+    <title>FauxSSH | Threat Intelligence</title>
     <link
-        href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Inter:wght@300;400;600&display=swap"
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&family=JetBrains+Mono:wght@400;500&display=swap"
         rel="stylesheet">
     <style>
         :root {
-            --bg-deep: #05070a;
-            --bg-card: rgba(255, 255, 255, 0.04);
-            --accent: #00f2ff;
-            --accent-muted: #008c95;
-            --text-primary: #e0e0e0;
-            --text-secondary: #88889a;
-            --border: rgba(255, 255, 255, 0.08);
-            --risk-high: #ff3e3e;
-            --risk-mid: #ff9f43;
-            --risk-low: #1dd1a1;
+            /* Dark Theme (Default) */
+            --bg-page: #0b0e14;
+            --bg-card: #161b22;
+            --bg-nav: #161b22;
+            --text-main: #e6edf3;
+            --text-dim: #8b949e;
+            --accent: #2f81f7;
+            --accent-glow: rgba(47, 129, 247, 0.15);
+            --border: #30363d;
+            --risk-high: #f85149;
+            --risk-mid: #d29922;
+            --risk-low: #3fb950;
+            --shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+        }
+
+        [data-theme="light"] {
+            --bg-page: #f6f8fa;
+            --bg-card: #ffffff;
+            --bg-nav: #ffffff;
+            --text-main: #1f2328;
+            --text-dim: #636c76;
+            --accent: #0969da;
+            --accent-glow: rgba(9, 105, 218, 0.1);
+            --border: #d0d7de;
+            --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
         }
 
         * {
@@ -29,735 +44,938 @@
         }
 
         body {
-            background-color: var(--bg-deep);
-            color: var(--text-primary);
-            font-family: 'Inter', sans-serif;
-            padding: 10px;
-            font-size: 13px;
-            background-image:
-                radial-gradient(circle at 0% 0%, rgba(0, 242, 255, 0.03) 0%, transparent 50%),
-                radial-gradient(circle at 100% 100%, rgba(112, 0, 255, 0.03) 0%, transparent 50%);
+            background-color: var(--bg-page);
+            color: var(--text-main);
+            font-family: 'Outfit', sans-serif;
+            font-size: 14px;
+            line-height: 1.5;
+            transition: background-color 0.3s, color 0.3s;
             min-height: 100vh;
-            display: flex;
-            flex-direction: column;
         }
 
-        /* --- Header --- */
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 10px;
-            padding: 0 10px;
+        /* --- Layout Container --- */
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 0 20px 40px;
         }
 
-        .title-group h1 {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 1.2rem;
-            color: var(--accent);
-            letter-spacing: 1px;
+        /* --- Navigation Bar --- */
+        nav {
+            background-color: var(--bg-nav);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            margin-bottom: 30px;
+            box-shadow: var(--shadow);
         }
 
-        .title-group p {
-            font-size: 0.7rem;
-            color: var(--text-secondary);
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-
-        .last-update {
-            text-align: right;
-            color: var(--text-secondary);
-            font-size: 0.75rem;
-        }
-
-        /* --- Trend Chart --- */
-        .chart-section {
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 10px;
-            margin-bottom: 10px;
-            height: 120px;
-            display: flex;
-            flex-direction: column;
-        }
-
-        .chart-header {
+        .nav-inner {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 0 20px;
+            min-height: 64px;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 5px;
-            color: var(--text-secondary);
-            font-size: 0.7rem;
-            text-transform: uppercase;
+            flex-wrap: wrap;
+            gap: 15px;
+            padding-top: 10px;
+            padding-bottom: 10px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-decoration: none;
+            color: var(--text-main);
             font-weight: 600;
+            font-size: 1.2rem;
         }
 
-        .chart-container {
-            flex-grow: 1;
-            position: relative;
-            width: 100%;
-            height: 100%;
+        .brand svg {
+            color: var(--accent);
         }
 
-        .chart-svg {
-            width: 100%;
-            height: 100%;
-            overflow: visible;
+        .nav-links {
+            display: flex;
+            gap: 24px;
+            align-items: center;
         }
 
-        .chart-line {
-            fill: none;
-            stroke: var(--accent);
-            stroke-width: 2;
-            stroke-linecap: round;
-            filter: drop-shadow(0 0 3px var(--accent));
+        .nav-link {
+            text-decoration: none;
+            color: var(--text-dim);
+            font-weight: 400;
+            font-size: 0.95rem;
+            transition: color 0.2s;
+            cursor: pointer;
         }
 
-        .chart-area {
-            fill: url(#chart-gradient);
-            opacity: 0.1;
+        .nav-link:hover,
+        .nav-link.active {
+            color: var(--text-main);
         }
 
-        .chart-point {
-            fill: var(--bg-deep);
-            stroke: var(--accent);
-            stroke-width: 2;
-            r: 3;
+        .theme-toggle {
+            background: none;
+            border: 1px solid var(--border);
+            padding: 6px;
+            border-radius: 6px;
+            color: var(--text-main);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
         }
 
-        .chart-label {
-            font-size: 8px;
-            fill: var(--text-secondary);
-            text-anchor: middle;
+        .theme-toggle:hover {
+            background: var(--bg-page);
         }
 
-        /* --- Top Bar Stats --- */
-        .top-summary {
+        /* --- Header / Hero --- */
+        .page-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .page-header h1 {
+            font-size: 2.2rem;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+
+        .page-header p {
+            color: var(--text-dim);
+            font-size: 1rem;
+        }
+
+        /* --- Content Views --- */
+        .view {
+            display: none;
+        }
+
+        .view.active {
+            display: block;
+        }
+
+        /* --- Dashboard Grid / Cards --- */
+        .stats-grid {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
-            gap: 10px;
-            margin-bottom: 10px;
+            gap: 20px;
+            margin-bottom: 30px;
         }
 
-        .summary-card {
+        .stat-card {
             background: var(--bg-card);
             border: 1px solid var(--border);
-            border-radius: 6px;
-            padding: 8px 12px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: var(--shadow);
         }
 
-        .summary-card span {
-            color: var(--text-secondary);
-            font-size: 0.7rem;
-            text-transform: uppercase;
+        .stat-label {
+            color: var(--text-dim);
+            font-size: 0.85rem;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+
+        .stat-value {
+            font-size: 1.8rem;
             font-weight: 600;
-        }
-
-        .summary-card div {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 1.1rem;
-            color: var(--accent);
-        }
-
-        .trend {
-            font-size: 0.7rem;
-            margin-left: 5px;
-            font-family: 'Inter';
-        }
-
-        .trend-up {
-            color: #1dd1a1;
-        }
-
-        .trend-down {
-            color: #ff3e3e;
-        }
-
-        /* --- Status Bar --- */
-        .status-bar {
-            background: rgba(0, 0, 0, 0.3);
-            border: 1px solid var(--border);
-            padding: 4px 15px;
             display: flex;
-            gap: 20px;
-            font-size: 0.7rem;
-            margin-bottom: 15px;
+            align-items: baseline;
+            gap: 8px;
+        }
+
+        .trend-tag {
+            font-size: 0.8rem;
+            font-weight: 600;
+            padding: 2px 6px;
             border-radius: 4px;
         }
 
-        .status-item {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            color: var(--text-secondary);
+        .trend-tag.up {
+            color: var(--risk-low);
+            background: rgba(63, 185, 80, 0.1);
         }
 
-        .dot {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            background: #444;
+        .trend-tag.down {
+            color: var(--risk-high);
+            background: rgba(248, 81, 73, 0.1);
         }
 
-        .dot-green {
-            background: #1dd1a1;
-            box-shadow: 0 0 5px #1dd1a1;
-        }
-
-        /* --- Main Masonry Grid --- */
-        .main-grid {
-            column-count: 3;
-            column-gap: 10px;
-            width: 100%;
-        }
-
-        .section-box {
+        /* --- Charts --- */
+        .chart-box {
             background: var(--bg-card);
             border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 10px;
-            display: inline-block;
-            width: 100%;
-            margin-bottom: 10px;
-            break-inside: avoid;
-            transition: order 0.3s ease;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 30px;
+            box-shadow: var(--shadow);
         }
 
-        .section-box h2 {
-            font-family: 'Orbitron', sans-serif;
+        .chart-title {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .time-range {
+            display: flex;
+            gap: 4px;
+            background: var(--bg-page);
+            padding: 4px;
+            border-radius: 8px;
+            margin-right: 12px;
+        }
+
+        .range-btn {
+            padding: 4px 12px;
+            border: none;
+            background: none;
+            color: var(--text-dim);
             font-size: 0.8rem;
-            color: var(--accent-muted);
-            margin-bottom: 8px;
-            border-bottom: 1px solid var(--border);
-            padding-bottom: 5px;
+            font-weight: 600;
+            cursor: pointer;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+
+        .range-btn.active {
+            background: var(--bg-card);
+            color: var(--text-main);
+            box-shadow: var(--shadow);
+        }
+
+        /* --- Main Masonry --- */
+        .masonry {
+            column-count: 2;
+            column-gap: 20px;
+        }
+
+        .section-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            break-inside: avoid;
+            box-shadow: var(--shadow);
+        }
+
+        .section-card h2 {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 16px;
             display: flex;
             justify-content: space-between;
             align-items: center;
         }
 
-        .box-badge {
-            font-size: 0.6rem;
-            background: var(--border);
-            padding: 1px 5px;
-            border-radius: 3px;
-            font-weight: normal;
-            font-family: 'Inter';
-        }
-
-        /* --- Table Styling --- */
-        .table-container {
-            max-height: 350px;
-            min-height: 150px;
+        /* --- Tables --- */
+        .table-wrap {
+            max-height: 400px;
             overflow-y: auto;
             scrollbar-width: thin;
-            scrollbar-color: var(--accent-muted) transparent;
-        }
-
-        .table-container::-webkit-scrollbar {
-            width: 6px;
-        }
-
-        .table-container::-webkit-scrollbar-thumb {
-            background: var(--accent-muted);
-            border-radius: 10px;
         }
 
         table {
             width: 100%;
             border-collapse: collapse;
+        }
+
+        .table-fixed {
             table-layout: fixed;
+        }
+
+        /* Consistent Metric Columns for alignment across all cards */
+        .col-main {
+            width: auto;
+        }
+
+        .col-m1 {
+            width: 80px;
+            text-align: right;
+        }
+
+        .col-m2 {
+            width: 80px;
+            text-align: right;
         }
 
         th {
             text-align: left;
-            color: var(--text-secondary);
-            font-size: 0.7rem;
-            padding: 4px 6px;
+            padding: 8px;
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            text-transform: uppercase;
             border-bottom: 1px solid var(--border);
             position: sticky;
             top: 0;
-            background: #0b0e14;
-            z-index: 1;
+            background: var(--bg-card);
         }
 
         td {
-            padding: 5px 6px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-            vertical-align: middle;
+            padding: 10px 8px;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.9rem;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
 
-        tr:last-child td {
-            border-bottom: none;
+        tr:hover td {
+            background: rgba(0, 0, 0, 0.02);
+        }
+
+        [data-theme="dark"] tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
         }
 
         code {
-            font-family: 'Courier New', monospace;
-            color: #00ffaa;
-            font-size: 0.8rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            background: var(--bg-page);
+            padding: 2px 4px;
+            border-radius: 4px;
+            color: var(--accent);
         }
 
-        .val-col {
-            text-align: right;
-            color: var(--text-primary);
-            font-family: 'Inter', sans-serif;
+        /* --- About Tab --- */
+        .about-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 30px;
+        }
+
+        .about-main {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: var(--shadow);
+        }
+
+        .about-main h2 {
+            margin-bottom: 20px;
+        }
+
+        .about-main p {
+            margin-bottom: 15px;
+            color: var(--text-dim);
+            font-size: 1.05rem;
+            line-height: 1.6;
+        }
+
+        .about-side {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .status-pill {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
             font-weight: 600;
-            font-size: 0.75rem;
-            width: 60px;
         }
 
-        .sub-val {
-            color: var(--text-secondary);
-            font-size: 0.7rem;
-            font-weight: normal;
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #444;
         }
 
-        .risk-badge {
-            padding: 1px 6px;
-            border-radius: 3px;
-            font-size: 0.6rem;
-            font-weight: 700;
-            color: white;
-            text-transform: uppercase;
+        .dot.active {
+            background: var(--risk-low);
+            box-shadow: 0 0 8px var(--risk-low);
         }
 
-        @media (max-width: 1200px) {
-            .main-grid {
-                column-count: 2;
-            }
+        #tooltip {
+            position: fixed;
+            display: none;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            padding: 8px 12px;
+            border-radius: 6px;
+            box-shadow: var(--shadow);
+            z-index: 1000;
+            pointer-events: none;
+            font-size: 0.8rem;
+            color: var(--text-dim);
+        }
 
-            .top-summary {
+        @media (max-width: 900px) {
+            .stats-grid {
                 grid-template-columns: repeat(2, 1fr);
             }
-        }
 
-        @media (max-width: 800px) {
-            .main-grid {
+            .masonry,
+            .about-grid {
+                grid-template-columns: 1fr;
                 column-count: 1;
             }
+        }
 
-            .top-summary {
+        @media (max-width: 650px) {
+            .nav-inner {
+                justify-content: center;
+                flex-direction: column;
+                height: auto;
+            }
+
+            .nav-links {
+                width: 100%;
+                justify-content: center;
+                flex-wrap: wrap;
+                gap: 15px;
+            }
+
+            .stats-grid {
                 grid-template-columns: 1fr;
             }
+
+            .page-header h1 {
+                font-size: 1.6rem;
+            }
+
+            .modal {
+                width: 95%;
+                margin: 0 10px;
+            }
+
+            .modal-body {
+                padding: 15px;
+            }
+        }
+
+        /* --- Modal --- */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(4px);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 2000;
+        }
+
+        .modal {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            width: 90%;
+            max-width: 800px;
+            max-height: 85vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+        }
+
+        .modal-header {
+            padding: 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-body {
+            padding: 24px;
+            overflow-y: auto;
+            scrollbar-width: thin;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            color: var(--text-dim);
+            cursor: pointer;
+            font-size: 1.5rem;
+        }
+
+        .copy-section {
+            margin-bottom: 24px;
+        }
+
+        .copy-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .btn-copy {
+            background: var(--bg-page);
+            border: 1px solid var(--border);
+            color: var(--text-main);
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-copy:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .modal pre {
+            background: var(--bg-page);
+            padding: 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            white-space: pre-wrap;
+            word-break: break-all;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.95rem;
+            color: var(--text-main);
         }
     </style>
 </head>
 
 <body>
-
-    <header>
-        <div class="title-group">
-            <h1>FauxSSH Threat Intelligence</h1>
-            <p>Intelligence Window: Last 24 Hours</p>
+    <nav>
+        <div class="nav-inner">
+            <a href="#" class="brand" onclick="setView('dashboard')">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
+                </svg>
+                FauxSSH Intel
+            </a>
+            <div class="nav-links">
+                <div class="time-range">
+                    <button class="range-btn" id="btn-1H" onclick="setWindow('1H')">1H</button>
+                    <button class="range-btn active" id="btn-1D" onclick="setWindow('1D')">1D</button>
+                    <button class="range-btn" id="btn-1W" onclick="setWindow('1W')">1W</button>
+                </div>
+                <a class="nav-link active" id="link-dashboard" onclick="setView('dashboard')">Dashboard</a>
+                <a class="nav-link" id="link-about" onclick="setView('about')">About</a>
+                <button class="theme-toggle" onclick="toggleTheme()" title="Toggle Dark/Light Mode">
+                    <svg id="theme-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></svg>
+                </button>
+            </div>
         </div>
-        <div class="last-update" id="last-update">Syncing logs...</div>
-    </header>
+    </nav>
 
-    <div class="chart-section">
-        <div class="chart-header">
-            <span>7-Day Session Trend</span>
+    <div class="container">
+        <!-- Dashboard View -->
+        <div id="view-dashboard" class="view active">
+            <header class="page-header">
+                <h1>Threat Intelligence</h1>
+                <p id="window-label">Real-time attack telemetry from the FauxSSH decoy network.</p>
+            </header>
+
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Threat IPs</div>
+                    <div class="stat-value" id="summary-ips">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Unique Networks</div>
+                    <div class="stat-value" id="summary-networks">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Total Interactions</div>
+                    <div class="stat-value" id="summary-commands">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Session Capture</div>
+                    <div class="stat-value" id="summary-sessions">0</div>
+                </div>
+            </div>
+
+            <div class="chart-box">
+                <div class="chart-title">
+                    <div style="font-weight: 600;">Session Activity Trend</div>
+                </div>
+                <div style="height: 200px; width: 100%; position: relative;" id="chart-container">
+                    <svg viewBox="0 0 1000 200" preserveAspectRatio="none"
+                        style="width:100%; height:100%; overflow:visible;">
+                        <defs>
+                            <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.2" />
+                                <stop offset="100%" stop-color="var(--accent)" stop-opacity="0" />
+                            </linearGradient>
+                        </defs>
+                        <path id="chart-area" fill="url(#g)" d=""></path>
+                        <path id="chart-line" fill="none" stroke="var(--accent)" stroke-width="3" stroke-linecap="round"
+                            d=""></path>
+                        <g id="chart-labels"></g>
+                        <g id="chart-points"></g>
+                    </svg>
+                </div>
+            </div>
+
+            <div class="masonry" id="dashboard-masonry">
+                <!-- Sorted by activity -->
+                <div class="section-card" id="box-risk">
+                    <h2>High-Risk SSH Activity</h2>
+                    <div class="table-wrap">
+                        <table id="table-risk" class="table-fixed">
+                            <thead>
+                                <tr>
+                                    <th class="col-main">Payload</th>
+                                    <th class="col-m1">Risk</th>
+                                    <th class="col-m2">Freq</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="section-card" id="box-ssh">
+                    <h2>Top SSH Commands</h2>
+                    <div class="table-wrap">
+                        <table id="table-ssh" class="table-fixed">
+                            <thead>
+                                <tr>
+                                    <th class="col-main">Command</th>
+                                    <th class="col-m1">Hits</th>
+                                    <th class="col-m2">IPs</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="section-card" id="box-telnet">
+                    <h2>Telnet Activity</h2>
+                    <div class="table-wrap">
+                        <table id="table-telnet" class="table-fixed">
+                            <thead>
+                                <tr>
+                                    <th class="col-main">Command</th>
+                                    <th class="col-m1">Hits</th>
+                                    <th class="col-m2">IPs</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="section-card" id="box-http">
+                    <h2>HTTP Engagement</h2>
+                    <div class="table-wrap">
+                        <table id="table-http" class="table-fixed">
+                            <thead>
+                                <tr>
+                                    <th class="col-main">Path</th>
+                                    <th class="col-m1">Hits</th>
+                                    <th class="col-m2">IPs</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="section-card" id="box-countries">
+                    <h2>Origin Countries</h2>
+                    <div class="table-wrap">
+                        <table id="table-countries" class="table-fixed">
+                            <thead>
+                                <tr>
+                                    <th class="col-main">Country</th>
+                                    <th class="col-m1">IPs</th>
+                                    <th class="col-m2">Sessions</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="section-card" id="box-networks">
+                    <h2>Top ASNs / ISPs</h2>
+                    <div class="table-wrap">
+                        <table id="table-isps" class="table-fixed">
+                            <thead>
+                                <tr>
+                                    <th class="col-main">Org</th>
+                                    <th class="col-m1">IPs</th>
+                                    <th class="col-m2">Sess</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
         </div>
-        <div class="chart-container" id="chart-container">
-            <svg class="chart-svg" viewBox="0 0 700 80" preserveAspectRatio="none">
-                <defs>
-                    <linearGradient id="chart-gradient" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stop-color="var(--accent)" />
-                        <stop offset="100%" stop-color="transparent" />
-                    </linearGradient>
-                </defs>
-                <path class="chart-area" d="M 0 80 L 0 80 L 700 80 Z" id="chart-path-area"></path>
-                <path class="chart-line" d="M 0 80 L 700 80" id="chart-path-line"></path>
-                <g id="chart-labels"></g>
-                <g id="chart-points"></g>
-            </svg>
+
+        <!-- About View -->
+        <div id="view-about" class="view">
+            <header class="page-header">
+                <h1>About FauxSSH</h1>
+                <p>Learn more about the technology behind this honeypot network.</p>
+            </header>
+            <div class="about-grid">
+                <div class="about-main">
+                    <h2>High-Interaction Decoy</h2>
+                    <p>FauxSSH is a next-generation "hallucinating" honeypot. Unlike traditional low-interaction sensors
+                        that return static banners or simple shells, FauxSSH emulates a fully functional Linux
+                        environment across multiple protocols.</p>
+                    <p>By leveraging Large Language Models (LLMs), it generates BELIEVABLE responses to any command an
+                        attacker types. If an attacker tries to cat a file, the LLM hallucinates realistic content. If
+                        they try to download a payload, FauxSSH simulates the network interaction while capturing the
+                        threat data.</p>
+                    <p>This allows researchers to capture later-stage TTPs (Tools, Techniques, and Procedures) that
+                        would otherwise be lost when an attacker realizes they are in a sandbox.</p>
+                </div>
+                <div class="about-side">
+                    <div class="status-pill">
+                        <div class="dot active"></div> SSH Engine: Active
+                    </div>
+                    <div class="status-pill">
+                        <div class="dot active"></div> Telnet Simulator: Active
+                    </div>
+                    <div class="status-pill">
+                        <div class="dot active"></div> MySQL Backdoor: Active
+                    </div>
+                    <div class="status-pill">
+                        <div class="dot active"></div> LLM Handler: Gemini 3
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
-    <div class="status-bar" id="status-bar">
-        <div class="status-item" data-proto="ssh">
-            <div class="dot dot-green"></div> SSH PROTOCOL
-        </div>
-        <div class="status-item" data-proto="telnet">
-            <div class="dot dot-green"></div> TELNET ENGINE
-        </div>
-        <div class="status-item" data-proto="mysql">
-            <div class="dot dot-green"></div> MYSQL SIMULATOR
-        </div>
-        <div class="status-item" data-proto="redis">
-            <div class="dot dot-green"></div> REDIS SIMULATOR
-        </div>
-        <div class="status-item" data-proto="mcp">
-            <div class="dot dot-green"></div> MCP LAYER
-        </div>
-    </div>
+    <div id="tooltip">Click for session details</div>
 
-    <div class="top-summary">
-        <div class="summary-card">
-            <span>Threat IPs (24h)</span>
-            <div id="summary-ips">0 <span class="trend" id="trend-ips"></span></div>
-        </div>
-        <div class="summary-card">
-            <span>Unique Networks</span>
-            <div id="summary-networks">0</div>
-        </div>
-        <div class="summary-card">
-            <span>Total Interaction</span>
-            <div id="summary-commands">0 <span class="trend" id="trend-commands"></span></div>
-        </div>
-        <div class="summary-card">
-            <span>Session Capture</span>
-            <div id="summary-sessions">0 <span class="trend" id="trend-sessions"></span></div>
-        </div>
-    </div>
-
-    <div class="main-grid" id="main-grid">
-        <!-- Boxes are dynamically managed and sorted by activity -->
-
-        <!-- Top Countries -->
-        <div class="section-box" id="box-countries" data-activity="1000">
-            <h2>Top Origin Countries <span class="box-badge">By Unique IPs</span></h2>
-            <div class="table-container">
-                <table id="table-countries">
-                    <thead>
-                        <tr>
-                            <th>Country</th>
-                            <th class="val-col">IPs</th>
-                            <th class="val-col">Sessions</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
+    <div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+        <div class="modal" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h2 id="modal-title">Session Details</h2>
+                <button class="modal-close" onclick="closeModal(event)">&times;</button>
             </div>
-        </div>
-
-        <!-- Top Networks -->
-        <div class="section-box" id="box-networks" data-activity="900">
-            <h2>Source Networks / ASNs <span class="box-badge">By Unique IPs</span></h2>
-            <div class="table-container">
-                <table id="table-isps">
-                    <thead>
-                        <tr>
-                            <th>Organization</th>
-                            <th class="val-col">IPs</th>
-                            <th class="val-col">Sessions</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- SSH Activity -->
-        <div class="section-box" id="box-ssh" data-activity="0">
-            <h2>Top SSH Commands</h2>
-            <div class="table-container">
-                <table id="table-ssh-cmds">
-                    <thead>
-                        <tr>
-                            <th>Command</th>
-                            <th class="val-col">Freq</th>
-                            <th class="val-col">IPs</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- MySQL Activity -->
-        <div class="section-box" id="box-mysql" data-activity="0">
-            <h2>Top MySQL Commands</h2>
-            <div class="table-container">
-                <table id="table-mysql-cmds">
-                    <thead>
-                        <tr>
-                            <th>Command</th>
-                            <th class="val-col">Hits</th>
-                            <th class="val-col">IPs</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- Redis Activity -->
-        <div class="section-box" id="box-redis" data-activity="0" style="display:none">
-            <h2>Top Redis Commands</h2>
-            <div class="table-container">
-                <table id="table-redis-cmds">
-                    <thead>
-                        <tr>
-                            <th>Command</th>
-                            <th class="val-col">Hits</th>
-                            <th class="val-col">IPs</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- MCP Activity -->
-        <div class="section-box" id="box-mcp" data-activity="0" style="display:none">
-            <h2>Top MCP Activities</h2>
-            <div class="table-container">
-                <table id="table-mcp-cmds">
-                    <thead>
-                        <tr>
-                            <th>Target</th>
-                            <th class="val-col">Hits</th>
-                            <th class="val-col">IPs</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- Telnet Activity -->
-        <div class="section-box" id="box-telnet" data-activity="0">
-            <h2>Top Telnet Commands</h2>
-            <div class="table-container">
-                <table id="table-telnet-cmds">
-                    <thead>
-                        <tr>
-                            <th>Command</th>
-                            <th class="val-col">Hits</th>
-                            <th class="val-col">IPs</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- HTTP Activity -->
-        <div class="section-box" id="box-http" data-activity="0">
-            <h2>Top HTTP Requests</h2>
-            <div class="table-container">
-                <table id="table-http-cmds">
-                    <thead>
-                        <tr>
-                            <th>Request Path</th>
-                            <th class="val-col">Hits</th>
-                            <th class="val-col">IPs</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- Top SSH Risk -->
-        <div class="section-box" id="box-risk" data-activity="800">
-            <h2>High-Risk SSH Activity</h2>
-            <div class="table-container">
-                <table id="table-risk-cmds">
-                    <thead>
-                        <tr>
-                            <th>Payload</th>
-                            <th class="val-col">Risk</th>
-                            <th class="val-col">Freq/IP</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- SSH Auth -->
-        <div class="section-box" id="box-auth" data-activity="850">
-            <h2>SSH Authentication Intel</h2>
-            <div class="table-container">
-                <table id="table-auth">
-                    <thead>
-                        <tr>
-                            <th>User / Pass</th>
-                            <th class="val-col">Freq</th>
-                            <th class="val-col">IPs</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
+            <div class="modal-body">
+                <div class="copy-section">
+                    <div class="copy-header">
+                        <strong>Full Command</strong>
+                        <button class="btn-copy" onclick="copyText('modal-command')">Copy</button>
+                    </div>
+                    <pre id="modal-command"></pre>
+                </div>
+                <div class="copy-section">
+                    <div class="copy-header">
+                        <strong>Sample Output</strong>
+                        <button class="btn-copy" onclick="copyText('modal-output')">Copy</button>
+                    </div>
+                    <pre id="modal-output"></pre>
+                </div>
             </div>
         </div>
     </div>
 
     <script>
-        function formatTrend(trend) {
-            if (!trend) return "";
-            const char = trend.diff >= 0 ? "↑" : "↓";
-            const cls = trend.diff >= 0 ? "trend-up" : "trend-down";
-            return `<span class="${cls}">${char} ${Math.abs(trend.pct)}%</span>`;
+        let currentView = 'dashboard';
+        let currentWindow = '1D';
+        let cachedData = null;
+
+        // Theme Management
+        function setTheme(theme) {
+            document.documentElement.setAttribute('data-theme', theme);
+            document.cookie = `theme=${theme}; path=/; max-age=31536000`; // 1 year
+            updateThemeIcon();
         }
 
-        function getRiskBadge(score) {
-            let color = "grey";
-            let label = "LOW";
-            if (score > 70) { color = "var(--risk-high)"; label = "CRIT"; }
-            else if (score > 40) { color = "var(--risk-mid)"; label = "MED"; }
-            else { color = "var(--risk-low)"; label = "LOW"; }
-            return `<span class="risk-badge" style="background:${color}">${label}</span>`;
+        function toggleTheme() {
+            const current = document.documentElement.getAttribute('data-theme');
+            setTheme(current === 'dark' ? 'light' : 'dark');
         }
 
-        function renderChart(dailyTrends) {
-            if (!dailyTrends || dailyTrends.length === 0) return;
-
-            const max = Math.max(...dailyTrends.map(d => d.count), 1);
-            const w = 700;
-            const h = 80;
-            const padding = 20;
-
-            const points = dailyTrends.map((d, i) => {
-                const x = (i / (dailyTrends.length - 1)) * w;
-                const y = h - padding - (d.count / max) * (h - padding * 2);
-                return { x, y, label: d.label, val: d.count };
-            });
-
-            // Line
-            const lineD = "M " + points.map(p => `${p.x} ${p.y}`).join(" L ");
-            document.getElementById('chart-path-line').setAttribute('d', lineD);
-
-            // Area
-            const areaD = lineD + ` L ${w} ${h} L 0 ${h} Z`;
-            document.getElementById('chart-path-area').setAttribute('d', areaD);
-
-            // Labels & Points
-            let labelsHtml = "";
-            let pointsHtml = "";
-            points.forEach(p => {
-                labelsHtml += `<text x="${p.x}" y="${h - 5}" class="chart-label">${p.label}</text>`;
-                pointsHtml += `<circle cx="${p.x}" cy="${p.y}" class="chart-point" title="${p.val} sessions"></circle>`;
-            });
-            document.getElementById('chart-labels').innerHTML = labelsHtml;
-            document.getElementById('chart-points').innerHTML = pointsHtml;
+        function updateThemeIcon() {
+            const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+            const icon = document.getElementById('theme-icon');
+            if (isDark) {
+                icon.innerHTML = '<path d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707m12.728 0l-.707-.707M6.343 6.343l-.707-.707M12 8a4 4 0 100 8 4 4 0 000-8z"/>';
+            } else {
+                icon.innerHTML = '<path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>';
+            }
         }
 
-        function sortDashboard() {
-            const grid = document.getElementById('main-grid');
-            const boxes = Array.from(grid.querySelectorAll('.section-box'));
-            boxes.sort((a, b) => parseInt(b.getAttribute('data-activity') || 0) - parseInt(a.getAttribute('data-activity') || 0));
-            boxes.forEach(box => grid.appendChild(box));
+        // Initialize Theme from Cookie
+        const getCookie = (name) => {
+            const value = `; ${document.cookie}`;
+            const parts = value.split(`; ${name}=`);
+            if (parts.length === 2) return parts.pop().split(';').shift();
+        };
+        setTheme(getCookie('theme') || 'dark');
+
+        // Navigation
+        function setView(view) {
+            currentView = view;
+            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+            document.getElementById(`view-${view}`).classList.add('active');
+
+            document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+            document.getElementById(`link-${view}`).classList.add('active');
         }
 
-        async function updateStats() {
+        function setWindow(w) {
+            currentWindow = w;
+            document.querySelectorAll('.range-btn').forEach(btn => btn.classList.toggle('active', btn.innerText === w));
+            if (cachedData) renderDashboard();
+        }
+
+        // Data Rendering
+        async function refreshData() {
             try {
-                const r = await fetch("/status_data.json");
-                const data = await r.json();
-
-                // Local Time
-                const utcDate = new Date(data.last_updated + " UTC");
-                document.getElementById('last-update').innerText = "Last Updated: " + utcDate.toLocaleString();
-
-                // Trend Graph
-                renderChart(data.daily_trends);
-
-                // Summaries
-                document.getElementById('summary-ips').innerHTML = `${data.total_ips.toLocaleString()} ${formatTrend(data.trends.ips)}`;
-                document.getElementById('summary-networks').innerText = data.total_networks.toLocaleString();
-                document.getElementById('summary-commands').innerHTML = `${data.total_requests.toLocaleString()} ${formatTrend(data.trends.commands)}`;
-                document.getElementById('summary-sessions').innerHTML = `${data.total_sessions.toLocaleString()} ${formatTrend(data.trends.sessions)}`;
-
-                // Activity Mapping for Dynamic Sorting
-                const activities = data.protocol_activity || {};
-                document.getElementById('box-ssh').setAttribute('data-activity', activities.ssh || 0);
-                document.getElementById('box-mysql').setAttribute('data-activity', activities.mysql || 0);
-                document.getElementById('box-telnet').setAttribute('data-activity', activities.telnet || 0);
-                document.getElementById('box-redis').setAttribute('data-activity', activities.redis || 0);
-                document.getElementById('box-mcp').setAttribute('data-activity', activities.mcp || 0);
-                document.getElementById('box-http').setAttribute('data-activity', activities.http || 0);
-
-                // Show/Hide Redis/MCP/HTTP based on activity
-                document.getElementById('box-redis').style.display = (activities.redis > 0) ? 'inline-block' : 'none';
-                document.getElementById('box-mcp').style.display = (activities.mcp > 0) ? 'inline-block' : 'none';
-                document.getElementById('box-http').style.display = (activities.http > 0) ? 'inline-block' : 'none';
-
-                // Update Status Dots
-                document.querySelectorAll('.status-item').forEach(item => {
-                    const proto = item.getAttribute('data-proto');
-                    const dot = item.querySelector('.dot');
-                    if (activities[proto] > 0 || (proto === 'ssh' && data.total_sessions > 0)) {
-                        dot.classList.add('dot-green');
-                    } else {
-                        dot.classList.remove('dot-green');
-                    }
-                });
-
-                // --- DATA TABLES ---
-
-                // Countries
-                document.querySelector("#table-countries tbody").innerHTML = data.top_countries.map(c =>
-                    `<tr><td>${c.country}</td><td class="val-col">${c.ips.toLocaleString()}</td><td class="val-col sub-val">${c.sessions.toLocaleString()}</td></tr>`
-                ).join("");
-
-                // ISPs
-                document.querySelector("#table-isps tbody").innerHTML = data.top_isps.map(i =>
-                    `<tr><td title="${i.isp}">${i.isp}</td><td class="val-col">${i.ips.toLocaleString()}</td><td class="val-col sub-val">${i.sessions.toLocaleString()}</td></tr>`
-                ).join("");
-
-                // SSH Commands
-                document.querySelector("#table-ssh-cmds tbody").innerHTML = (data.top_ssh_commands || []).map(c =>
-                    `<tr><td title="${c.command}"><code>${c.command}</code></td><td class="val-col">${c.count.toLocaleString()}</td><td class="val-col sub-val">${c.ips}</td></tr>`
-                ).join("");
-
-                // MySQL Commands
-                document.querySelector("#table-mysql-cmds tbody").innerHTML = (data.top_mysql_commands || []).map(c =>
-                    `<tr><td title="${c.command}"><code>${c.command}</code></td><td class="val-col">${c.count.toLocaleString()}</td><td class="val-col sub-val">${c.ips}</td></tr>`
-                ).join("");
-
-                // Redis Commands
-                document.querySelector("#table-redis-cmds tbody").innerHTML = (data.top_redis_commands || []).map(c =>
-                    `<tr><td title="${c.command}"><code>${c.command}</code></td><td class="val-col">${c.count.toLocaleString()}</td><td class="val-col sub-val">${c.ips}</td></tr>`
-                ).join("");
-
-                // MCP Commands
-                document.querySelector("#table-mcp-cmds tbody").innerHTML = (data.top_mcp_commands || []).map(c =>
-                    `<tr><td title="${c.command}"><code>${c.command}</code></td><td class="val-col">${c.count.toLocaleString()}</td><td class="val-col sub-val">${c.ips}</td></tr>`
-                ).join("");
-
-                // Telnet Commands
-                document.querySelector("#table-telnet-cmds tbody").innerHTML = (data.top_telnet_commands || []).map(c =>
-                    `<tr><td title="${c.command}"><code>${c.command}</code></td><td class="val-col">${c.count.toLocaleString()}</td><td class="val-col sub-val">${c.ips}</td></tr>`
-                ).join("");
-
-                // HTTP Commands
-                document.querySelector("#table-http-cmds tbody").innerHTML = (data.top_http_commands || []).map(c =>
-                    `<tr><td title="${c.command}"><code>${c.command}</code></td><td class="val-col">${c.count.toLocaleString()}</td><td class="val-col sub-val">${c.ips}</td></tr>`
-                ).join("");
-
-                // Risk Commands
-                document.querySelector("#table-risk-cmds tbody").innerHTML = (data.top_ssh_risk || []).map(r =>
-                    `<tr><td title="${r.command}"><code>${r.command}</code></td><td>${getRiskBadge(r.risk)}</td><td class="val-col">${r.count.toLocaleString()}<br><span class="sub-val">${r.ips} IP</span></td></tr>`
-                ).join("");
-
-                // Auth (Merged User/Pass)
-                const combinedAuth = [
-                    ...(data.top_ssh_users || []).map(u => ({ label: `user:${u.username}`, count: u.count, ips: u.ips })),
-                    ...(data.top_passwords || []).map(p => ({ label: `pass:${p.password}`, count: p.count, ips: p.ips }))
-                ];
-
-                // Sort by IPs descending
-                combinedAuth.sort((a, b) => b.ips - a.ips);
-
-                document.querySelector("#table-auth tbody").innerHTML = combinedAuth.map(a =>
-                    `<tr><td><code>${a.label}</code></td><td class="val-col">${a.count.toLocaleString()}</td><td class="val-col sub-val">${a.ips}</td></tr>`
-                ).join("");
-
-                sortDashboard();
-
-            } catch (e) { console.error(e); }
+                const res = await fetch('/status_data.json');
+                cachedData = await res.json();
+                renderDashboard();
+            } catch (e) {
+                console.error("Fetch error:", e);
+            }
         }
 
-        updateStats();
-        setInterval(updateStats, 60000);
+        function renderDashboard() {
+            const data = cachedData.windows[currentWindow];
+            if (!data) return;
+
+            // Stats
+            document.getElementById('summary-ips').innerHTML = `${data.total_ips.toLocaleString()}`;
+            document.getElementById('summary-networks').innerText = data.total_networks.toLocaleString();
+            document.getElementById('summary-commands').innerText = data.total_requests.toLocaleString();
+            document.getElementById('summary-sessions').innerText = data.total_sessions.toLocaleString();
+
+            // Tables
+            const esc = s => s.replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": "&#39;" }[m]));
+            const row = (c, isRisk = false) => `<tr data-command="${esc(c.command)}" data-response="${esc(c.response || '')}">
+                <td class="col-main"><code>${c.command}</code></td>
+                <td class="col-m1">${isRisk ? c.risk : c.count.toLocaleString()}</td>
+                <td class="col-m2" style="color:var(--text-dim)">${c.ips}</td>
+            </tr>`;
+
+            document.querySelector('#table-ssh tbody').innerHTML = (data.top_ssh_commands || []).slice(0, 10).map(c => row(c)).join('');
+            document.querySelector('#table-telnet tbody').innerHTML = (data.top_telnet_commands || []).slice(0, 10).map(c => row(c)).join('');
+            document.querySelector('#table-http tbody').innerHTML = (data.top_http_commands || []).slice(0, 10).map(c => row(c)).join('');
+            document.querySelector('#table-risk tbody').innerHTML = (data.top_ssh_risk || []).slice(0, 8).map(c => row(c, true)).join('');
+
+            document.querySelector('#table-countries tbody').innerHTML = data.top_countries.slice(0, 10).map(c =>
+                `<tr><td class="col-main">${c.country}</td><td class="col-m1">${c.ips.toLocaleString()}</td><td class="col-m2" style="color:var(--text-dim)">${c.sessions.toLocaleString()}</td></tr>`
+            ).join('');
+
+            document.querySelector('#table-isps tbody').innerHTML = data.top_isps.slice(0, 10).map(i =>
+                `<tr><td class="col-main" title="${i.isp}">${i.isp}</td><td class="col-m1">${i.ips.toLocaleString()}</td><td class="col-m2" style="color:var(--text-dim)">${i.sessions.toLocaleString()}</td></tr>`
+            ).join('');
+
+            renderChart();
+        }
+
+        function renderChart() {
+            let trends = [];
+            if (currentWindow === '1H') trends = cachedData.graphs.hourly_24h;
+            else if (currentWindow === '1D') trends = cachedData.graphs.daily_7d;
+            else trends = cachedData.graphs.daily_21d;
+
+            if (!trends || trends.length < 2) return;
+
+            const max = Math.max(...trends.map(t => t.count), 1);
+            const w = 1000;
+            const h = 200;
+            const pad = 20;
+
+            const points = trends.map((t, i) => {
+                const x = (i / (trends.length - 1)) * w;
+                const y = h - pad - (t.count / max) * (h - pad * 2);
+                return { x, y, val: t.count, label: t.label };
+            });
+
+            const path = `M ${points.map(p => `${p.x},${p.y}`).join(' L ')}`;
+            document.getElementById('chart-line').setAttribute('d', path);
+            document.getElementById('chart-area').setAttribute('d', `${path} L ${w},${h} L 0,${h} Z`);
+
+            let ptsHtml = "";
+            let lblHtml = "";
+            points.forEach((p, i) => {
+                if (i % Math.ceil(trends.length / 8) === 0 || i === trends.length - 1) {
+                    lblHtml += `<text x="${p.x}" y="${h}" fill="var(--text-dim)" font-size="12" text-anchor="middle">${p.label}</text>`;
+                }
+                ptsHtml += `<circle cx="${p.x}" cy="${p.y}" r="4" fill="var(--bg-card)" stroke="var(--accent)" stroke-width="2" onmouseover="showTip('${p.val} sessions')" onmouseout="hideTip()"/>`;
+            });
+            document.getElementById('chart-points').innerHTML = ptsHtml;
+            document.getElementById('chart-labels').innerHTML = lblHtml;
+        }
+
+        // Tooltip hint
+        const tip = document.getElementById('tooltip');
+        function showTip(text) {
+            tip.innerHTML = text;
+            tip.style.display = 'block';
+        }
+        function hideTip() { tip.style.display = 'none'; }
+
+        // Modal Logic
+        const overlay = document.getElementById('modal-overlay');
+        const modalCmd = document.getElementById('modal-command');
+        const modalOut = document.getElementById('modal-output');
+
+        function openModal(cmd, out) {
+            modalCmd.textContent = cmd;
+            modalOut.textContent = out || '[No output recorded for this command]';
+            overlay.style.display = 'flex';
+        }
+
+        function closeModal(e) {
+            overlay.style.display = 'none';
+        }
+
+        function copyText(id) {
+            const text = document.getElementById(id).textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                const btn = event.target;
+                const originalText = btn.textContent;
+                btn.textContent = 'Copied!';
+                setTimeout(() => btn.textContent = originalText, 2000);
+            });
+        }
+
+        document.addEventListener('mouseover', e => {
+            const tr = e.target.closest('tr[data-command]');
+            if (tr) {
+                tip.style.display = 'block';
+            }
+        });
+        document.addEventListener('mousemove', e => {
+            if (tip.style.display === 'block') {
+                tip.style.left = (e.clientX + 15) + 'px';
+                tip.style.top = (e.clientY + 15) + 'px';
+            }
+        });
+        document.addEventListener('mouseout', e => {
+            if (e.target.closest('tr[data-command]')) tip.style.display = 'none';
+        });
+
+        document.addEventListener('click', e => {
+            const tr = e.target.closest('tr[data-command]');
+            if (tr) {
+                const cmd = tr.getAttribute('data-command');
+                const resp = tr.getAttribute('data-response');
+                openModal(cmd, resp);
+            }
+        });
+
+        refreshData();
+        setInterval(refreshData, 60000);
     </script>
 </body>
 

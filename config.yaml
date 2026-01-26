@@ -40,9 +40,9 @@ analytics:
 
 alerting:
   webhook_url: "" # ENV: ALERTING_WEBHOOK_URL
-  notify_threshold: 60
-  session_threshold: 70
-  ip_threshold: 90
+  notify_threshold: 90
+  session_threshold: 95
+  ip_threshold: 99
   keywords: []
 
 telnet:

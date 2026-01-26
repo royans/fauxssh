@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 
 from ssh_honeypot.core.database import HoneyDB
 from ssh_honeypot.core.config import config, get_data_dir
+from ssh_honeypot.core.utils import sanitize_path
 
 try:
     from ssh_honeypot.core.analyzers.virustotal import VirusTotalAnalyzer
@@ -152,7 +153,9 @@ class PayloadManager:
             if not os.path.exists(file_path):
                 with open(file_path, "wb") as f:
                     f.write(content_bytes)
-                logger.info(f"[PayloadManager] Saved uploaded payload to {file_path}")
+                logger.info(
+                    f"[PayloadManager] Saved uploaded payload to {sanitize_path(file_path)}"
+                )
 
             # Add to DB as 'completed' (ready for analysis)
             added = self.db.add_malicious_payload(
@@ -224,7 +227,9 @@ class PayloadManager:
                     # Save
                     with open(file_path, "wb") as f:
                         f.write(content)
-                    logger.info(f"[PayloadManager] Saved new payload to {file_path}")
+                    logger.info(
+                        f"[PayloadManager] Saved new payload to {sanitize_path(file_path)}"
+                    )
 
                 self.db.update_payload_status(
                     payload_id,

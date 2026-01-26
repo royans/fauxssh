@@ -6,6 +6,7 @@ import zlib
 
 from ssh_honeypot.core.config import get_data_dir
 from ssh_honeypot.core.logging_setup import log
+from ssh_honeypot.core.utils import sanitize_path
 from ssh_honeypot.core.payload_manager import PayloadManager
 
 UPLOAD_DIR = os.path.join(get_data_dir(), "uploaded_files")
@@ -255,14 +256,14 @@ class HoneySFTPServer(paramiko.SFTPServerInterface):
 
             try:
                 handle.upload_fp = open(real_path, "wb")
-                log.info(f"[SFTP] Started Upload to: {real_path}")
+                log.info(f"[SFTP] Started Upload to: {sanitize_path(real_path)}")
                 if hasattr(self.server_obj, "db") and self.server_obj.db:
                     try:
                         self.server_obj.db.log_interaction(
                             self.session_id,
                             None,  # No CWD in SFTP context typically or use self.cwd
                             f"SFTP Upload: {path}",
-                            f"Saved to {real_path}",
+                            f"Saved to {sanitize_path(real_path)}",
                             source="handler",
                         )
                     except:

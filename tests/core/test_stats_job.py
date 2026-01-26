@@ -44,6 +44,9 @@ class TestStatsJob(unittest.TestCase):
         mock_db.get_daily_session_counts.return_value = [
             {"label": "Jan 21", "count": 10}
         ]
+        mock_db.get_hourly_session_counts.return_value = [
+            {"label": "12:00", "count": 5}
+        ]
 
         # Run job
         run_stats_generation_job(mock_db)
@@ -56,9 +59,17 @@ class TestStatsJob(unittest.TestCase):
         # Verify content
         with open(self.data_path, "r") as f:
             content = json.load(f)
-            self.assertEqual(content["total_ips"], 10)
-            self.assertEqual(content["manual_vs_bot"]["manual"], 5)
-            self.assertIn("ls", content["recent_unique_commands"])
+            self.assertIn("windows", content)
+            self.assertIn("1H", content["windows"])
+            self.assertIn("1D", content["windows"])
+            self.assertIn("1W", content["windows"])
+            self.assertEqual(content["windows"]["1D"]["total_ips"], 10)
+            self.assertEqual(content["windows"]["1D"]["manual_vs_bot"]["manual"], 5)
+            self.assertIn("ls", content["windows"]["1D"]["recent_unique_commands"])
+            self.assertIn("graphs", content)
+            self.assertIn("hourly_24h", content["graphs"])
+            self.assertIn("daily_7d", content["graphs"])
+            self.assertIn("daily_21d", content["graphs"])
 
     @patch("ssh_honeypot.core.background_tasks.config")
     def test_run_stats_generation_job_disabled(self, mock_config):
