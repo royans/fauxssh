@@ -29,6 +29,7 @@ from ssh_honeypot.handlers.unix.cmd_wc import WcCommand
 from ssh_honeypot.handlers.unix.cmd_cut import CutCommand
 from ssh_honeypot.handlers.unix.cmd_sed import SedCommand
 from ssh_honeypot.handlers.unix.cmd_awk import AwkCommand
+from ssh_honeypot.handlers.unix.cmd_lsattr import LsattrCommand
 
 log = logging.getLogger("sshpot")
 try:
@@ -133,6 +134,7 @@ class CommandHandler:
         self.nohup_handler = NohupCommand(db, llm_interface)
         self.sed_handler = SedCommand(db, llm_interface)
         self.awk_handler = AwkCommand(db, llm_interface)
+        self.lsattr_handler = LsattrCommand(db, llm_interface)
 
         # Expanded whitelist maps commands to handler functions or generic
         self.STATE_COMMANDS = {
@@ -158,6 +160,7 @@ class CommandHandler:
             "useradd",
             "usermod",
             "chattr",
+            "lockr",
         }
 
         self.READ_ONLY_COMMANDS = {
@@ -245,6 +248,8 @@ class CommandHandler:
             "openssl",
             "false",
             "true",
+            "lsattr",
+            "lockrc",
         }
 
         self.HONEYTOKENS = {"aws_keys.txt", "id_rsa_backup", "wallet.dat"}
@@ -593,6 +598,22 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
     def handle_chattr(self, cmd, context):
         return self.chattr_handler.handle(cmd, context)
+
+    def handle_lsattr(self, cmd, context):
+        return self.lsattr_handler.handle(cmd, context)
+
+    def handle_lockr(self, cmd, context):
+        # Malwares often rename chattr to lockr.
+        # We handle it by calling chattr handler, but standard chattr output is expected.
+        # Replace 'lockr' with 'chattr' in the command string for the handler if needed,
+        # but our chattr handler already hardcodes 'chattr:' in its output.
+        new_cmd = cmd.replace("lockr", "chattr", 1)
+        return self.chattr_handler.handle(new_cmd, context)
+
+    def handle_lockrc(self, cmd, context):
+        # Similarly, malware uses lockrc as lsattr.
+        new_cmd = cmd.replace("lockrc", "lsattr", 1)
+        return self.lsattr_handler.handle(new_cmd, context)
 
     def _smart_split(self, cmd, separator):
         parts = []

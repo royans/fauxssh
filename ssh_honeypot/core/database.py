@@ -442,6 +442,11 @@ class SQLiteBackend(DatabaseBackend):
         except:
             pass
 
+        try:
+            c.execute("ALTER TABLE ip_intelligence ADD COLUMN asn TEXT")
+        except:
+            pass
+
         conn.commit()
         conn.close()
 
@@ -1856,16 +1861,21 @@ class SQLiteBackend(DatabaseBackend):
 
             # Top ISPs / Networks (Unique IPs and Sessions)
             query = f"""
-                SELECT intel.org, COUNT(DISTINCT s.remote_ip) as unique_ips, COUNT(DISTINCT s.session_id) as sessions
+                SELECT intel.org, intel.asn, COUNT(DISTINCT s.remote_ip) as unique_ips, COUNT(DISTINCT s.session_id) as sessions
                 FROM sessions s 
                 JOIN ip_intelligence intel ON s.remote_ip = intel.ip 
                 WHERE s.start_time > {time_filter} {interaction_ip_filter}
-                GROUP BY intel.org 
+                GROUP BY intel.org, intel.asn 
                 ORDER BY unique_ips DESC LIMIT 50
             """
             c.execute(query, params)
             stats["top_isps"] = [
-                {"isp": r[0] or "Unknown", "ips": r[1], "sessions": r[2]}
+                {
+                    "isp": r[0] or "Unknown",
+                    "asn": r[1] or "-",
+                    "ips": r[2],
+                    "sessions": r[3],
+                }
                 for r in c.fetchall()
             ]
 

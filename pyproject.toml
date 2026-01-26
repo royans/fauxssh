@@ -15,7 +15,8 @@ authors = [
 dependencies = [
     "paramiko",
     "requests",
-    "python-dotenv"
+    "python-dotenv",
+    "pyzmq"
 ]
 
 [project.scripts]

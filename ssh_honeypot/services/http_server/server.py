@@ -12,6 +12,15 @@ from ssh_honeypot.core.config import config
 from ssh_honeypot.core.dos_protection import dos_protector
 from ssh_honeypot.core.clogging import clogger
 
+# Non-logged management paths
+MANAGEMENT_PATHS = {
+    "/stats_request.html",
+    "/stats_request",
+    "/status_request.html",
+    "/status_request",
+    "/status_data.json",
+}
+
 
 class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -33,6 +42,10 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
         return self.client_address[0]
 
     def log_message(self, format, *args):
+        # Silence management APIs from access logs
+        if self.path in MANAGEMENT_PATHS:
+            return
+
         try:
             # Sanitize args to prevent binary data from messing up logs
             cleaned_args = []
@@ -112,21 +125,14 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
         self.close_connection = True
         client_ip = self.get_client_ip()
 
-        # 0. DoS Protection
-        if not dos_protector.is_allowed(client_ip, "HTTP"):
-            try:
-                self.send_response(429)
-                self.send_header("Content-Type", "text/plain")
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.wfile.write(b"Too Many Requests")
-            except:
-                pass
-            return
-
-        # 0.5 Local Handlers (Stats Infographic)
-        if config.get("http", "showstats"):
-            if self.path == "/stats_request.html" or self.path == "/stats_request":
+        # 0. Management & Stats (Bypass logging and DoS)
+        if config.get("http", "showstats") and self.path in MANAGEMENT_PATHS:
+            if self.path in [
+                "/stats_request.html",
+                "/stats_request",
+                "/status_request.html",
+                "/status_request",
+            ]:
                 try:
                     asset_path = os.path.join(
                         os.path.dirname(__file__), "assets", "stats_request.html"
@@ -176,6 +182,17 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                 except Exception as e:
                     log.error(f"[HTTP] Error serving stats data: {e}")
 
+        # 1. DoS Protection (Honeypot requests only)
+        if not dos_protector.is_allowed(client_ip, "HTTP"):
+            try:
+                self.send_response(429)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(b"Too Many Requests")
+            except Exception:
+                pass
+            return
         # 1. Caching Key
         # We treat "HTTP <METHOD> <PATH>" as the unique command key
         # Cwd is constant "HTTP_ROOT" to share cache globally for the site

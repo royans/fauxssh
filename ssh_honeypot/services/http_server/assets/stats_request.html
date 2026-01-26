@@ -710,6 +710,7 @@
                             <thead>
                                 <tr>
                                     <th class="col-main">Org</th>
+                                    <th class="col-m1">ASN</th>
                                     <th class="col-m1">IPs</th>
                                     <th class="col-m2">Sess</th>
                                 </tr>
@@ -875,7 +876,7 @@
             ).join('');
 
             document.querySelector('#table-isps tbody').innerHTML = data.top_isps.slice(0, 10).map(i =>
-                `<tr><td class="col-main" title="${i.isp}">${i.isp}</td><td class="col-m1">${i.ips.toLocaleString()}</td><td class="col-m2" style="color:var(--text-dim)">${i.sessions.toLocaleString()}</td></tr>`
+                `<tr><td class="col-main" title="${i.isp}">${i.isp}</td><td class="col-m1">${i.asn || '-'}</td><td class="col-m1">${i.ips.toLocaleString()}</td><td class="col-m2" style="color:var(--text-dim)">${i.sessions.toLocaleString()}</td></tr>`
             ).join('');
 
             renderChart();

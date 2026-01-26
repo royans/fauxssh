@@ -220,6 +220,7 @@ def list_sessions(
             s.risk_score,
             ii.country,
             ii.org,
+            ii.asn,
             ii.network_type,
             ii.abuse_tags
         FROM sessions s
@@ -304,6 +305,7 @@ def list_sessions(
     table.add_column("LLMs", justify="right", style="cyan")
     table.add_column("Dur", justify="right", style="yellow")
     table.add_column("Geo", style="blue")
+    table.add_column("ASN", style="cyan")
     table.add_column("ISP/Type", style="dim")
     table.add_column("Risk", justify="right")
     table.add_column("Summary", style="italic white", overflow="fold")
@@ -390,6 +392,11 @@ def list_sessions(
         if len(isp) > 20:
             isp = isp[:17] + "..."
 
+        asn = r["asn"] or "-"
+        # Parse just the ID if possible (e.g. "AS12345 Google" -> "AS12345")
+        if asn != "-" and " " in asn:
+            asn = asn.split(" ")[0]
+
         tags = r["abuse_tags"]
         if tags and tags != "[]":
             risk_str += " !"  # Flag abuse tags
@@ -405,6 +412,7 @@ def list_sessions(
             llms,
             duration_str,
             geo,
+            asn,
             isp,
             f"[{risk_style}]{risk_str}[/{risk_style}]",
             summary,

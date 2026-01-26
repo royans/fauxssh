@@ -485,3 +485,29 @@ class TestCommandHandler:
         cmd3 = "nohup"
         resp3, _, _ = handler.process_command(cmd3, context)
         assert "missing operand" in resp3
+
+    def test_handle_lockr_alias(self, handler):
+        """Verify lockr alias redirects to chattr handler"""
+        context = {"user": "root", "cwd": "/"}
+        # Mock chattr_handler
+        handler.chattr_handler.handle = MagicMock(
+            return_value=("CHATTR_SUCCESS", {}, {"source": "handler"})
+        )
+
+        resp, _, _ = handler.handle_lockr("lockr +i file", context)
+        assert resp == "CHATTR_SUCCESS"
+        # Verify it was called with 'chattr' instead of 'lockr'
+        handler.chattr_handler.handle.assert_called_with("chattr +i file", context)
+
+    def test_handle_lockrc_alias(self, handler):
+        """Verify lockrc alias redirects to lsattr handler"""
+        context = {"user": "root", "cwd": "/"}
+        # Mock lsattr_handler
+        handler.lsattr_handler.handle = MagicMock(
+            return_value=("LSATTR_SUCCESS", {}, {"source": "handler"})
+        )
+
+        resp, _, _ = handler.handle_lockrc("lockrc file", context)
+        assert resp == "LSATTR_SUCCESS"
+        # Verify it was called with 'lsattr' instead of 'lockrc'
+        handler.lsattr_handler.handle.assert_called_with("lsattr file", context)

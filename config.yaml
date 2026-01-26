@@ -4,8 +4,23 @@ server:
   banner_default: "SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u1"
 
 logging:
+  level: INFO
   json_log_file: "events.json.log"
   enable_session_replay: false
+  modules:
+    ssh_honeypot.services.mysql: INFO
+    ssh_honeypot.core.llm: DEBUG
+  centralized:
+    enabled: true
+    mode: "local"         # Options: [local, zmq, both]
+    server_name: ""       # Leave empty to use system hostname
+    batch_size: 50
+    batch_timeout: 10
+    compression: true
+    # ZeroMQ / Remote Settings (Configure via .env)
+    zmq_url: "tcp://127.0.0.1:5555"
+    zmq_user: "admin"
+    zmq_pass: ""
 
 realism:
   latency:
@@ -13,11 +28,6 @@ realism:
     min_ms: 20
     max_ms: 300
 
-logging:
-  level: INFO
-  modules:
-    ssh_honeypot.services.mysql: INFO
-    ssh_honeypot.core.llm: DEBUG
 
 database:
   type: "sqlite" # or "postgres"

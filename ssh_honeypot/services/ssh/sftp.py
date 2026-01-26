@@ -259,11 +259,25 @@ class HoneySFTPServer(paramiko.SFTPServerInterface):
                 log.info(f"[SFTP] Started Upload to: {sanitize_path(real_path)}")
                 if hasattr(self.server_obj, "db") and self.server_obj.db:
                     try:
+                        # RELATIVE PATH for logging (Hide internal structure)
+                        # e.g. /home/user/data/uploaded_files/sess/file -> /uploaded_files/sess/file
+                        try:
+                            # We want the path relative to the parent of uploaded_files (i.e. data_dir)
+                            # UPLOAD_DIR is .../uploaded_files
+                            parent_of_upload = os.path.dirname(UPLOAD_DIR)
+                            rel_display_path = "/" + os.path.relpath(
+                                real_path, parent_of_upload
+                            )
+                        except:
+                            rel_display_path = (
+                                f"/uploaded_files/{self.session_id}/{fname}"
+                            )
+
                         self.server_obj.db.log_interaction(
                             self.session_id,
                             None,  # No CWD in SFTP context typically or use self.cwd
                             f"SFTP Upload: {path}",
-                            f"Saved to {sanitize_path(real_path)}",
+                            f"Saved to {rel_display_path}",
                             source="handler",
                         )
                     except:

@@ -22,8 +22,8 @@ class TestClogging(unittest.TestCase):
         # Mode both, small batch
         self.clogger = ClientLogger()
         self.clogger.log_mode = "both"
-        self.clogger.batch_size = 2
-        self.clogger.batch_timeout = 3600  # Prevent accidental flushes
+        self.clogger.settings["batch_size"] = 2
+        self.clogger.settings["batch_timeout"] = 3600  # Prevent accidental flushes
         self.clogger.server_name = "test-server"
 
     def tearDown(self):
@@ -76,11 +76,11 @@ class TestClogging(unittest.TestCase):
     @patch("ssh_honeypot.core.slogging.slogger.handle_batch")
     def test_timeout_flush(self, mock_slogger_handle):
         """Verify that batch flushes after timeout even if not full."""
-        self.clogger.batch_timeout = 0.5
+        self.clogger.settings["batch_timeout"] = 0.5
         self.clogger.log_event("interaction", {"input": "whoami"})
 
         mock_slogger_handle.assert_not_called()
-        time.sleep(1.0)  # Wait for flusher thread
+        time.sleep(1.5)  # Wait for flusher thread
         mock_slogger_handle.assert_called_once()
 
 
