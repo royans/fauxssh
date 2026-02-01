@@ -3,6 +3,7 @@ import json
 import time
 from ssh_honeypot.core.utils import random_response_delay
 from ssh_honeypot.core.clogging import clogger
+from ssh_honeypot.core.universal_cache import universal_cache
 
 
 class RedisHandler:
@@ -56,11 +57,11 @@ class RedisHandler:
         if hasattr(self, handler_name):
             return getattr(self, handler_name)(args)
 
-        # 2. Cache Check (LLM Fallback)
-        # Use MD5 of command as cache key
-        cached = self.db.get_cached_response(command, "REDIS_ROOT")
-        if cached:
-            return self._encode_bulk_string(cached)
+        # 2. Universal Cache Check (LLM Fallback)
+        cache_key = hashlib.md5(f"redis:{command}".encode()).hexdigest()
+        cached_item = universal_cache.get("redis", cache_key)
+        if cached_item:
+            return self._encode_bulk_string(cached_item["output_text"])
 
         # 3. LLM Fallback (Needs to calculate hash first)
         cmd_hash = hashlib.md5(command.encode("utf-8")).hexdigest()
@@ -221,20 +222,29 @@ db0:keys=52,expires=0,avg_ttl=0
 
             text_resp = resp.strip()
 
-            # Heuristic Response Encoding
+            # Heuristic Response Encoding & Universal Cache Set
+            cache_val = ""
             if text_resp == "OK":
-                self.db.cache_response(cmd_hash, "OK")
-                return self._encode_simple_string("OK")
+                cache_val = "OK"
+                encoded = self._encode_simple_string("OK")
             elif text_resp.startswith("ERR"):
-                self.db.cache_response(cmd_hash, text_resp)
-                return self._encode_error(text_resp)
+                cache_val = text_resp
+                encoded = self._encode_error(text_resp)
             elif not text_resp:
-                self.db.cache_response(cmd_hash, "")  # Store empty for cache hits
-                return self._encode_bulk_string(None)  # Redis NIL
+                cache_val = ""
+                encoded = self._encode_bulk_string(None)
             else:
-                # Default: Bulk String content
-                self.db.cache_response(cmd_hash, text_resp)
-                return self._encode_bulk_string(text_resp)
+                cache_val = text_resp
+                encoded = self._encode_bulk_string(text_resp)
+
+            universal_cache.set(
+                service="redis",
+                key=cmd_hash,
+                input_text=command,
+                output_text=cache_val,
+                ttl_days=30,
+            )
+            return encoded
 
         except Exception as e:
             return self._encode_error(f"ERR internal error: {e}")

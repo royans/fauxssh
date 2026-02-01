@@ -9,6 +9,7 @@ def mock_server():
     server = MagicMock()
     server.honey_db = MagicMock()
     server.llm_interface = MagicMock()
+    server.honey_db.check_llm_rate_limit.return_value = (True, "OK")
     return server
 
 
@@ -93,10 +94,15 @@ def test_normal_path_logs_interaction(mock_server):
             )
         )
         mock_dos.is_allowed.return_value = True
+        mock_dos.is_allowed.return_value = True
         mock_server.honey_db.get_fs_node.return_value = None  # No VFS
-        mock_server.honey_db.get_cached_response.return_value = "Normal"
 
-        handler.handle_honey_request("GET")
+        # Mock UniversalCache for hit
+        with patch(
+            "ssh_honeypot.services.http_server.server.universal_cache"
+        ) as mock_uc:
+            mock_uc.get.return_value = {"output_text": "Normal"}
+            handler.handle_honey_request("GET")
 
         # Verify interaction WAS logged
         mock_clogger.log_event.assert_called()

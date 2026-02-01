@@ -47,4 +47,11 @@ or available locally via: info '(coreutils) cat invocation'
             return "", {}, {}
 
         content, source = self._generate_or_get_content("cat", target_path, context)
+        if content == "__IS_DIR__":
+            return (
+                f"cat: {target_path}: Is a directory\n",
+                {},
+                {"source": "local", "cached": True},
+            )
+
         return content + "\n", {}, {"source": source, "cached": source == "local"}

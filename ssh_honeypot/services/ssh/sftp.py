@@ -42,6 +42,43 @@ class HoneySFTPHandle(paramiko.SFTPHandle):
                         f"[SFTP] Persisting content for {self.path} ({size} bytes)"
                     )
 
+                    # --- Snippet & Interaction Logging (New) ---
+                    try:
+                        # 1. Generate Snippet
+                        snippet_content = b""
+                        try:
+                            with open(self.real_path, "rb") as f:
+                                snippet_content = f.read(2048)
+                            from ssh_honeypot.core.utils import extract_snippet
+
+                            snippet = extract_snippet(snippet_content)
+                        except Exception as e:
+                            snippet = f"<Error generating snippet: {e}>"
+
+                        # 2. Resolve Display Path
+                        try:
+                            parent_of_upload = os.path.dirname(UPLOAD_DIR)
+                            rel_display_path = "/" + os.path.relpath(
+                                self.real_path, parent_of_upload
+                            )
+                        except:
+                            rel_display_path = self.path
+
+                        # 3. Log Interaction
+                        if hasattr(self, "server_obj") and hasattr(
+                            self.server_obj, "db"
+                        ):
+                            self.server_obj.db.log_interaction(
+                                self.server_obj.session_id,
+                                None,
+                                f"SFTP Upload: {self.path}",
+                                f"Saved to {rel_display_path}\n\nSnippet:\n{snippet}",
+                                source="handler",
+                            )
+                    except Exception as e:
+                        log.error(f"[SFTP] Interaction Log Error: {e}")
+                    # -------------------------------------------
+
                     if size < 1024 * 1024:
                         try:
                             with open(
@@ -273,13 +310,8 @@ class HoneySFTPServer(paramiko.SFTPServerInterface):
                                 f"/uploaded_files/{self.session_id}/{fname}"
                             )
 
-                        self.server_obj.db.log_interaction(
-                            self.session_id,
-                            None,  # No CWD in SFTP context typically or use self.cwd
-                            f"SFTP Upload: {path}",
-                            f"Saved to {rel_display_path}",
-                            source="handler",
-                        )
+                        # Logic moved to close() to include snippet
+                        # self.server_obj.db.log_interaction(...)
                     except:
                         pass
             except Exception as e:

@@ -19,9 +19,11 @@ class TestFileModificationReturns(unittest.TestCase):
     def test_handle_touch_returns_dict_in_list(self):
         self.mock_db.get_user_node.return_value = None  # Does not exist
 
-        output, meta = self.handler.handle_touch("touch newfile.txt", self.context)
+        output, updates, meta = self.handler.handle_touch(
+            "touch newfile.txt", self.context
+        )
 
-        mods = meta.get("file_modifications")
+        mods = updates.get("file_modifications")
         self.assertIsNotNone(mods)
         self.assertIsInstance(mods, list)
         self.assertTrue(len(mods) > 0)
@@ -35,9 +37,9 @@ class TestFileModificationReturns(unittest.TestCase):
         self.assertIs(self.handler.db, self.mock_db)
         self.mock_db.get_user_node.return_value = None
 
-        output, meta = self.handler.handle_mkdir("mkdir newdir", self.context)
+        output, updates, meta = self.handler.handle_mkdir("mkdir newdir", self.context)
 
-        mods = meta.get("file_modifications")
+        mods = updates.get("file_modifications")
         self.assertIsInstance(mods[0], dict)
         self.assertEqual(mods[0]["action"], "create")
 
@@ -68,9 +70,9 @@ class TestFileModificationReturns(unittest.TestCase):
         # exists
         self.mock_db.get_user_node.return_value = {"type": "file"}
 
-        output, meta = self.handler.handle_rm("rm oldfile", self.context)
+        output, updates, meta = self.handler.handle_rm("rm oldfile", self.context)
 
-        mods = meta.get("file_modifications")
+        mods = updates.get("file_modifications")
         self.assertIsInstance(mods[0], dict)
         self.assertEqual(mods[0]["action"], "delete")
 
@@ -80,9 +82,9 @@ class TestFileModificationReturns(unittest.TestCase):
             return_value=("content", "local")
         )
 
-        output, meta = self.handler.handle_cp("cp src dest", self.context)
+        output, updates, meta = self.handler.handle_cp("cp src dest", self.context)
 
-        mods = meta.get("file_modifications")
+        mods = updates.get("file_modifications")
         self.assertIsInstance(mods[0], dict)
         self.assertEqual(mods[0]["action"], "create")
 

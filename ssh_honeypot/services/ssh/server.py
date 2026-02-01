@@ -144,6 +144,7 @@ class HoneypotServer(paramiko.ServerInterface):
 
         self.username = username
         self.password = password
+        log.debug(f"[DEBUG] check_auth_password: user={username} pass={password}")
 
         # Use globally bound db (will be set in start_ssh_server scope or truly global)
         # Using global db
@@ -279,6 +280,7 @@ class HoneypotServer(paramiko.ServerInterface):
 
     def check_channel_exec_request(self, channel, command):
         self.command = command
+        # log.debug(f"[DEBUG] check_channel_exec_request: command={command}")
         self.event.set()
         return True
 
@@ -461,6 +463,8 @@ def _handle_connection_logic(client, addr, db, llm):
     try:
         transport.add_server_key(host_key)
         server = HoneypotServer(ip)
+        transport.add_server_key(host_key)
+        server = HoneypotServer(ip)
         server.transport_ref = transport
         transport.start_server(server=server)
     except paramiko.SSHException as e:
@@ -626,7 +630,9 @@ def _handle_connection_logic(client, addr, db, llm):
             except (OSError, socket.error):
                 pass  # Socket closed by client
 
+        log.debug("[DEBUG] Sending exit status 0")
         chan.send_exit_status(0)
+        log.debug("[DEBUG] Closing channel")
         chan.close()
         return
 
@@ -707,7 +713,7 @@ def _handle_connection_logic(client, addr, db, llm):
                     if not allowed:
                         log.warning(f"[SSH] Rate Limit {ip}: {reason}")
                         chan.send(
-                            f"\r\nSystem: Resource quota exceeded ({reason}). Please wait.\r\n".encode(
+                            f"\r\nSystem: Resource quota exceeded. Please wait.\r\n".encode(
                                 "utf-8"
                             )
                         )

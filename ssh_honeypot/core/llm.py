@@ -17,8 +17,10 @@ except ImportError:
 
 try:
     from .database import get_db_backend
+    from .universal_cache import universal_cache
 except ImportError:
     from ssh_honeypot.core.database import get_db_backend
+    from ssh_honeypot.core.universal_cache import universal_cache
 
 
 class LLMInterface:
@@ -207,21 +209,36 @@ class LLMInterface:
             prompt = template.format(
                 command=command, url=url, persona_summary=persona_summary
             )
-            return self._call_api(prompt)
+            return self._call_api(prompt, is_command=False)
         except Exception as e:
             log.error(f"[!] Content Generation Error: {e}")
             return "Error: Content generation failed."
 
-    def _call_api(self, prompt):
+    def _call_api(self, prompt, command=None, is_command=True):
         # 1. Check Cache
         prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
-        db = get_db_backend()
-        cached_resp = db.get_llm_response(prompt_hash)
-        if cached_resp:
+
+        cached_item = universal_cache.get("llm", prompt_hash)
+        if cached_item:
             log.debug(f"[LLM] Cache Hit for hash {prompt_hash[:8]}")
-            return cached_resp
+            return cached_item["output_text"]
 
         log.debug(f"[LLM] Cache Miss for hash {prompt_hash[:8]}")
+
+        # Global Rate Limit Check
+        db_backend = get_db_backend()
+        l_rpm = config.get("throttling", "global", "google_llm", "rpm") or 3
+        l_rph = config.get("throttling", "global", "google_llm", "rph") or 100
+        l_rpd = config.get("throttling", "global", "google_llm", "rpd") or 10000
+
+        allowed, reason = db_backend.check_api_rate_limit(
+            "google_llm", "GLOBAL", l_rpm, l_rph, l_rpd
+        )
+        if not allowed:
+            log.warning(f"[LLM] Global Rate Limit Block: {reason}")
+            return '{"output": "Error: System resources exhausted. Please try again later.", "new_cwd": null}'
+
+        db_backend.record_api_usage("google_llm", "GLOBAL")
 
         headers = {"Content-Type": "application/json"}
         data = {
@@ -241,22 +258,43 @@ class LLMInterface:
             resp = requests.post(url, headers=headers, json=data, timeout=timeout_val)
             if resp.status_code != 200:
                 print(f"[!] LLM API Error {resp.status_code}: {resp.text}")
-                return '{"output": "Error: AI Core Malfunction.", "new_cwd": null}'
+                return '{"output": "INTERNAL_ERROR", "new_cwd": null}'
 
             resp_json = resp.json()
             try:
                 # Gemini Pro structure
                 text = resp_json["candidates"][0]["content"]["parts"][0]["text"]
-                # Strip Markdown code blocks (regex)
                 text = text.strip()
-                # Remove leading fence (e.g. ```json, ```html, ```)
+                # Strip Markdown
                 text = re.sub(r"^```[a-zA-Z0-9+-]*\s*", "", text)
-                # Remove trailing fence
                 text = re.sub(r"\s*```$", "", text)
-
                 final_text = text.strip()
-                # 2. Save to Cache
-                db.save_llm_response(prompt_hash, prompt, final_text)
+
+                # Perform Risk Analysis if it's a command response
+                risk_score = 0
+                attack_stage = "Unknown"
+                explanation = None
+
+                if is_command and command:
+                    try:
+                        analysis = self.analyze_command(command)
+                        risk_score = analysis.get("risk", 0)
+                        attack_stage = f"{analysis.get('type', 'Unknown')} ({analysis.get('stage', 'Unknown')})"
+                        explanation = analysis.get("explanation")
+                    except Exception as e:
+                        log.warning(f"[LLM] Risk analysis failed: {e}")
+
+                # 2. Save to Universal Cache
+                universal_cache.set(
+                    service="llm",
+                    key=prompt_hash,
+                    input_text=prompt,
+                    output_text=final_text,
+                    risk_score=risk_score,
+                    attack_stage=attack_stage,
+                    explanation=explanation,
+                    ttl_days=30,
+                )
                 return final_text
             except (KeyError, IndexError) as e:
                 print(f"[!] LLM Response Parsing Error: {e} | Resp: {resp.text[:100]}")
@@ -268,7 +306,7 @@ class LLMInterface:
 
     def verify_api(self):
         """Simple check to see if API Key works."""
-        val = self._call_api("Reply with exactly the word 'OK'.")
+        val = self._call_api("Reply with exactly the word 'OK'.", is_command=False)
         return "OK" in val
 
     def analyze_command(self, command):
@@ -304,13 +342,13 @@ class LLMInterface:
 
         prompt = template.replace("{command}", command)
 
-        raw_json = self._call_api(prompt)
+        raw_json = self._call_api(prompt, is_command=False)
         try:
             data = json.loads(raw_json)
             return {
                 "type": data.get("type", "Unknown"),
                 "stage": data.get("stage", "Unknown"),
-                "risk": data.get("risk", 0),
+                "risk": int(data.get("risk", 0)),
                 "explanation": data.get(
                     "explanation", "Analysis Failed: Invalid Response"
                 ),
@@ -350,8 +388,7 @@ class LLMInterface:
              """
 
         prompt = template.replace("{commands_json}", input_json)
-
-        raw_json = self._call_api(prompt)
+        raw_json = self._call_api(prompt, is_command=False)
         results = {}
 
         try:
@@ -365,11 +402,13 @@ class LLMInterface:
                         results[h] = {
                             "type": an.get("type", "Unknown"),
                             "stage": an.get("stage", "Unknown"),
-                            "risk": an.get("risk", 0),
+                            "risk": int(an.get("risk", 0)),
                             "explanation": an.get("explanation", "Batch Analysis"),
                         }
         except Exception as e:
-            print(f"[!] Batch Analysis Parsing Error: {e}")
+            log.error(
+                f"[LLM] Batch Analysis Parsing Error: {e} | Raw Response: {raw_json[:200]}"
+            )
 
         return results
 
@@ -418,7 +457,7 @@ class LLMInterface:
         }}
         """
 
-        raw_json = self._call_api(prompt)
+        raw_json = self._call_api(prompt, is_command=False)
         try:
             return json.loads(raw_json)
         except Exception as e:

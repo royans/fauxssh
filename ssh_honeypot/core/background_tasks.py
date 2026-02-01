@@ -49,13 +49,57 @@ def run_cleanup_job(db_instance):
 def run_analysis_batch(db_instance, llm_instance, alert_manager):
     """Analyzes a batch of commands."""
     try:
-        commands = db_instance.get_unanalyzed_commands(limit=50)
+        enabled_services = config.get("analytics", "enabled_services")
+        batch_size = int(config.get("analytics", "batch_size") or 10)
+
+        commands = db_instance.get_unanalyzed_commands(
+            limit=batch_size, allowed_protocols=enabled_services
+        )
         if not commands:
             return
+
+        # Batching Logic: Process if full batch OR timeout exceeded (1 hour)
+        should_process = False
+        if len(commands) >= batch_size:
+            should_process = True
+        else:
+            # Check for stale commands (Timeout fallback)
+            for cmd in commands:
+                try:
+                    ts_str = cmd.get("last_seen")
+                    if ts_str:
+                        # Handle potential SQLite formats
+                        if "." in ts_str:
+                            ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S.%f")
+                        else:
+                            ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+
+                        # 1 Hour Timeout
+                        if (datetime.now() - ts).total_seconds() > 3600:
+                            should_process = True
+                            log.debug(
+                                f"[Analysis] Processing partial batch (Timeout: {len(commands)} items)"
+                            )
+                            break
+                except Exception:
+                    # If parsing fails, default to processing to avoid getting stuck
+                    should_process = True
+                    break
+
+        if not should_process:
+            return
+
+        log.info(f"[Analysis] processing batch of {len(commands)} commands")
 
         results = llm_instance.analyze_batch(
             [(c["request_md5"], c["command"]) for c in commands]
         )
+
+        if not results:
+            log.warning(
+                "[Analysis] Batch analysis returned no results. Skipping this batch to allow retry."
+            )
+            return
 
         for cmd_row in commands:
             cmd_hash = cmd_row["request_md5"]
@@ -65,7 +109,14 @@ def run_analysis_batch(db_instance, llm_instance, alert_manager):
 
             analysis = results.get(cmd_hash)
             if analysis:
-                db_instance.save_analysis(cmd_hash, cmd_text, analysis)
+                db_instance.save_command_analysis(
+                    cmd_hash,
+                    cmd_text,
+                    analysis.get("activity_type", "unknown"),
+                    analysis.get("stage", "unknown"),
+                    int(analysis.get("risk", 0)),
+                    analysis.get("explanation", ""),
+                )
                 # Helper for alerts
                 try:
                     score = analysis.get("risk", 0)
@@ -73,14 +124,6 @@ def run_analysis_batch(db_instance, llm_instance, alert_manager):
                     alert_manager.check_risk_score(session_id, ip, score, explanation)
                 except Exception:
                     pass
-            else:
-                # Mark as failed to avoid infinite loop
-                failure_analysis = {
-                    "type": "Unknown",
-                    "risk": 0,
-                    "explanation": "Analysis Failed: Batch Miss",
-                }
-                db_instance.save_analysis(cmd_hash, cmd_text, failure_analysis)
 
     except Exception as e:
         log.error(f"[Analysis] Error: {e}")
@@ -123,6 +166,7 @@ def run_stats_generation_job(db_instance):
                 "daily_7d": db_instance.get_daily_session_counts(days=7),
                 "daily_21d": db_instance.get_daily_session_counts(days=21),
             },
+            "recent_high_risk": db_instance.get_recent_high_risk_events(limit=15),
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -407,7 +451,7 @@ def analysis_loop(db, llm, alert_manager=None, run_once=False):
         run_analysis_batch(db, llm, alert_manager)
     else:
         scheduler.register_job(
-            "llm_analysis", lambda: run_analysis_batch(db, llm, AlertManager()), 10
+            "llm_analysis", lambda: run_analysis_batch(db, llm, AlertManager()), 30
         )
 
 

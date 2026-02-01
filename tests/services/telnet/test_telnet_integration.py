@@ -132,8 +132,8 @@ def test_telnet_full_session_flow(telnet_server):
     # Actually, if the handler sees a file_list, it might list it depending on prompt?
     # Or strict command handler?
     # Note: The server uses real CommandHandler, which calls LLM.
-    # The output should contain "Mock LLM Response" if it fell back to LLM.
-    assert b"Mock LLM Response" in resp or b"foo" in resp
+    # The output should contain "Mock system Response" if it fell back to LLM.
+    assert b"Mock system Response" in resp or b"foo" in resp
 
     # Wait for prompt again
     read_until(s, [b"#", b"$", b">"], timeout=2.0)
@@ -141,7 +141,7 @@ def test_telnet_full_session_flow(telnet_server):
     # Command 2: 'whoami' with CR only (Test Shell Loop CR handling)
     s.sendall(b"whoami\r")
     resp2 = read_until(s, [b"Mock", b"root"], timeout=2.0)
-    assert b"Mock LLM Response" in resp2  # Mock LLM handles everything unknown
+    assert b"Mock system Response" in resp2  # Mock LLM handles everything unknown
 
     # 5. Exit
     s.sendall(b"exit\r\n")

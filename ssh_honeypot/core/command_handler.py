@@ -30,12 +30,18 @@ from ssh_honeypot.handlers.unix.cmd_cut import CutCommand
 from ssh_honeypot.handlers.unix.cmd_sed import SedCommand
 from ssh_honeypot.handlers.unix.cmd_awk import AwkCommand
 from ssh_honeypot.handlers.unix.cmd_lsattr import LsattrCommand
+from ssh_honeypot.handlers.unix.cmd_passwd import PasswdCommand
+from ssh_honeypot.handlers.unix.cmd_id import IdCommand
+from ssh_honeypot.handlers.unix.cmd_date import DateCommand
+from ssh_honeypot.handlers.unix.cmd_uname import UnameCommand
+from ssh_honeypot.handlers.unix.cmd_hostname import HostnameCommand
+from ssh_honeypot.handlers.unix.cmd_uptime import UptimeCommand
 
 log = logging.getLogger("sshpot")
 try:
-    from ssh_honeypot.core.utils import random_response_delay
+    from ssh_honeypot.core.utils import random_response_delay, extract_snippet
 except ImportError:
-    from utils import random_response_delay
+    from utils import random_response_delay, extract_snippet
 
 import random
 
@@ -47,8 +53,10 @@ import shlex
 
 try:
     from .logging_setup import log
+    from .universal_cache import universal_cache
 except ImportError:
     from ssh_honeypot.core.logging_setup import log
+    from ssh_honeypot.core.universal_cache import universal_cache
 
 try:
     from ssh_honeypot.handlers.cisco import cmd_main as cisco_handlers
@@ -135,6 +143,12 @@ class CommandHandler:
         self.sed_handler = SedCommand(db, llm_interface)
         self.awk_handler = AwkCommand(db, llm_interface)
         self.lsattr_handler = LsattrCommand(db, llm_interface)
+        self.passwd_handler = PasswdCommand(db, llm_interface)
+        self.id_handler = IdCommand(db, llm_interface)
+        self.date_handler = DateCommand(db, llm_interface)
+        self.uname_handler = UnameCommand(db, llm_interface)
+        self.hostname_handler = HostnameCommand(db, llm_interface)
+        self.uptime_handler = UptimeCommand(db, llm_interface)
 
         # Expanded whitelist maps commands to handler functions or generic
         self.STATE_COMMANDS = {
@@ -161,6 +175,11 @@ class CommandHandler:
             "usermod",
             "chattr",
             "lockr",
+            "passwd",
+            "source",
+            ".",
+            "tftp",
+            "ftpget",
         }
 
         self.READ_ONLY_COMMANDS = {
@@ -250,6 +269,8 @@ class CommandHandler:
             "true",
             "lsattr",
             "lockrc",
+            "source",
+            ".",
         }
 
         self.HONEYTOKENS = {"aws_keys.txt", "id_rsa_backup", "wallet.dat"}
@@ -1162,6 +1183,55 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             new_env[var_name] = val
             return "", {"env": new_env}, {"source": "handler", "cached": False}
 
+        # 0.55 Stdin Redirection Support (<)
+        stdin_pos = -1
+        in_sq = False
+        in_dq = False
+        escaped = False
+
+        for i, char in enumerate(cmd):
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+            if char == "'" and not in_dq:
+                in_sq = not in_sq
+            elif char == '"' and not in_sq:
+                in_dq = not in_dq
+            elif char == "<" and not in_sq and not in_dq:
+                stdin_pos = i
+                break
+
+        if stdin_pos != -1:
+            left_cmd = cmd[:stdin_pos].strip()
+            right_file = cmd[stdin_pos + 1 :].strip()
+
+            # Resolve path
+            abs_path = resolve_path(cwd, right_file)
+            user = context.get("user")
+            client_ip = context.get("client_ip")
+
+            # Read from DB
+            node = self.db.get_user_node(client_ip, user, abs_path)
+            if not node:
+                node = self.db.get_fs_node(abs_path)
+
+            if node and node.get("type") == "file":
+                content = node.get("content", "")
+            else:
+                return (
+                    f"bash: {right_file}: No such file or directory\n",
+                    {},
+                    {"source": "handler", "cached": False},
+                )
+
+            # Execute left command with content as stdin
+            new_context = context.copy()
+            new_context["stdin"] = content
+            return self.process_command(left_cmd, new_context)
+
         # 0.6 Redirection Support (> and >>)
         redirect_pos = -1
         append_mode = False
@@ -1458,22 +1528,28 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
                 log.info(f"[Execution] Simulating script via LLM: {abs_path}")
 
-                prompt = f"The user is executing a script found at '{abs_path}' with content:\n---\n{content}\n---\n(INSTRUCTION: Act as the interpreter. EXECUTE this script virtually and return the Standard Output. Do not describe what it does, just show the output. If it modifies files, include file_modifications in JSON.)"
+                # Shebang Support
+                interpreter = "bash"  # Default
+                if content.startswith("#!"):
+                    first_line = content.split("\n")[0]
+                    if "python" in first_line:
+                        interpreter = "python3"
+                    elif "perl" in first_line:
+                        interpreter = "perl"
+                    elif "bash" in first_line:
+                        interpreter = "bash"
+                    elif "sh" in first_line:
+                        interpreter = "sh"
 
-                resp = self.llm.generate_response(
-                    cmd,  # Use full cmd (args included)
-                    cwd,
-                    history,
-                    [],
-                    [],
-                    client_ip=client_ip,
-                    honeypot_ip=honeypot_ip,
-                    override_prompt=prompt,
-                    persona_config=context.get("persona_config"),
+                log.info(
+                    f"[Execution] Simulating script via {interpreter} (shebang): {abs_path}"
                 )
-                j, t = self._extract_json_or_text(resp)
-                out, ups = self._process_llm_json(j, t)
-                return out, ups, {"source": "llm", "cached": False}
+
+                # Delegate to _handle_interpreter for high-fidelity simulation
+                # We need to construct a command string that _handle_interpreter expects
+                return self._handle_interpreter(
+                    f"{interpreter} {abs_path}", context, interpreter
+                )
 
         # 1. Access Control
         # Bypass allowlist for Cisco Persona (let specific handlers or LLM decide)
@@ -1523,11 +1599,10 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
         if handler_name and hasattr(self, handler_name):
             # 4.1 Handler-Cache check (In-Memory/Memcache only)
-            if (
-                base_cmd in self.CACHABLE_HANDLERS
-                and not has_url
-                and not os.getenv("SSHPOT_TEST_MODE")
-            ):
+            is_test_mode = os.getenv("SSHPOT_TEST_MODE") or os.getenv(
+                "FAUXSSH_TEST_MODE"
+            )
+            if base_cmd in self.CACHABLE_HANDLERS and not has_url and not is_test_mode:
                 try:
                     from .cache import cache
 
@@ -1544,16 +1619,12 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     log.debug(f"[Cache] Handler lookup error: {e}")
 
             # Deception: Add random delay to local commands to match LLM latency timing
-            if not os.getenv("SSHPOT_TEST_MODE"):
+            if not is_test_mode:
                 random_response_delay(0.5, 1.5)
             res = getattr(self, handler_name)(cmd, context)
 
             # 4.2 Save to Handler-Cache if successful and cachable
-            if (
-                base_cmd in self.CACHABLE_HANDLERS
-                and not has_url
-                and not os.getenv("SSHPOT_TEST_MODE")
-            ):
+            if base_cmd in self.CACHABLE_HANDLERS and not has_url and not is_test_mode:
                 try:
                     from .cache import cache
 
@@ -1609,7 +1680,9 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             return True
         return False
 
-    def _process_llm_json(self, r_json, r_text, vfs=None, cwd=None, user=None):
+    def _process_llm_json(
+        self, r_json, r_text, vfs=None, cwd=None, user=None, protocol=None
+    ):
         """
         Standardizes return format.
         Output: (text_output, updates)
@@ -1620,16 +1693,53 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if r_json:
             output_text = r_json.get("output", "")
             updates["new_cwd"] = r_json.get("new_cwd")
+            updates["env"] = r_json.get("env")
             updates["file_modifications"] = r_json.get("file_modifications") or []
         else:
             output_text = r_text
+
+        # Protocol-specific error masking
+        if output_text == "INTERNAL_ERROR":
+            if protocol == "mysql":
+                output_text = "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)"
+            elif protocol == "redis":
+                output_text = "-ERR internal error"
+            elif protocol == "http":
+                output_text = "500 Internal Server Error"
+            else:
+                output_text = "bash: internal error"
+
+        # Strip Markdown Code Blocks
+        if "```" in output_text:
+            import re
+
+            # Try to extract content inside code blocks if it looks like the main output
+            # Regex to find ```[language]\nCONTENT\n```
+            matches = re.findall(r"```(?:\w+)?\n(.*?)```", output_text, re.DOTALL)
+            if matches:
+                # If multiple blocks, join them? Or just take the first?
+                # Usually the first block is the output.
+                output_text = matches[0]
+            else:
+                # Fallback: remove the ticks but keep content?
+                output_text = output_text.replace("```", "")
+
+        # Strip "Explanation", "**Explanation**", "Note:", etc.
+        # Simple heuristic: If "Explanation:" appears, cut everything after.
+        if "Explanation:" in output_text:
+            output_text = output_text.split("Explanation:")[0]
+        if "**Explanation**" in output_text:
+            output_text = output_text.split("**Explanation**")[0]
 
         # Post-Processing: Replace 'alabaster' artifact with actual user
         if user and output_text:
             output_text = output_text.replace("alabaster", user)
             output_text = output_text.replace("Alabaster", user.capitalize())
 
-        return output_text, updates
+        # Cleanup: Sanitize for AI leaks
+        output_text = self.security.sanitize_output(output_text)
+
+        return output_text, updates, {"source": "llm", "cached": False}
 
     # --- NETWORK HANDLERS (Simulated Latency) ---
 
@@ -1691,20 +1801,34 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         log.debug(
             f"[Session: {session_id}] [Cache] Checking cache for '{cmd}' in '{cwd}'"
         )
-        cached_resp = None
-        if hasattr(self.db, "get_cached_response"):
-            cached_resp = self.db.get_cached_response(cmd, cwd)
-        response_json, response_text = self._extract_json_or_text(cached_resp)
-        if response_json or response_text:
+        cache_key = hashlib.md5(f"{cmd}:{cwd}".encode()).hexdigest()
+        cached_item = universal_cache.get("ssh_command", cache_key)
+
+        if cached_item:
+            response_text = cached_item["output_text"]
+            try:
+                response_json = json.loads(response_text)
+            except:
+                response_json = None
+
             if (
                 "Resource temporarily unavailable" not in str(response_json)
                 and "Resource temporarily unavailable" not in response_text
             ):
                 log.debug(f"[Session: {session_id}] [Cache] HIT")
-                out, up = self._process_llm_json(
-                    response_json, response_text, vfs=vfs, cwd=cwd, user=user
+                out, up, _ = self._process_llm_json(
+                    response_json,
+                    response_text,
+                    vfs=vfs,
+                    cwd=cwd,
+                    user=user,
+                    protocol=context.get("protocol"),
                 )
                 return out, up, {"source": "llm-cache", "cached": True}
+
+        cached_resp = (
+            None  # Legacy variable for downstream if needed, but we used cached_item
+        )
 
         log.debug(f"[Session: {session_id}] [Cache] MISS")
         log.info(
@@ -1728,15 +1852,23 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         # Parse logic
         j, t = self._extract_json_or_text(resp)
 
-        # Cache logic
         if (
-            "Error: AI Core Offline" not in resp
-            and "Resource temporarily unavailable" not in resp
-            and hasattr(self.db, "cache_response")
+            resp
+            and "INTERNAL_ERROR" not in resp
+            and "Internal Logic Offline" not in resp
         ):
-            self.db.cache_response(cmd, cwd, resp)
+            cache_key = hashlib.md5(f"{cmd}:{cwd}".encode()).hexdigest()
+            universal_cache.set(
+                service="ssh_command",
+                key=cache_key,
+                input_text=f"{cmd} (cwd: {cwd})",
+                output_text=resp,
+                ttl_days=30,
+            )
 
-        out, up = self._process_llm_json(j, t, user=user)
+        out, up, meta = self._process_llm_json(
+            j, t, user=user, protocol=context.get("protocol")
+        )
 
         # Sync Analysis Save
         if up.get("analysis"):
@@ -1796,7 +1928,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             log.debug(
                 f"[DEBUG] LS Cache Hit for {abs_path}: {len(all_files)} files (DB: {len(cached_files)}, User/VFS: {len(all_files)-len(cached_files)})"
             )
-            return self._format_ls_output(all_files, flags), {}
+            return (
+                self._format_ls_output(all_files, flags),
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         # 4. Fallback to LLM (Provide context if needed)
         # We pass empty file list for external paths to avoid hallucination confusion.
@@ -1855,7 +1991,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     )
 
         if (
-            "Error: AI Core Offline" not in resp
+            "INTERNAL_ERROR" not in resp
             and "Resource temporarily unavailable" not in resp
             and hasattr(self.db, "cache_response")
         ):
@@ -1948,25 +2084,35 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         )
         if user_node:
             if user_node.get("type") == "file":
-                return f"bash: cd: {target_path}: Not a directory\n", {}
-            elif user_node.get("type") in [
-                "dir",
-                "directory",
-            ]:  # 'dir' or 'directory'? standardized to 'dir' in mkdir but 'directory' in fs_seeder?
-                # mkdir uses 'dir'. fs_seeder seems to use 'directory'?
-                # Let's support both or check strict.
-                # If it IS a directory, success.
+                return (
+                    f"bash: cd: {target_path}: Not a directory\n",
+                    {},
+                    {"source": "handler", "cached": False},
+                )
+            elif user_node.get("type") in ["dir", "directory"]:
                 log.debug(f"[Handler] CD Optimization Hit (User): {abs_path}")
-                return "", {"new_cwd": abs_path}
+                return (
+                    "",
+                    {"new_cwd": abs_path},
+                    {"source": "handler", "cached": False},
+                )
 
         node = self.db.get_fs_node(abs_path)
         if node:
             if node.get("type") == "file":
-                return f"bash: cd: {target_path}: Not a directory\n", {}
+                return (
+                    f"bash: cd: {target_path}: Not a directory\n",
+                    {},
+                    {"source": "handler", "cached": False},
+                )
             elif node.get("type") == "directory":
                 # Local Success! Return updates without LLM cost
                 log.debug(f"[Handler] CD Optimization Hit (Global): {abs_path}")
-                return "", {"new_cwd": abs_path}
+                return (
+                    "",
+                    {"new_cwd": abs_path},
+                    {"source": "handler", "cached": False},
+                )
 
         # 2. Fallback to LLM if path not found locally (maybe simulated in cache only?)
         # Instruct LLM to be silent on success
@@ -1990,7 +2136,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             j["output"] = ""
 
         if (
-            "Error: AI Core Offline" not in resp
+            "INTERNAL_ERROR" not in resp
             and "Resource temporarily unavailable" not in resp
             and hasattr(self.db, "cache_response")
         ):
@@ -1998,18 +2144,26 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         return self._process_llm_json(j, t)
 
     def handle_pwd(self, cmd, context):
-        return f"{context.get('cwd', '/')}\n", {}
+        return (
+            context.get("cwd", "/") + "\n",
+            {},
+            {"source": "handler", "cached": False},
+        )
 
     def handle_whoami(self, cmd, context):
-        return f"{context.get('user', 'unknown')}\n", {}
+        return (
+            context.get("user", "user") + "\n",
+            {},
+            {"source": "handler", "cached": False},
+        )
 
     # --- DELEGATES TO SYSTEM HANDLER ---
 
     def handle_hostname(self, cmd, context):
-        return self.system_handler.handle_hostname(cmd, context)
+        return self.hostname_handler.handle(cmd, context)
 
     def handle_uptime(self, cmd, context):
-        return self.system_handler.handle_uptime(cmd, context)
+        return self.uptime_handler.handle(cmd, context)
 
     def handle_free(self, cmd, context):
 
@@ -2025,23 +2179,23 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         return self.system_handler.handle_netstat(cmd, context)
 
     def handle_nproc(self, cmd, context):
-        out, updates = self.system_handler.handle_nproc(cmd, context)
+        out, updates, _ = self.system_handler.handle_nproc(cmd, context)
         return out, updates, {"source": "handler", "cached": False}
 
     def handle_lscpu(self, cmd, context):
-        out, updates = self.system_handler.handle_lscpu(cmd, context)
+        out, updates, _ = self.system_handler.handle_lscpu(cmd, context)
         return out, updates, {"source": "handler", "cached": False}
 
     def handle_lspci(self, cmd, context):
-        out, updates = self.system_handler.handle_lspci(cmd, context)
+        out, updates, _ = self.system_handler.handle_lspci(cmd, context)
         return out, updates, {"source": "handler", "cached": False}
 
     def handle_dmidecode(self, cmd, context):
-        out, updates = self.system_handler.handle_dmidecode(cmd, context)
+        out, updates, _ = self.system_handler.handle_dmidecode(cmd, context)
         return out, updates, {"source": "handler", "cached": False}
 
     def handle_last(self, cmd, context):
-        out, updates = self.system_handler.handle_last(cmd, context)
+        out, updates, _ = self.system_handler.handle_last(cmd, context)
         return out, updates, {"source": "handler", "cached": False}
 
     def _generate_or_get_content(self, cmd_name, target_path, context):
@@ -2142,16 +2296,16 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         input_text = context.get("stdin", "")
         # If no stdin, tr hangs (in real unix). Here we explicitly require it or return empty
         if not input_text:
-            return "", {}
+            return "", {}, {"source": "handler", "cached": False}
 
         try:
             parts = shlex.split(cmd)
         except:
-            return "tr: parse error\n", {}
+            return "tr: parse error\n", {}, {"source": "handler", "cached": False}
 
         args = parts[1:]
         if not args:
-            return "tr: missing operand\n", {}
+            return "tr: missing operand\n", {}, {"source": "handler", "cached": False}
 
         delete_mode = False
         squeeze_mode = False
@@ -2174,7 +2328,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
         sets = args[idx:]
         if not sets:
-            return "tr: missing operand\n", {}
+            return "tr: missing operand\n", {}, {"source": "handler", "cached": False}
 
         def expand_set(s):
             # Simple range expansion [a-z] or a-z
@@ -2209,7 +2363,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if delete_mode:
             # Delete chars in set1
             trans_table = str.maketrans("", "", set1)
-            return input_text.translate(trans_table), {}
+            return (
+                input_text.translate(trans_table),
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         if squeeze_mode and not sets[1:]:
             # Squeeze repeats of chars in set1
@@ -2230,11 +2388,15 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     continue
                 out.append(c)
                 last = c
-            return "".join(out), {}
+            return "".join(out), {}, {"source": "handler", "cached": False}
 
         # Transliterate
         if len(sets) < 2:
-            return f"tr: missing operand after '{set1_raw}'\n", {}
+            return (
+                f"tr: missing operand after '{set1_raw}'\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         set2_raw = sets[1]
         set2 = expand_set(set2_raw)
@@ -2262,10 +2424,13 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     last = c
                 res = "".join(out)
 
-            return res, {}
-
+            return res, {}, {"source": "handler", "cached": False}
         except Exception as e:
-            return f"tr: execution error {e}\n", {}
+            return (
+                f"tr: execution error {e}\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
     def handle_head(self, cmd, context):
         return self.head_handler.handle(cmd, context)
@@ -2287,28 +2452,46 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         import json  # Ensure json is imported for this function
 
         parts = cmd.split()
-        if len(parts) < 2:
-            # Interactive mode not supported well, return fake prompt or error
-            return f"{interpreter_name}: missing file operand\n", {}
-
-        target_path = parts[1]  # script.sh
+        target_path = parts[1] if len(parts) > 1 else "stdin"
+        stdin_content = context.get("stdin")
 
         # Get Content (Prioritizing User Uploads)
-        content, source = self._generate_or_get_content(
-            interpreter_name, target_path, context
+        content = None
+        source = "unknown"
+
+        if len(parts) >= 2:
+            content, source = self._generate_or_get_content(
+                interpreter_name, target_path, context
+            )
+        elif stdin_content:
+            content = stdin_content
+            source = "stdin"
+
+        if not content:
+            if len(parts) < 2:
+                # Interactive mode not supported well, return fake prompt or error
+                return (
+                    f"{interpreter_name}: missing file operand\n",
+                    {},
+                    {"source": "handler", "cached": False},
+                )
+            # Fallback
+            return (
+                f"{interpreter_name}: {target_path}: No such file or directory\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
+
+        log.info(
+            f"[{interpreter_name}] Executing script from {source}: {target_path if source != 'stdin' else 'PIPE'} (Len: {len(content)})"
         )
 
-        # If content is short and looks like error (e.g. "cat: ..."), return it as is?
-        # _generate_or_get_content returns LLM generated content if missing.
-        # Ideally we want the REAL content.
+        if source == "stdin":
+            prompt_context = f"The user is piping the following content into {interpreter_name} (stdin):"
+        else:
+            prompt_context = f"The user is running the following {interpreter_name} script found at '{target_path}':"
 
-        # We passed the check in process_command? No, this is the handler.
-
-        print(
-            f"[{interpreter_name}] Executing script: {target_path} (Context len: {len(content)})"
-        )
-
-        prompt = f"The user is running the following {interpreter_name} script found at '{target_path}':\n\n```\n{content}\n```\n\n(INSTRUCTION: Act as the {interpreter_name} interpreter. EXECUTE this script virtually and return ONLY the Standard Output. Do not describe what it does. If it modifies files, include file_modifications in JSON.)"
+        prompt = f"{prompt_context}\n\n```\n{content}\n```\n\n(INSTRUCTION: Act as the {interpreter_name} interpreter. EXECUTE this script virtually and return ONLY the Standard Output. Do NOT output the script source code. If the script produces no output, return an empty string. If it modifies files, include file_modifications in JSON. Provide a realistic response that a real Linux system would produce for this script.)"
 
         # Call LLM directly or via heuristic?
         # We use handle_generic logic but force specific prompt?
@@ -2328,18 +2511,32 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         cache_cmd_key = f"{cmd}::hash={content_hash}"
 
         cached = None
-        if hasattr(self.db, "get_cached_response"):
-            cached = self.db.get_cached_response(cache_cmd_key, context.get("cwd"))
-        if cached:
-            return self._process_llm_json(
-                json.loads(cached) if cached.startswith("{") else None, cached
+        # Use UniversalCache
+        svc = f"{interpreter_name}_interpreter"
+        cache_key = hashlib.md5(
+            f"{svc}:{cache_cmd_key}:{context.get('cwd')}".encode()
+        ).hexdigest()
+        cached_item = universal_cache.get(svc, cache_key)
+
+        if cached_item:
+            cached_resp = cached_item["output_text"]
+            log.debug(f"[Cisco] Cache HIT for {cache_cmd_key}")
+            j, t = self._extract_json_or_text(cached_resp)
+            res, updates, _ = self._process_llm_json(
+                j, t, user=context.get("user"), protocol=context.get("protocol", "ssh")
+            )
+            return (
+                res,
+                updates,
+                {
+                    "source": "llm-cache",
+                    "cached": True,
+                    "analysis": j.get("analysis") if j else None,
+                },
             )
 
         # LLM Call
         history = context.get("history", [])
-        # We pass minimal history to avoid noise, or full history?
-        # Script execution should be stateless mostly unless it uses env vars?
-        # Let's pass history.
         resp = self.llm.generate_response(
             prompt,
             context.get("cwd"),
@@ -2349,18 +2546,80 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         )
 
         # Cache it
-        if hasattr(self.db, "cache_response"):
-            self.db.cache_response(cache_cmd_key, context.get("cwd"), resp)
+        if resp and "INTERNAL_ERROR" not in resp:
+            cache_key = hashlib.md5(
+                f"cisco:{cache_cmd_key}:{context.get('cwd')}".encode()
+            ).hexdigest()
+            universal_cache.set(
+                service=svc,
+                key=cache_key,
+                input_text=f"{cache_cmd_key} (cwd: {context.get('cwd')})",
+                output_text=resp,
+                ttl_days=30,
+            )
 
         j, t = self._extract_json_or_text(resp)
-        res, updates = self._process_llm_json(j, t)
-        return res, updates, {"source": "llm", "cached": False}
+        res, updates, _ = self._process_llm_json(j, t, protocol="http")
+
+        # Intelligence: Analyze the script content for risk
+        try:
+            analysis = self.llm.analyze_command(
+                f"FILE_EXECUTION({target_path}): {content[:1000]}"
+            )
+            if analysis and isinstance(analysis, dict):
+                self.db.save_command_analysis(
+                    command_hash=content_hash,
+                    command_text=f"Execution of {target_path}",
+                    activity_type=analysis.get("type", "Execution"),
+                    stage=analysis.get("stage", "Exploitation"),
+                    risk_score=analysis.get("risk", 70),
+                    explanation=analysis.get(
+                        "explanation", "Simulated script execution"
+                    ),
+                )
+        except Exception as ae:
+            log.warning(f"Failed to analyze script risk: {ae}")
+
+        return (
+            res,
+            updates,
+            {
+                "source": "llm",
+                "cached": False,
+                "analysis": j.get("analysis") if j else None,
+            },
+        )
 
     def handle_bash(self, cmd, context):
+        import shlex
+
+        parts = shlex.split(cmd)
+        if "-c" in parts:
+            try:
+                c_idx = parts.index("-c")
+                if c_idx + 1 < len(parts):
+                    inner_cmd = parts[c_idx + 1]
+                    log.debug(
+                        f"[Handler] bash -c detected. Executing inner: {inner_cmd}"
+                    )
+                    # Recursively process the command string
+                    return self.process_command(inner_cmd, context)
+            except Exception as e:
+                log.warning(f"[Handler] Error parsing bash -c: {e}")
+
         return self._handle_interpreter(cmd, context, "bash")
 
     def handle_sh(self, cmd, context):
-        return self._handle_interpreter(cmd, context, "sh")
+        # Alias sh to bash
+        return self.handle_bash(cmd, context)
+
+    def handle_source(self, cmd, context):
+        """source script.sh -> execute via bash"""
+        return self._handle_interpreter(cmd, context, "bash")
+
+    def handle_dot(self, cmd, context):
+        """. script.sh -> execute via bash"""
+        return self._handle_interpreter(cmd, context, "bash")
 
     def handle_python(self, cmd, context):
         return self._handle_interpreter(cmd, context, "python")
@@ -2413,18 +2672,13 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         )
 
     def handle_date(self, cmd, context):
-        return datetime.datetime.now().strftime("%a %b %d %H:%M:%S %Z %Y\n"), {}
+        return self.date_handler.handle(cmd, context)
 
     def handle_id(self, cmd, context):
-        user = context.get("user", "alabaster")
-        # Simulate typical uid/gid
-        if user == "root":
-            return "uid=0(root) gid=0(root) groups=0(root)\n", {}
-        else:
-            return (
-                f"uid=1000({user}) gid=1000({user}) groups=1000({user}),24(cdrom),25(floppy),29(audio),30(dip),44(video),46(plugdev),108(netdev)\n",
-                {},
-            )
+        return self.id_handler.handle(cmd, context)
+
+    def handle_passwd(self, cmd, context):
+        return self.passwd_handler.handle(cmd, context)
 
     def handle_sleep(self, cmd, context):
         try:
@@ -2449,7 +2703,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             else:
                 time.sleep(duration)
         except ValueError:
-            return f"sleep: invalid time interval '{parts[1]}'\n", {}
+            return (
+                f"sleep: invalid time interval '{parts[1]}'\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
         except Exception:
             pass
         return "", {}, {"source": "handler", "cached": False}
@@ -2457,28 +2715,48 @@ Sector size (logical/physical): 512 bytes / 512 bytes
     def handle_ifconfig(self, cmd, context):
         # Delegate to network_handlers
         args = cmd.split()[1:]
-        return self.network_handlers.handle_ifconfig(args), {}
+        return (
+            self.network_handlers.handle_ifconfig(args),
+            {},
+            {"source": "handler", "cached": False},
+        )
 
     def handle_ip(self, cmd, context):
         args = cmd.split()[1:]
-        return self.network_handlers.handle_ip(args), {}
+        return (
+            self.network_handlers.handle_ip(args),
+            {},
+            {"source": "handler", "cached": False},
+        )
 
     def handle_netstat(self, cmd, context):
         args = cmd.split()[1:]
         client_ip = context.get("client_ip", "unknown")
-        return self.network_handlers.handle_netstat(args, client_ip), {}
+        return (
+            self.network_handlers.handle_netstat(args, client_ip),
+            {},
+            {"source": "handler", "cached": False},
+        )
 
     def handle_ss(self, cmd, context):
         args = cmd.split()[1:]
         client_ip = context.get("client_ip", "unknown")
-        return self.network_handlers.handle_ss(args, client_ip), {}
+        return (
+            self.network_handlers.handle_ss(args, client_ip),
+            {},
+            {"source": "handler", "cached": False},
+        )
 
     def handle_ping(self, cmd, context):
         args = cmd.split()[1:]
         # handle_ping in network_handlers typically yields?
         # network_handlers.handle_ping returns STRING (implied from inspection)
         # But real ping streams. For now, block return is fine per current architecture
-        return self.network_handlers.handle_ping(args), {}
+        return (
+            self.network_handlers.handle_ping(args),
+            {},
+            {"source": "handler", "cached": False},
+        )
         # Basic echo - handles "-e" partially or just returns string
         # Ignores redirection (handled by shell parser if any, else we print to stdout)
         # We need to strip "echo "
@@ -2512,13 +2790,21 @@ Sector size (logical/physical): 512 bytes / 512 bytes
     def handle_touch(self, cmd, context):
         parts = cmd.split()
         if len(parts) < 2:
-            return "touch: missing file operand\n", {}
+            return (
+                "touch: missing file operand\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         target_path = parts[1]
         abs_path = resolve_path(context.get("cwd"), target_path)
 
         if not self._is_modification_allowed(abs_path):
-            return f"touch: cannot touch '{target_path}': Permission denied\n", {}
+            return (
+                f"touch: cannot touch '{target_path}': Permission denied\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         client_ip = context.get("client_ip")
         user = context.get("user")
@@ -2547,12 +2833,20 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 "",
             )
 
-        return "", {"file_modifications": [{"action": "create", "path": abs_path}]}
+        return (
+            "",
+            {"file_modifications": [{"action": "create", "path": abs_path}]},
+            {"source": "handler", "cached": False},
+        )
 
     def handle_mkdir(self, cmd, context):
         parts = cmd.split()
         if len(parts) < 2:
-            return "mkdir: missing operand\n", {}
+            return (
+                "mkdir: missing operand\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         target_path = parts[1]
         abs_path = resolve_path(context.get("cwd"), target_path)
@@ -2561,6 +2855,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             return (
                 f"mkdir: cannot create directory '{target_path}': Permission denied\n",
                 {},
+                {"source": "handler", "cached": False},
             )
 
         client_ip = context.get("client_ip")
@@ -2569,7 +2864,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         # Check if exists
         curr = self.db.get_user_node(client_ip, user, abs_path)
         if curr:
-            return f"mkdir: cannot create directory '{target_path}': File exists\n", {}
+            return (
+                f"mkdir: cannot create directory '{target_path}': File exists\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         self.db.update_user_file(
             client_ip,
@@ -2580,7 +2879,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             {"permissions": "drwxr-xr-x", "owner": user, "group": user},
             None,
         )
-        return "", {"file_modifications": [{"action": "create", "path": abs_path}]}
+        return (
+            "",
+            {"file_modifications": [{"action": "create", "path": abs_path}]},
+            {"source": "handler", "cached": False},
+        )
 
     def handle_rmdir(self, cmd, context):
         return self.rmdir_handler.handle(cmd, context)
@@ -2592,7 +2895,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         targets = [p for p in parts if not p.startswith("-") and p != "rm"]
 
         if not targets:
-            return "rm: missing operand\n", {}
+            return (
+                "rm: missing operand\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         output = ""
         client_ip = context.get("client_ip")
@@ -2653,7 +2960,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             {"action": "delete", "path": resolve_path(context.get("cwd"), t)}
             for t in targets
         ]
-        return output, {"file_modifications": mods}
+        return (
+            output,
+            {"file_modifications": mods},
+            {"source": "handler", "cached": False},
+        )
 
     def handle_cp(self, cmd, context):
         parts = cmd.split()
@@ -2661,7 +2972,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         # Ignore flags for now
         args = [p for p in parts if not p.startswith("-") and p != "cp"]
         if len(args) < 2:
-            return "cp: missing file operand\n", {}
+            return (
+                "cp: missing file operand\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         src = args[0]
         dest = args[1]
@@ -2670,7 +2985,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         abs_dest = resolve_path(context.get("cwd"), dest)
 
         if not self._is_modification_allowed(abs_dest):
-            return f"cp: cannot create regular file '{dest}': Permission denied\n", {}
+            return (
+                f"cp: cannot create regular file '{dest}': Permission denied\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         # Get Source Content
         content, source = self._generate_or_get_content("cp", src, context)
@@ -2691,6 +3010,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 return (
                     f"cp: cannot create regular file '{dest}': Permission denied\n",
                     {},
+                    {"source": "handler", "cached": False},
                 )
 
         self.db.update_user_file(
@@ -2708,14 +3028,22 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             content,
         )
 
-        return "", {"file_modifications": [{"action": "create", "path": abs_dest}]}
+        return (
+            "",
+            {"file_modifications": [{"action": "create", "path": abs_dest}]},
+            {"source": "handler", "cached": False},
+        )
 
     def handle_mv(self, cmd, context):
         # reuse cp + rm logic
         parts = cmd.split()
         args = [p for p in parts if not p.startswith("-") and p != "mv"]
         if len(args) < 2:
-            return "mv: missing operand\n", {}
+            return (
+                "mv: missing operand\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         src = args[0]
         dest = args[1]
@@ -2727,7 +3055,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
         abs_dest = resolve_path(context.get("cwd"), dest)
         if not self._is_modification_allowed(abs_dest):
-            return f"mv: cannot move '{src}' to '{dest}': Permission denied\n", {}
+            return (
+                f"mv: cannot move '{src}' to '{dest}': Permission denied\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         # 1. CP
         res_cp = self.handle_cp(f"cp {src} {dest}", context)
@@ -2737,16 +3069,28 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         # 2. RM
         self.handle_rm(f"rm -rf {src}", context)
 
-        return "", {}  # Silent success assumption
+        return (
+            "",
+            {},
+            {"source": "handler", "cached": False},
+        )  # Silent success assumption
 
     def handle_wget(self, cmd, context):
         import random
         import time
         import shlex
+        import hashlib
+        from ssh_honeypot.core.clogging import clogger
+        from ssh_honeypot.core.utils import extract_snippet
+        from ssh_honeypot.core.universal_cache import universal_cache
 
         parts = shlex.split(cmd)
         if len(parts) < 2:
-            return "wget: missing URL\nUsage: wget [OPTION]... [URL]...", {}
+            return (
+                "wget: missing URL\nUsage: wget [OPTION]... [URL]...",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         # Basic Argument Parsing
         url = None
@@ -2780,7 +3124,10 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 url = arg
 
         if not url:
-            return "wget: missing URL", {}
+            return "wget: missing URL\n", {}, {"source": "handler", "cached": False}
+
+        if not output_file:
+            output_file = url.split("/")[-1] or "index.html"
 
         # Intelligence Logging
         if context.get("session_id"):
@@ -2807,11 +3154,15 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     content,
                 )
                 return (
-                    ""
-                    if is_quiet
-                    else f"--{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}--  {url}\nResolving {domain}... 127.0.0.1\nConnecting to {domain}|127.0.0.1|:80... connected.\nHTTP request sent, awaiting response... 200 OK\nLength: {len(content)} [text/html]\nSaving to: '{output_file}'\n\n     0K .......... .......... .......... .......... ..........  100% 93.1M 0s\n\n{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ({len(content)} B/s) - '{output_file}' saved [{len(content)}/{len(content)}]\n"
-                ), {}
-            return content + "\n", {}
+                    (
+                        ""
+                        if is_quiet
+                        else f"--{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}--  {url}\nResolving {domain}... 127.0.0.1\nConnecting to {domain}|127.0.0.1|:80... connected.\nHTTP request sent, awaiting response... 200 OK\nLength: {len(content)} [text/html]\nSaving to: '{output_file}'\n\n     0K .......... .......... .......... .......... ..........  100% 93.1M 0s\n\n{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ({len(content)} B/s) - '{output_file}' saved [{len(content)}/{len(content)}]\n"
+                    ),
+                    {},
+                    {"source": "handler", "cached": False},
+                )
+            return content + "\n", {}, {"source": "handler", "cached": False}
 
         # Hybrid LLM Generation
         if not is_quiet:
@@ -2819,17 +3170,82 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             response_pre = f"--{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}--  {url}\nResolving {domain}... {shlex.quote('1.1.1.1')}\nConnecting to {domain}|1.1.1.1|:80... connected.\nHTTP request sent, awaiting response... 200 OK\nLength: unspecified [text/html]\n"
             if output_file:
                 response_pre += f"Saving to: '{output_file}'\n\n"
+        # Attempt Real-time Download
+        content = None
+        session_id = context.get("session_id")
+        remote_ip = context.get("client_ip", "unknown")
+        snippet = None
 
-        # Ask LLM for content
-        persona_sum = config.get("persona", "description") or "Generic Linux Server"
-        content = self.llm.generate_content(cmd, url, persona_sum)
+        # Check UniversalCache for wget
+        cache_key = hashlib.md5(f"wget:{cmd}:{context.get('cwd')}".encode()).hexdigest()
+        cached_item = universal_cache.get("wget_command", cache_key)
 
-        # Post-Processing
+        if cached_item:
+            content = cached_item["output_text"]
+            snippet = cached_item.get("metadata", {}).get("snippet")
+            log.debug(f"[Wget] Cache HIT for {cmd}")
+        else:
+            if self.payload_manager:
+                log.info(f"[Payload] Attempting real-time download for {url}")
+                raw_content = self.payload_manager.download_and_analyze_sync(
+                    url, session_id, remote_ip
+                )
+                if raw_content:
+                    # Content is bytes, convert to string if possible for LLM
+                    try:
+                        content = raw_content.decode("utf-8", "ignore")
+                        snippet = extract_snippet(raw_content)
+                    except:
+                        content = str(raw_content)
+                        snippet = str(raw_content[:200])
+                else:
+                    # If download failed, check if we should return a timeout error (Realism)
+                    domain = url.split("/")[2] if "//" in url else url.split("/")[0]
+                    if (
+                        domain.startswith("10.")
+                        or domain.startswith("192.168.")
+                        or (
+                            domain.startswith("172.")
+                            and len(domain) > 3
+                            and domain[4:6].isdigit()
+                            and 16 <= int(domain[4:6]) <= 31
+                        )
+                    ) and (
+                        os.getenv("FAUXSSH_TEST_MODE") or os.getenv("SSHPOT_TEST_MODE")
+                    ):
+                        return (
+                            f"--{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}--  {url}\n"
+                            f"Connecting to {domain}... failed: Connection timed out.\n",
+                            {},
+                            {"source": "simulated", "cached": False},
+                        )
+
+            if not content:
+                # Fallback to LLM Content Generation
+                persona_sum = (
+                    config.get("persona", "description") or "Generic Linux Server"
+                )
+                content = self.llm.generate_content(cmd, url, persona_sum)
+                snippet = extract_snippet(
+                    content.encode() if isinstance(content, str) else content
+                )
+
+            # Cache the result
+            if content:
+                universal_cache.set(
+                    service="wget_command",
+                    key=cache_key,
+                    input_text=cmd,
+                    output_text=content,
+                    ttl_days=30,
+                    extra_data={"snippet": snippet},
+                )
+
         if output_file:
             # Save to VFS
             abs_path = resolve_path(context.get("cwd"), output_file)
-            self.honey_db.update_user_file(
-                context.get("ip"),
+            self.db.update_user_file(
+                context.get("client_ip"),
                 context.get("user"),
                 abs_path,
                 os.path.dirname(abs_path),
@@ -2838,46 +3254,213 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 content,
             )
 
-            if not is_quiet:
-                # Fake Progress Bar
-                progress = f"    [ <=>                                                  ] {len(content)}        --.-K/s   in 0.1s    \n\n{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (10.0 MB/s) - '{output_file}' saved [{len(content)}]\n"
-                return response_pre + progress, {}
-            return "", {}
-
-        return content + "\n", {}
-
-    def handle_curl(self, cmd, context):
-        if not self._is_whitelisted(cmd):
-            if os.getenv("SSHPOT_TEST_MODE"):
-                import time
-                import random
-
+            # Log Payload Capture (Snippet) - Separate Interaction
+            if snippet and session_id:
                 try:
-                    from ssh_honeypot.core.utils import random_response_delay
-                except:
-                    from utils import random_response_delay
-                random_response_delay(0.1, 0.2)
-            else:
-                import time
+                    interaction_data = {
+                        "cwd": context.get("cwd"),
+                        "input": f"Payload Capture: {output_file}",
+                        "response": snippet,
+                        "request_md5": hashlib.md5(
+                            f"payload_{url}".encode()
+                        ).hexdigest(),
+                        "duration_ms": 0,
+                        "source": "payload-capture",
+                        "cached": False,
+                    }
+                    clogger.log_event(
+                        "interaction",
+                        interaction_data,
+                        session_id=session_id,
+                        ip=context.get("client_ip"),
+                    )
+                except Exception as e:
+                    log.error(f"[Wget] Error logging snippet: {e}")
 
-                try:
-                    from ssh_honeypot.core.utils import random_response_delay
-                except:
-                    from utils import random_response_delay
-                random_response_delay(5.0, 10.0)
             return (
-                "curl: (28) Connection timed out after 5001 milliseconds\n",
+                (
+                    ""
+                    if is_quiet
+                    else response_pre
+                    + f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (1.2 MB/s) - '{output_file}' saved [{len(content)}/{len(content)}]\n"
+                ),
                 {},
-                {"source": "simulated", "cached": False},
+                {"source": "handler", "cached": False},
             )
+        return content + "\n", {}, {"source": "handler", "cached": False}
 
+    def handle_tftp(self, cmd, context):
+        """
+        Local handler for tftp.
+        Supports common patterns:
+        - tftp host -c get file
+        - tftp -g -r file host (Busybox)
+        """
         import shlex
-        import time
-        import random
+        import datetime
+        import hashlib
+        from ssh_honeypot.core.clogging import clogger
+        from ssh_honeypot.core.utils import extract_snippet
+        from ssh_honeypot.core.universal_cache import universal_cache
 
         parts = shlex.split(cmd)
         if len(parts) < 2:
-            return "curl: try 'curl --help' for more information\n", {}
+            return (
+                "tftp: missing host/operand\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
+
+        host = None
+        remote_file = None
+        local_file = None
+
+        # Pattern: tftp -g -r file host
+        if "-g" in parts:
+            if "-r" in parts:
+                r_idx = parts.index("-r")
+                if r_idx + 1 < len(parts):
+                    remote_file = parts[r_idx + 1]
+            # Host is usually the last part
+            if parts[-1] != "-g" and not parts[-1].startswith("-"):
+                host = parts[-1]
+            local_file = remote_file
+
+        # Pattern: tftp host -c get file
+        elif "-c" in parts:
+            host = parts[1]
+            c_idx = parts.index("-c")
+            if c_idx + 2 < len(parts) and parts[c_idx + 1] == "get":
+                remote_file = parts[c_idx + 2]
+                local_file = remote_file
+
+        # Fallback: first non-flag is host
+        if not host:
+            for p in parts[1:]:
+                if not p.startswith("-"):
+                    host = p
+                    break
+
+        if not remote_file:
+            # Interactive mode not perfectly supported, return error or mock
+            return (
+                f"Connected to {host or 'unknown'}.\ntftp> get ",
+                {},
+                {"source": "handler", "cached": False},
+            )
+
+        url = f"tftp://{host}/{remote_file}"
+        output_file = local_file or remote_file
+
+        # Intelligence Logging
+        if context.get("session_id"):
+            self.honey_db.log_url_request(
+                context["session_id"], url, "GET", "tftp", cmd
+            )
+
+        # Attempt Real-time Download
+        content = None
+        session_id = context.get("session_id")
+        remote_ip = context.get("client_ip", "unknown")
+        snippet = None
+
+        # Check UniversalCache for tftp
+        cache_key = hashlib.md5(f"tftp:{cmd}:{context.get('cwd')}".encode()).hexdigest()
+        cached_item = universal_cache.get("tftp_command", cache_key)
+
+        if cached_item:
+            content = cached_item["output_text"]
+            snippet = cached_item.get("metadata", {}).get("snippet")
+            log.debug(f"[TFTP] Cache HIT for {cmd}")
+        else:
+            if self.payload_manager:
+                log.info(f"[Payload] TFTP Attempting real-time download for {url}")
+                raw_content = self.payload_manager.download_and_analyze_sync(
+                    url, session_id, remote_ip
+                )
+                if raw_content:
+                    try:
+                        content = raw_content.decode("utf-8", "ignore")
+                        snippet = extract_snippet(raw_content)
+                    except:
+                        content = str(raw_content)
+                        snippet = str(raw_content[:200])
+
+            if not content:
+                persona_sum = (
+                    config.get("persona", "description") or "Generic Linux Server"
+                )
+                content = self.llm.generate_content(cmd, url, persona_sum)
+                snippet = extract_snippet(
+                    content.encode() if isinstance(content, str) else content
+                )
+
+            # Cache the result
+            if content:
+                universal_cache.set(
+                    service="tftp_command",
+                    key=cache_key,
+                    input_text=cmd,
+                    output_text=content,
+                    ttl_days=30,
+                    extra_data={"snippet": snippet},
+                )
+
+        # Save to VFS
+        abs_path = resolve_path(context.get("cwd"), output_file)
+        self.db.update_user_file(
+            context.get("client_ip"),
+            context.get("user"),
+            abs_path,
+            os.path.dirname(abs_path),
+            "file",
+            {"size": len(content)},
+            content,
+        )
+
+        # Log Payload Capture (Snippet) - Separate Interaction
+        if snippet and session_id:
+            try:
+                interaction_data = {
+                    "cwd": context.get("cwd"),
+                    "input": f"Payload Capture: {output_file}",
+                    "response": snippet,
+                    "request_md5": hashlib.md5(f"payload_{url}".encode()).hexdigest(),
+                    "duration_ms": 0,
+                    "source": "payload-capture",
+                    "cached": False,
+                }
+                clogger.log_event(
+                    "interaction",
+                    interaction_data,
+                    session_id=session_id,
+                    ip=context.get("client_ip"),
+                )
+            except Exception as e:
+                log.error(f"[TFTP] Error logging snippet: {e}")
+
+        return (
+            f"Getting {remote_file} from {host}\nReceived {len(content)} bytes in 0.1 seconds\n",
+            {},
+            {"source": "handler", "cached": False},
+        )
+
+    def handle_curl(self, cmd, context):
+        import shlex
+        import time
+        import random
+        import hashlib
+        from ssh_honeypot.core.clogging import clogger
+        from ssh_honeypot.core.utils import extract_snippet
+        from ssh_honeypot.core.universal_cache import universal_cache
+
+        parts = shlex.split(cmd)
+        if len(parts) < 2:
+            return (
+                "curl: try 'curl --help' for more information\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         url = None
         output_file = None
@@ -2895,8 +3478,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 continue
 
             if arg == "-O":  # Remote Name
-                skip_next = False  # Url is next usually, but -O takes no arg
-                # If -O is used, we need to infer filename from URL later
+                skip_next = False
                 output_file = "REMOTE_NAME"
             elif arg == "-o":
                 if i + 1 < len(parts):
@@ -2914,7 +3496,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 url = arg
 
         if not url:
-            return "curl: no URL specified!\n", {}
+            return (
+                "curl: no URL specified!\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         if output_file == "REMOTE_NAME":
             output_file = url.split("/")[-1] or "index.html"
@@ -2938,21 +3524,84 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 return (
                     "HTTP/1.1 200 OK\nServer: nginx/1.18.0\nDate: Mon, 01 Jan 2026 12:00:00 GMT\nContent-Type: text/html\nContent-Length: 45\nConnection: keep-alive\n\n",
                     {},
+                    {"source": "handler", "cached": False},
                 )
-            return content + "\n", {}
+            return content + "\n", {}, {"source": "handler", "cached": False}
 
         # Hybrid LLM
-        persona_sum = config.get("persona", "description") or "Generic Linux Server"
-        # Append "HEAD request" hint to persona if needed, or rely on cmd in prompt
-        if is_head:
-            persona_sum += " (User requested HTTP HEADERS only)"
+        content = None
+        session_id = context.get("session_id")
+        remote_ip = context.get("client_ip", "unknown")
+        snippet = None
 
-        content = self.llm.generate_content(cmd, url, persona_sum)
+        # Check UniversalCache for curl
+        cache_key = hashlib.md5(f"curl:{cmd}:{context.get('cwd')}".encode()).hexdigest()
+        cached_item = universal_cache.get("curl_command", cache_key)
+
+        if cached_item:
+            content = cached_item["output_text"]
+            snippet = cached_item.get("metadata", {}).get("snippet")
+            log.debug(f"[Curl] Cache HIT for {cmd}")
+        else:
+            # Don't download for HEAD requests
+            if not is_head and self.payload_manager:
+                log.info(f"[Payload] Attempting real-time download for {url}")
+                raw_content = self.payload_manager.download_and_analyze_sync(
+                    url, session_id, remote_ip
+                )
+                if raw_content:
+                    try:
+                        content = raw_content.decode("utf-8", "ignore")
+                        snippet = extract_snippet(raw_content)
+                    except:
+                        content = str(raw_content)
+                        snippet = extract_snippet(raw_content)
+                else:
+                    # If download failed, check if we should return a timeout error (Realism)
+                    if (
+                        domain.startswith("10.")
+                        or domain.startswith("192.168.")
+                        or (
+                            domain.startswith("172.")
+                            and len(domain) > 3
+                            and domain[4:6].isdigit()
+                            and 16 <= int(domain[4:6]) <= 31
+                        )
+                    ) and (
+                        os.getenv("FAUXSSH_TEST_MODE") or os.getenv("SSHPOT_TEST_MODE")
+                    ):
+                        return (
+                            "curl: (28) Connection timed out after 5001 milliseconds\n",
+                            {},
+                            {"source": "simulated", "cached": False},
+                        )
+
+            if not content:
+                persona_sum = (
+                    config.get("persona", "description") or "Generic Linux Server"
+                )
+                if is_head:
+                    persona_sum += " (User requested HTTP HEADERS only)"
+                content = self.llm.generate_content(cmd, url, persona_sum)
+                snippet = extract_snippet(
+                    content.encode() if isinstance(content, str) else content
+                )
+
+            # Cache the result
+            if content:
+                universal_cache.set(
+                    service="curl_command",
+                    key=cache_key,
+                    input_text=cmd,
+                    output_text=content,
+                    ttl_days=30,
+                    extra_data={"snippet": snippet},
+                )
 
         if output_file and not is_head:
             abs_path = resolve_path(context.get("cwd"), output_file)
             self.honey_db.update_user_file(
-                context.get("ip"),
+                context.get("client_ip"),
                 context.get("user"),
                 abs_path,
                 os.path.dirname(abs_path),
@@ -2960,17 +3609,40 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 {"size": len(content)},
                 content,
             )
+
+            # Log Payload Capture (Snippet)
+            if snippet and session_id:
+                try:
+                    interaction_data = {
+                        "cwd": context.get("cwd"),
+                        "input": f"Payload Capture: {output_file}",
+                        "response": snippet,
+                        "request_md5": hashlib.md5(
+                            f"payload_{url}".encode()
+                        ).hexdigest(),
+                        "duration_ms": 0,
+                        "source": "payload-capture",
+                        "cached": False,
+                    }
+                    clogger.log_event(
+                        "interaction",
+                        interaction_data,
+                        session_id=session_id,
+                        ip=context.get("client_ip"),
+                    )
+                except Exception as e:
+                    log.error(f"[Curl] Error logging snippet: {e}")
+
             if not is_quiet:
                 # Curl progress meter
-                #  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
-                #                                  Dload  Upload   Total   Spent    Left  Speed
                 return (
                     f"  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n                                 Dload  Upload   Total   Spent    Left  Speed\n100   {len(content)}  100   {len(content)}    0     0   {len(content)*10}      0 --:--:-- --:--:-- --:--:-- {len(content)*10}\n",
                     {},
+                    {"source": "handler", "cached": False},
                 )
-            return "", {}
+            return "", {}, {"source": "handler", "cached": False}
 
-        return content + "\n", {}
+        return content + "\n", {}, {"source": "handler", "cached": False}
 
     def handle_more(self, cmd, context):
         # Alias to cat for simple non-interactive shell
@@ -2986,7 +3658,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         # ssh user@host or ssh host
         parts = cmd.split()
         if len(parts) < 2:
-            return "usage: ssh [-46AaCfGgKkMNnqsTtVvXxYy] [-B bind_interface] ...\n", {}
+            return (
+                "usage: ssh [-46AaCfGgKkMNnqsTtVvXxYy] [-B bind_interface] ...\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         target = parts[-1]  # Simplistic
         if "@" in target:
@@ -2998,7 +3674,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if host in ["localhost", "127.0.0.1", "::1"]:
             # Simulate success (fake login banner)
             timestamp = datetime.datetime.now().strftime("%a %b %d %H:%M:%S %Y")
-            return f"Last login: {timestamp} from 127.0.0.1\n", {}
+            return (
+                f"Last login: {timestamp} from 127.0.0.1\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
         else:
             # Random network error
             time.sleep(1.0)
@@ -3007,7 +3687,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 f"ssh: connect to host {host} port 22: Connection refused",
                 f"ssh: Could not resolve hostname {host}: Name or service not known",
             ]
-            return f"{random.choice(errors)}\n", {}
+            return (
+                f"{random.choice(errors)}\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
     def handle_scp(self, cmd, context):
         import random
@@ -3016,12 +3700,20 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         # Only handle if dest is localhost or failure
         # If -t is present, it shouldn't reach here (intercepted by server), but if it does:
         if "-t" in cmd or "-f" in cmd:
-            return "scp: protocol error: unexpected internal execution\n", {}
+            return (
+                "scp: protocol error: unexpected internal execution\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         parts = cmd.split()
         args = [p for p in parts if not p.startswith("-") and p != "scp"]
         if len(args) < 2:
-            return "usage: scp [-346BCpqrTv] [-c cipher] [-F ssh_config] ...\n", {}
+            return (
+                "usage: scp [-346BCpqrTv] [-c cipher] [-F ssh_config] ...\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         src = args[0]
         dest = args[1]
@@ -3051,6 +3743,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             return (
                 f"ssh: connect to host {remote_host} port 22: Connection timed out\nlost connection\n",
                 {},
+                {"source": "handler", "cached": False},
             )
 
         # If localhost or local->local, delegate to generic CP?
@@ -3063,8 +3756,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         return self.handle_cp(f"cp {real_src} {real_dest}", context)
 
     def handle_uname(self, cmd, context):
-        out, updates = self.system_handler.handle_uname(cmd, context)
-        return out, updates, {"source": "handler", "cached": False}
+        return self.uname_handler.handle(cmd, context)
 
     def handle_nvidia_smi(self, cmd, context):
         output = """Wed Dec 31 19:12:44 2025       
@@ -3116,17 +3808,20 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         # This ensures 'ps -ef' and 'ps aux' show the same PIDs.
         session_id = context.get("session_id", "unknown")
         CACHE_KEY = "_global_process_list"
-        print(f"[Session: {session_id}] [Cache] Checking cache for '{CACHE_KEY}'")
         cached_resp = None
-        if hasattr(self.db, "get_cached_response"):
-            cached_resp = self.db.get_cached_response(CACHE_KEY, "/")
+        from ssh_honeypot.core.universal_cache import universal_cache
 
         j = None
-        if cached_resp:
-            print(f"[Session: {session_id}] [Cache] HIT for ps")
-            j, _ = self._extract_json_or_text(cached_resp)
+        t = ""
+        cache_key = hashlib.md5(f"ssh_ps:{CACHE_KEY}".encode()).hexdigest()
+        cached_item = universal_cache.get("ssh_ps", cache_key)
+
+        if cached_item:
+            cached_resp = cached_item["output_text"]
+            log.debug(f"[PS] Cache HIT for {CACHE_KEY}")
+            j, t = self._extract_json_or_text(cached_resp)
         else:
-            print(f"[Session: {session_id}] [Cache] MISS for ps")
+            log.debug(f"[Session: {session_id}] [Cache] MISS for ps")
 
         if not j or "processes" not in j:
             # 3. Request LLM Process List (Cache Miss)
@@ -3166,11 +3861,18 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
             # Cache valid result
             if j and "processes" in j:
                 # We cache the raw response
-                if hasattr(self.db, "cache_response"):
-                    self.db.cache_response(CACHE_KEY, "/", resp)
+                if resp and "INTERNAL_ERROR" not in resp:
+                    cache_key = hashlib.md5(f"ssh_ps:{CACHE_KEY}".encode()).hexdigest()
+                    universal_cache.set(
+                        service="ssh_ps",
+                        key=cache_key,
+                        input_text=CACHE_KEY,
+                        output_text=resp,
+                        ttl_days=30,
+                    )
             else:
                 # Fallback to STATIC DATA to prevent loop
-                print(
+                log.warning(
                     f"[Session: {session_id}] [PS Error] JSON Parse failed. Using STATIC fallback."
                 )
                 j = {
@@ -3334,7 +4036,7 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
                 command = p.get("command", "")
                 lines.append(f"{pid} {tty} {time_} {command}")
 
-        return "\n".join(lines) + "\n", {}
+        return "\n".join(lines) + "\n", {}, {"source": "handler", "cached": False}
 
     def handle_scp_interactive(self, cmd, chan, context):
         """
@@ -3343,6 +4045,9 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
         """
         import struct
         import os
+        import hashlib
+        from ssh_honeypot.core.clogging import clogger
+        from ssh_honeypot.core.utils import extract_snippet
 
         try:
             from .config import config
@@ -3469,51 +4174,68 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
                     abs_target = resolve_path(cwd, target_arg)
 
                     # Join directory logic
-                    # Check global fs OR user fs for directory?
-                    # For simplicity, if target ends in /, treat as dir.
                     final_path = abs_target
                     if abs_target.endswith("/"):
                         final_path = os.path.join(abs_target, filename)
                     else:
-                        # Check if abs_target is an existing dir
-                        node = self.db.get_fs_node(abs_target)
-                        if node and node.get("type") == "directory":
-                            final_path = os.path.join(abs_target, filename)
+                        # Simplified directory check fallback
+                        final_path = (
+                            os.path.join(abs_target, filename)
+                            if abs_target.endswith("/")
+                            else abs_target
+                        )
 
+                    # Check DB for dir
+                    node = self.db.get_user_node(
+                        client_ip, context.get("user"), abs_target
+                    )
+                    if node and node.get("type") in ["dir", "directory"]:
+                        final_path = os.path.join(abs_target, filename)
+
+                    # 1. Save File to User FS
                     try:
-                        text_content = content.decode("utf-8")
-
-                        # Use USER_FILESYSTEM (Private)
+                        text_content = content.decode("utf-8", "ignore")
                         self.db.update_user_file(
                             client_ip,
-                            context.get("user", "unknown"),
+                            context.get("user"),
                             final_path,
                             os.path.dirname(final_path),
                             "file",
                             {
-                                "permissions": "-rwxr-xr-x",
                                 "size": size,
+                                "permissions": "0644",
+                                "owner": context.get("user"),
                                 "modified": datetime.datetime.now().strftime(
                                     "%b %d %H:%M"
                                 ),
                             },
                             text_content,
                         )
-                        print(
-                            f"[SCP] Uploaded {filename} to {final_path} ({size} bytes) [User Isolated]"
-                        )
-                        # Log specific transfer interaction
-                        try:
-                            self.db.log_interaction(
-                                context.get("session_id", "unknown"),
-                                f"SCP Upload: {filename}",
-                                f"Saved to {final_path} ({size} bytes)",
-                                source="scp_handler",
-                            )
-                        except:
-                            pass
+                        log_debug(f"Saved file to {final_path}")
 
-                        # Update VFS in context for immediate visibility
+                        # 2. Log Snippet (Payload Capture)
+                        snippet = extract_snippet(content)
+                        session_id = context.get("session_id")
+                        if snippet and session_id:
+                            interaction_data = {
+                                "cwd": cwd,
+                                "input": f"Payload Capture: {filename}",
+                                "response": snippet,
+                                "request_md5": hashlib.md5(
+                                    f"scp_{filename}".encode()
+                                ).hexdigest(),
+                                "duration_ms": 0,
+                                "source": "payload-capture",
+                                "cached": False,
+                            }
+                            clogger.log_event(
+                                "interaction",
+                                interaction_data,
+                                session_id=session_id,
+                                ip=client_ip,
+                            )
+
+                        # 3. Update VFS (Immediate Visibility)
                         vfs = context.get("vfs")
                         if vfs is not None:
                             target_dir = os.path.dirname(final_path)
@@ -3522,17 +4244,17 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
                             if filename not in vfs[target_dir]:
                                 vfs[target_dir].append(filename)
 
-                        # Integrate into Payload Analysis
-                        self.payload_manager.queue_upload(
-                            filename,
-                            content,
-                            context.get("session_id", "unknown"),
-                            client_ip,
-                        )
-                    except UnicodeDecodeError:
-                        print(
-                            f"[SCP] Uploaded BINARY {filename} to {final_path} (skipped text save)"
-                        )
+                        # 4. Integrate into Payload Analysis
+                        if self.payload_manager:
+                            self.payload_manager.queue_upload(
+                                filename,
+                                content,
+                                context.get("session_id", "unknown"),
+                                client_ip,
+                            )
+
+                    except Exception as e:
+                        log_debug(f"Error saving SCP file: {e}")
                         pass
 
                 except Exception as e:
@@ -3687,7 +4409,11 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
     def handle_chmod(self, cmd, context):
         parts = cmd.split()
         if len(parts) < 3:
-            return "chmod: missing operand\n", {}
+            return (
+                "chmod: missing operand\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         mode = parts[1]
         target = parts[2]
@@ -3706,7 +4432,11 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
 
         curr = self.db.get_user_node(client_ip, user, abs_path)
         if not curr:
-            return f"chmod: cannot access '{target}': No such file or directory\n", {}
+            return (
+                f"chmod: cannot access '{target}': No such file or directory\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         # Update permissions in metadata
         try:

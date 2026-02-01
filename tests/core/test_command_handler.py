@@ -18,13 +18,16 @@ class TestCommandHandler:
         os.environ["SSHPOT_TEST_MODE"] = "1"
         self.mock_llm = MagicMock()
         self.mock_db = MagicMock()
-        self.mock_db.get_cached_response.return_value = None
         self.mock_db.list_fs_dir.return_value = []
         self.mock_db.list_user_dir.return_value = []
         self.mock_db.get_user_node.return_value = None
         self.mock_db.get_fs_node.return_value = None
-        h = CommandHandler(self.mock_llm, self.mock_db)
-        yield h
+
+        with patch("ssh_honeypot.core.command_handler.universal_cache") as mock_uc:
+            self.mock_cache = mock_uc
+            self.mock_cache.get.return_value = None
+            h = CommandHandler(self.mock_llm, self.mock_db)
+            yield h
         if "SSHPOT_TEST_MODE" in os.environ:
             del os.environ["SSHPOT_TEST_MODE"]
 
@@ -66,7 +69,7 @@ class TestCommandHandler:
         self.mock_llm.generate_response.return_value = llm_resp
 
         # Run handle_cd
-        resp, updates = handler.handle_cd("cd newdir", context)
+        resp, updates, _ = handler.handle_cd("cd newdir", context)
 
         # Assertions
         # The logic in handle_cd forces 'output' to be empty if 'new_cwd' is present
@@ -106,22 +109,25 @@ class TestCommandHandler:
         assert "Act as the bash interpreter" in prompt
 
         # Verify Caching Key includes hash
-        args_cache, _ = self.mock_db.cache_response.call_args
-        cache_key = args_cache[0]
-        # MD5 of 'echo "Hello Virtual World"' is ... let's just check checks for hash
-        assert "bash script.sh::hash=" in cache_key
+        call_args = self.mock_cache.set.call_args
+        kwargs = call_args.kwargs
+        args = call_args.args
+        input_text = kwargs.get("input_text") or (args[4] if len(args) > 4 else "")
+        assert "bash script.sh::hash=" in input_text
 
     def test_handle_hostname(self, handler):
         context = {"user": "root", "honeypot_ip": "1.2.3.4"}
 
         # Default
-        resp, _ = handler.handle_hostname("hostname", context)
+        res = handler.handle_hostname("hostname", context)
+        resp = res[0]
         # We perform mocking because handle_hostname tries to import config.
         # But realistically it returns a default string if config missing or populated.
         assert len(resp) > 0
 
         # Test -i
-        resp, _ = handler.handle_hostname("hostname -i", context)
+        res = handler.handle_hostname("hostname -i", context)
+        resp = res[0]
         assert "1.2.3.4" in resp
 
     def test_editors_disabled(self, handler):
@@ -150,12 +156,14 @@ class TestCommandHandler:
         # even if config is mocked empty/defaults.
 
         # Flag -r
-        resp_r, _, _ = handler.handle_uname("uname -r", context)
+        res_r = handler.handle_uname("uname -r", context)
+        resp_r = res_r[0]
         # Dynamic check
         from ssh_honeypot.core.config import config
 
-        expected = "5.10"  # Partial match for Debian 11 kernel
-        assert expected in resp_r
+        # kernel_release might be 5.10 (Debian) or 3.10 (CentOS) depending on loaded persona
+        k_rel = config.get("persona", "kernel_release") or "5.10"
+        assert k_rel[:4] in resp_r
 
     def test_handle_ps(self, handler):
         context = {"user": "root"}
@@ -203,7 +211,7 @@ class TestCommandHandler:
         # Context user is 'root'.
         # alabaster -> root. So 'bash' (formerly alabaster) becomes 'root'.
         # Since simple ps uses current_user='root', it should SHOW 'bash'.
-        resp, _ = handler.handle_ps("ps", context)
+        resp, _, _ = handler.handle_ps("ps", context)
         assert "sshd" in resp
         assert "bash" in resp  # Should be preserved because alabaster->root
 
@@ -214,7 +222,7 @@ class TestCommandHandler:
         # We need to ensure DB mock returns None first?
         # In setup, mock_db.get_cached_response returns None.
 
-        resp2, _ = handler.handle_ps("ps", context2)
+        resp2, _, _ = handler.handle_ps("ps", context2)
         # alabaster -> attacker.
         # simple ps filters for 'attacker'.
         # root processes (sshd, init) are HIDDEN.
@@ -223,13 +231,13 @@ class TestCommandHandler:
         assert "sshd" not in resp2
 
         # 2. PS -ef (Show all + full format)
-        resp_ef, _ = handler.handle_ps("ps -ef", context)
+        resp_ef, _, _ = handler.handle_ps("ps -ef", context)
         assert "UID" in resp_ef
         assert "/sbin/init" in resp_ef
         assert "bash" in resp_ef  # Should show all users
 
         # 3. PS aux (Show all + user format)
-        resp_aux, _ = handler.handle_ps("ps aux", context)
+        resp_aux, _, _ = handler.handle_ps("ps aux", context)
         assert "%CPU" in resp_aux
         assert "sshd" in resp_aux
 
@@ -268,9 +276,10 @@ class TestCommandHandler:
         assert res.strip() == "192"
 
     def test_uptime_command(self, handler):
-        res, _ = handler.handle_uptime("uptime", {})
-        assert "up 14 days" in res
-        assert "load average" in res
+        res = handler.handle_uptime("uptime", {})
+        resp = res[0]
+        assert "up 14 days" in resp
+        assert "load average" in resp
 
     def test_pipe_parsing_quotes(self, handler):
         # Regression test: Ensure | inside quotes is NOT treated as pipe
@@ -329,7 +338,7 @@ class TestCommandHandler:
 
         cmd = "ip addr"
         context = {}
-        res, _ = handler.handle_ip(cmd, context)
+        res, _, _ = handler.handle_ip(cmd, context)
 
         assert "Mock IP Addr Output" in res
         # Verify args passed (addr)
@@ -341,7 +350,7 @@ class TestCommandHandler:
 
         cmd = "ifconfig"
         context = {}
-        res, _ = handler.handle_ifconfig(cmd, context)
+        res, _, _ = handler.handle_ifconfig(cmd, context)
 
         assert "Mock Ifconfig Output" in res
         handler.network_handlers.handle_ifconfig.assert_called_with([])
@@ -352,7 +361,7 @@ class TestCommandHandler:
 
         cmd = "ping -c 2 localhost"
         context = {}
-        res, _ = handler.handle_ping(cmd, context)
+        res, _, _ = handler.handle_ping(cmd, context)
 
         assert "Mock Ping Output" in res
         # Verify args passed (['-c', '2', 'localhost'])
@@ -453,7 +462,7 @@ class TestCommandHandler:
         handler.db.get_fs_node.return_value = None
 
         # Run rm
-        resp, _ = handler.handle_rm(f"rm {filename}", context)
+        resp, _, _ = handler.handle_rm(f"rm {filename}", context)
 
         # Assert success (empty output, no error)
         assert resp == ""

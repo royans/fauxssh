@@ -30,13 +30,13 @@ class TestDBSafetyRegression(unittest.TestCase):
         mock_conn.close.assert_called_once()
 
     @patch("ssh_honeypot.core.database.HoneyDB._init_db")
-    @patch("ssh_honeypot.core.database.sqlite3.connect")
-    def test_start_session_closes_connection_on_error(self, mock_connect, mock_init):
+    @patch("ssh_honeypot.core.database.HoneyDB._get_conn")
+    def test_start_session_closes_connection_on_error(self, mock_get_conn, mock_init):
         """
         Regression Test: Ensure conn.close() is called in start_session on error.
         """
         mock_conn = MagicMock()
-        mock_connect.return_value = mock_conn
+        mock_get_conn.return_value = mock_conn
 
         # Force an error
         mock_conn.execute.side_effect = Exception("Insert Error")

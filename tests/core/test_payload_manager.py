@@ -104,7 +104,7 @@ def test_process_queue_success(payload_manager, mock_db):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.iter_content.return_value = [mock_content]
-        mock_get.return_value.__enter__.return_value = mock_resp
+        mock_get.return_value = mock_resp
 
         payload_manager.process_queue()
 
@@ -132,7 +132,7 @@ def test_process_queue_failure_404(payload_manager, mock_db):
 
         mock_resp = MagicMock()
         mock_resp.raise_for_status.side_effect = HTTPError("404 Not Found")
-        mock_get.return_value.__enter__.return_value = mock_resp
+        mock_get.return_value = mock_resp
 
         payload_manager.process_queue()
 
@@ -162,7 +162,7 @@ def test_duplicate_file_content_handling(payload_manager, mock_db):
         mock_resp.status_code = 200
         # Use side_effect to provide a fresh list/generator each time
         mock_resp.iter_content.side_effect = lambda **kwargs: [content]
-        mock_get.return_value.__enter__.return_value = mock_resp
+        mock_get.return_value = mock_resp
 
         # Process first
         payload_manager.process_queue()

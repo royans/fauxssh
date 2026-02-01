@@ -105,7 +105,16 @@ def test_analyze_command(mock_post, llm):
     }
     mock_post.return_value = mock_resp
 
-    result = llm.analyze_command("ls")
+    with (
+        patch("ssh_honeypot.core.llm.get_db_backend") as mock_db_getter,
+        patch("ssh_honeypot.core.llm.universal_cache") as mock_uc,
+    ):
+        mock_db = MagicMock()
+        mock_db.get_llm_response.return_value = None
+        mock_db.check_api_rate_limit.return_value = (True, "")
+        mock_db_getter.return_value = mock_db
+        mock_uc.get.return_value = None
+        result = llm.analyze_command("ls")
 
     assert result["type"] == "Recon"
     assert result["risk"] == 2
@@ -118,6 +127,7 @@ def test_analyze_command_failure(mock_post, mock_db_getter, llm):
     # Mock DB Bypass (Cache Miss)
     mock_db = MagicMock()
     mock_db.get_llm_response.return_value = None
+    mock_db.check_api_rate_limit.return_value = (True, "")
     mock_db_getter.return_value = mock_db
 
     # Mock Failure
@@ -125,7 +135,9 @@ def test_analyze_command_failure(mock_post, mock_db_getter, llm):
     mock_resp.status_code = 500
     mock_post.return_value = mock_resp
 
-    result = llm.analyze_command("ls")
+    with patch("ssh_honeypot.core.llm.universal_cache") as mock_uc:
+        mock_uc.get.return_value = None
+        result = llm.analyze_command("ls")
 
     assert result["type"] == "Unknown"
     assert "Analysis Failed" in result["explanation"]

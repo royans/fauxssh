@@ -20,47 +20,36 @@ class VirusTotalAnalyzer:
         self.last_request_time = 0
         self.min_delay = 15.0  # 4 req/min = 15s
 
-        self.daily_limit = 450
-        self.usage_file = os.path.join(get_data_dir(), "vt_usage.json")
-        self._load_usage()
-
-    def _load_usage(self):
-        self.usage_data = {"date": str(datetime.date.today()), "count": 0}
-        if os.path.exists(self.usage_file):
-            try:
-                with open(self.usage_file, "r") as f:
-                    data = json.load(f)
-                    if data.get("date") == str(datetime.date.today()):
-                        self.usage_data = data
-                    # else: date changed, reset to 0 (default)
-            except Exception as e:
-                logger.error(f"[VirusTotal] Error loading usage: {e}")
-
-    def _save_usage(self):
+    def _check_rate_limit(self):
+        """Returns True if we can make a request using DB tracking."""
         try:
-            with open(self.usage_file, "w") as f:
-                json.dump(self.usage_data, f)
-        except Exception as e:
-            logger.error(f"[VirusTotal] Error saving usage: {e}")
+            from ssh_honeypot.core.database import get_db_backend
 
-    def _check_daily_limit(self):
-        """Returns True if we can make a request."""
-        # Refresh date check
-        today = str(datetime.date.today())
-        if self.usage_data["date"] != today:
-            self.usage_data = {"date": today, "count": 0}
-            self._save_usage()
+            db = get_db_backend()
 
-        if self.usage_data["count"] >= self.daily_limit:
-            logger.warning(
-                f"[VirusTotal] Daily quota reached ({self.usage_data['count']}/{self.daily_limit})."
+            l_rpm = config.get("throttling", "global", "virustotal", "rpm") or 1
+            l_rph = config.get("throttling", "global", "virustotal", "rph") or 30
+            l_rpd = config.get("throttling", "global", "virustotal", "rpd") or 125
+
+            allowed, reason = db.check_api_rate_limit(
+                "virustotal", "GLOBAL", l_rpm, l_rph, l_rpd
             )
+            if not allowed:
+                logger.warning(f"[VirusTotal] Global Rate Limit Block: {reason}")
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"[VirusTotal] Error checking DB rate limit: {e}")
             return False
-        return True
 
     def _increment_usage(self):
-        self.usage_data["count"] += 1
-        self._save_usage()
+        try:
+            from ssh_honeypot.core.database import get_db_backend
+
+            db = get_db_backend()
+            db.record_api_usage("virustotal", "GLOBAL")
+        except:
+            pass
 
     def close(self):
         if self.client:
@@ -75,7 +64,7 @@ class VirusTotalAnalyzer:
         if not self.client:
             return False
 
-        if not self._check_daily_limit():
+        if not self._check_rate_limit():
             return False
 
         try:
@@ -130,7 +119,7 @@ class VirusTotalAnalyzer:
         if not self.client:
             return None
 
-        if not self._check_daily_limit():
+        if not self._check_rate_limit():
             return None
 
         self._wait_for_rate_limit()
@@ -157,7 +146,7 @@ class VirusTotalAnalyzer:
         if not self.client:
             return None
 
-        if not self._check_daily_limit():
+        if not self._check_rate_limit():
             return None
 
         self._wait_for_rate_limit()

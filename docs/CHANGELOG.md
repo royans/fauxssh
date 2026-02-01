@@ -1,5 +1,16 @@
 # Changelog
 
+## Weekly Changelog: Feb 1st 2026
+
+### New Features
+- **Dashboard Protocol Filters**: Added multi-select chips to the "About" page, allowing users to toggle visibility for SSH, Telnet, HTTP, MySQL, and Redis in real-time.
+- **Dynamic Dashboard Masonry**: The dashboard now automatically hides cards for protocols that are either unselected or have no active telemetry, significantly reducing UI clutter.
+
+### Enhancements
+- **Persona Engine Robustness**: Handlers for `last` and `who` now gracefully handle persona user data whether it's stored as a string, list, or dictionary.
+- **Production Config Priority**: Refactored `.env` loading to ensure parent-directory configurations (production) correctly override local defaults.
+
+
 ## Weekly Changelog: Jan 25th 2026
 
 ### New Features

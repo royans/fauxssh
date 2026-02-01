@@ -58,20 +58,20 @@ class TestRealismV2(unittest.TestCase):
             handler.db.get_fs_node.return_value = None
 
             # test lscpu
-            out, _ = handler.handle_lscpu("lscpu", {})
+            out, _, _ = handler.handle_lscpu("lscpu", {})
             self.assertIn("AMD EPYC 9654", out)
             self.assertIn("CPU(s):                          192", out)
 
             # test free
-            out, _ = handler.handle_free("free", {})
+            out, _, _ = handler.handle_free("free", {})
             self.assertIn("134217728", out)
 
             # test nproc
-            out, _ = handler.handle_nproc("nproc", {})
+            out, _, _ = handler.handle_nproc("nproc", {})
             self.assertEqual(out, "192\n")
 
             # test dmidecode
-            out, _ = handler.handle_dmidecode("dmidecode", {"user": "root"})
+            out, _, _ = handler.handle_dmidecode("dmidecode", {"user": "root"})
             self.assertIn("PersonaCorp", out)
             self.assertIn("Persona-v1", out)
             self.assertIn("SN-PERSONA-123", out)
@@ -81,11 +81,11 @@ class TestRealismV2(unittest.TestCase):
             handler = SystemHandler(MagicMock(), None)
             handler.db.get_fs_node.return_value = None
 
-            out, _ = handler.handle_hostname("hostname", {})
+            out, _, _ = handler.handle_hostname("hostname", {})
             sys.stderr.write(f"DEBUG OUT HOSTNAME: {repr(out)}\n")
             self.assertEqual(out, "test-host-persona\n")
 
-            out, _ = handler.handle_uname("uname -a", {})
+            out, _, _ = handler.handle_uname("uname -a", {})
             self.assertIn("test-host-persona", out)
 
     def test_apt_distro_error(self):
@@ -130,12 +130,13 @@ class TestRealismV2(unittest.TestCase):
         with patch.object(
             MysqlServer, "_client_connected_cb", new_callable=MagicMock
         ) as mock_parent:
-
-            def parent_side_effect(reader, writer):
+            # Make the mock awaitable and assert logic
+            async def async_mock(*args, **kwargs):
                 self.assertEqual(client_ip_ctx.get(), "9.9.9.9")
+                return None
 
-            mock_parent.side_effect = parent_side_effect
-            handler._client_connected_cb(mock_reader, mock_writer)
+            mock_parent.side_effect = async_mock
+            asyncio.run(handler._client_connected_cb(mock_reader, mock_writer))
             self.assertTrue(mock_parent.called)
 
 

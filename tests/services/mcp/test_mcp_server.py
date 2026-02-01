@@ -150,28 +150,32 @@ class TestMCPServer(unittest.TestCase):
         mock_db = MagicMock()
         mock_llm = MagicMock()
 
-        # Cache hit
-        mock_db.get_cached_response.return_value = "Cached Result"
+        # Mock UniversalCache for hit
+        with patch("ssh_honeypot.services.mcp.server.universal_cache") as mock_uc:
+            mock_uc.get.return_value = {"output_text": "Cached Result"}
 
-        res = tool_query_database("SELECT * FROM users", mock_db, mock_llm)
-        self.assertEqual(res, "Cached Result")
-        # LLM not called
-        mock_llm.generate_response.assert_not_called()
+            res = tool_query_database("SELECT * FROM users", mock_db, mock_llm)
+
+            self.assertEqual(res, "Cached Result")
+            # LLM not called
+            mock_llm.generate_response.assert_not_called()
 
     def test_query_database_cache_miss(self):
         mock_db = MagicMock()
         mock_llm = MagicMock()
 
-        # Cache miss
-        mock_db.get_cached_response.return_value = None
-        mock_llm.generate_response.return_value = "Fake DB Result"
+        # Mock cache miss
+        with patch("ssh_honeypot.services.mcp.server.universal_cache") as mock_uc:
+            mock_uc.get.return_value = None
+            mock_llm.generate_response.return_value = "Fake DB Result"
 
-        res = tool_query_database("SELECT * FROM billing", mock_db, mock_llm)
-        self.assertEqual(res, "Fake DB Result")
-        # LLM called
-        mock_llm.generate_response.assert_called_once()
-        # Cached updated
-        mock_db.cache_response.assert_called_once()
+            res = tool_query_database("SELECT * FROM billing", mock_db, mock_llm)
+
+            self.assertEqual(res, "Fake DB Result")
+            # LLM called
+            mock_llm.generate_response.assert_called_once()
+            # Cache set
+            mock_uc.set.assert_called_once()
 
 
 if __name__ == "__main__":

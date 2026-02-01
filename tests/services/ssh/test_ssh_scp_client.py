@@ -21,21 +21,21 @@ def handler():
 class TestSshScpClient:
     def test_ssh_remote_failure(self, handler):
         start = time.time()
-        resp, _ = handler.handle_ssh("ssh user@remote.com", {})
+        resp, _, _ = handler.handle_ssh("ssh user@remote.com", {})
         end = time.time()
 
         assert "ssh: connect to host" in resp or "Could not resolve" in resp
         assert (end - start) >= 0.9
 
     def test_ssh_localhost_success(self, handler):
-        resp, _ = handler.handle_ssh("ssh localhost", {})
+        resp, _, _ = handler.handle_ssh("ssh localhost", {})
         assert "Last login:" in resp
         assert "from 127.0.0.1" in resp
 
     def test_scp_remote_failure(self, handler):
         # scp local user@remote:/tmp
         start = time.time()
-        resp, _ = handler.handle_scp("scp file.txt user@remote:/tmp", {})
+        resp, _, _ = handler.handle_scp("scp file.txt user@remote:/tmp", {})
         end = time.time()
 
         assert "ssh: connect to host" in resp or "lost connection" in resp
@@ -50,9 +50,13 @@ class TestSshScpClient:
         with patch.object(
             handler,
             "handle_cp",
-            return_value=("", {"file_modifications": ["/tmp/file.txt"]}),
+            return_value=(
+                "",
+                {"file_modifications": ["/tmp/file.txt"]},
+                {"source": "mock"},
+            ),
         ) as mock_cp:
-            resp, updates = handler.handle_scp(
+            resp, updates, _ = handler.handle_scp(
                 "scp file.txt user@localhost:/tmp", context
             )
 

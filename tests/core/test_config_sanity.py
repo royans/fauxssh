@@ -62,4 +62,5 @@ def test_env_fallback_logic():
             cm = ConfigManager()
 
             # Assert it tried to load the parent env
-            mock_load.assert_called_with(parent_env)
+            # In test mode (pytest), override is False
+            mock_load.assert_called_with(parent_env, override=False)

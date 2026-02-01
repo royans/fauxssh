@@ -10,9 +10,10 @@ class WhoCommand(BaseHandler):
         """
         # db is self.db
 
-        sessions = []
-        if self.db:
-            sessions = self.db.get_active_sessions()
+        if not self.db:
+            return "\n", {}, {"source": "handler", "cached": False}
+
+        sessions = self.db.get_active_sessions()
 
         output = []
 
@@ -21,6 +22,16 @@ class WhoCommand(BaseHandler):
 
         persona_users = config.get("persona", "system", "users") or []
         for p_user in persona_users:
+            if p_user is None:
+                continue
+            if isinstance(p_user, dict):
+                p_user = p_user.get("name")
+
+            if not p_user:  # Skip None or empty strings
+                continue
+
+            p_user = str(p_user)
+
             if not any(s["user"] == p_user for s in sessions):
                 # Add a fake session for this persona user
                 import random
@@ -32,7 +43,7 @@ class WhoCommand(BaseHandler):
                         hour=random.randint(0, 8), minute=random.randint(0, 59)
                     )
                 ).strftime("%Y-%m-%d %H:%M")
-                line = f"{p_user:<8} {tty:<12} {time_str} (127.0.0.1)"
+                line = f"{str(p_user):<8} {tty:<12} {time_str} (127.0.0.1)"
                 output.append(line)
 
         for s in sessions:

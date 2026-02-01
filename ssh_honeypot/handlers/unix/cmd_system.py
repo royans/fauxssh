@@ -180,7 +180,7 @@ Vendor ID:                       {"AuthenticAMD" if "AMD" in cpu_model else "Gen
 Model name:                      {cpu_model}
 CPU MHz:                         2400.000
 """
-        return out, {}
+        return out, {}, {"source": "handler", "cached": False}
 
     def handle_lspci(self, cmd, context):
         # Realistic NVIDIA H100 output + standard system
@@ -195,14 +195,18 @@ CPU MHz:                         2400.000
 00:07.0 Unclassified device [00ff]: Red Hat, Inc. Virtio memory balloon
 10:00.0 Non-Volatile memory controller: Amazon.com, Inc. NVMe SSD Controller (rev 01)
 """
-        return out, {}
+        return out, {}, {"source": "handler", "cached": False}
 
     def handle_dmidecode(self, cmd, context):
         # Usually requires root (except for help/version or some flags? no usually root)
         if context.get("user") != "root":
             if "2>/dev/null" in cmd:
-                return "", {}
-            return "Permission denied\n", {}
+                return "", {}, {"source": "handler", "cached": False}
+            return (
+                "Permission denied\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         # HW Info from Persona
         hw = config.get("persona", "hardware") or {}
@@ -218,7 +222,11 @@ CPU MHz:                         2400.000
                 or hw.get("cpu_info")
                 or "Intel(R) Xeon(R) Platinum 8480+"
             )
-            return f"{proc_ver}\n", {}
+            return (
+                f"{proc_ver}\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
         out = f"""# dmidecode 3.3
 Getting SMBIOS data from sysfs.
@@ -239,7 +247,7 @@ Handle 0x2000, DMI type 32, 11 bytes
 System Boot Information
 	Status: No errors detected
 """
-        return out, {}
+        return out, {}, {"source": "handler", "cached": False}
 
     def handle_last(self, cmd, context):
         # Realistic last output
@@ -262,7 +270,7 @@ System Boot Information
             f"reboot   system boot  5.10.0-21-cloud  Mon Oct  9 09:00   still running"
         )
 
-        return "\n".join(out) + "\n", {}
+        return "\n".join(out) + "\n", {}, {"source": "handler", "cached": False}
 
     def handle_hostname(self, cmd, context):
         # Use persona hostname if available
@@ -280,18 +288,34 @@ System Boot Information
             if parts[1].startswith("-"):
                 # -f, -i, etc. Just ignore or return standard
                 if "i" in parts[1]:
-                    return f"{context.get('honeypot_ip', '127.0.0.1')}\n", {}
+                    return (
+                        f"{context.get('honeypot_ip', '127.0.0.1')}\n",
+                        {},
+                        {"source": "handler", "cached": False},
+                    )
             else:
                 # Attempt to set hostname -> Permission denied (unless root)
                 if context.get("user") != "root":
                     if "2>/dev/null" in cmd:
-                        return "", {}
-                    return f"hostname: you must be root to change the host name\n", {}
+                        return (
+                            "",
+                            {},
+                            {"source": "handler", "cached": False},
+                        )
+                    return (
+                        f"hostname: you must be root to change the host name\n",
+                        {},
+                        {"source": "handler", "cached": False},
+                    )
                 else:
                     # Fake set success (no persistence)
-                    return "", {}
+                    return "", {}, {"source": "handler", "cached": False}
 
-        return f"{h}\n", {}
+        return (
+            f"{h}\n",
+            {},
+            {"source": "handler", "cached": False},
+        )
 
     def handle_uname(self, cmd, context):
         # Default: Linux
@@ -319,12 +343,13 @@ System Boot Information
 
         # If no flags, default is -s (Kernel name)
         if not flags:
-            return f"{kernel_name}\n", {}
+            return f"{kernel_name}\n", {}, {"source": "handler", "cached": False}
 
         if "a" in flags or "all" in flags:  # -a is --all
             return (
                 f"{kernel_name} {nodename} {kernel_release} {kernel_version} {machine} {os_name}\n",
                 {},
+                {"source": "handler", "cached": False},
             )
 
         out = []
@@ -346,9 +371,13 @@ System Boot Information
             out.append(os_name)
 
         if not out:  # Default is -s
-            return f"{kernel_name}\n", {}
+            return f"{kernel_name}\n", {}, {"source": "handler", "cached": False}
 
-        return " ".join(out) + "\n", {}
+        return (
+            " ".join(out) + "\n",
+            {},
+            {"source": "handler", "cached": False},
+        )
 
     def handle_uptime(self, cmd, context):
         now_dt = datetime.datetime.now()
@@ -371,6 +400,7 @@ System Boot Information
         return (
             f" {now_str} up {days} days, {hours}:{minutes:02d},  1 user,  load average: {l1:.2f}, {l5:.2f}, {l15:.2f}\n",
             {},
+            {"source": "handler", "cached": False},
         )
 
     def handle_ifconfig(self, cmd, context):
@@ -393,7 +423,7 @@ lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536
         TX packets 4  bytes 240 (240.0 B)
         TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
 """
-        return out, {}
+        return out, {}, {"source": "handler", "cached": False}
 
     def _get_ram_info(self):
         hw = config.get("persona", "hardware") or {}
@@ -425,6 +455,7 @@ Mem:        {total}     {used}     {free}       14200     {buff}     {int(free*1
 Swap:       2097148           0     2097148
 """,
             {},
+            {"source": "handler", "cached": False},
         )
 
     def handle_df(self, cmd, context):
@@ -434,10 +465,18 @@ Swap:       2097148           0     2097148
                 out.append(
                     f"{disk['fs']:<12} {disk['size']:>5} {disk['used']:>5} {disk['avail']:>5} {disk['use']:>4} {disk['mount']}"
                 )
-            return "\n".join(out) + "\n", {}
+            return (
+                "\n".join(out) + "\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
         except Exception as e:
             log.error(f"[ERROR] handle_df failed: {e}")
-            return f"Internal Error: {e}\n", {}
+            return (
+                f"Internal Error: {e}\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
 
     def handle_mount(self, cmd, context):
         out = []
@@ -447,7 +486,7 @@ Swap:       2097148           0     2097148
             )
         out.append("proc on /proc type proc (rw,nosuid,nodev,noexec,relatime)")
         out.append("sysfs on /sys type sysfs (rw,nosuid,nodev,noexec,relatime)")
-        return "\n".join(out) + "\n", {}
+        return "\n".join(out) + "\n", {}, {"source": "handler", "cached": False}
 
     def handle_netstat(self, cmd, context):
         client_ip = context.get("client_ip", "10.0.0.2")
@@ -459,7 +498,7 @@ tcp        0      0 0.0.0.0:80              0.0.0.0:*               LISTEN
 tcp        0    232 {hp_ip}:22            {client_ip}:54321         ESTABLISHED
 udp        0      0 0.0.0.0:68              0.0.0.0:*                          
 """
-        return out, {}
+        return out, {}, {"source": "handler", "cached": False}
 
     def handle_nproc(self, cmd, context):
         hw = config.get("persona", "hardware") or {}
@@ -472,7 +511,11 @@ udp        0      0 0.0.0.0:68              0.0.0.0:*
                 cpus = int(re.search(r"(\d+)", cpu_model).group(1))
             except:
                 pass
-        return f"{cpus}\n", {}
+        return (
+            f"{cpus}\n",
+            {},
+            {"source": "handler", "cached": False},
+        )
 
     def get_static_file(self, path):
         """Returns static content for specific system files if defined."""

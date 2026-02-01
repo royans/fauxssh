@@ -30,7 +30,7 @@ class AlertManager:
         webhook_url = config.get("alerting", "webhook_url")
         self.notifier = WebhookNotifier(webhook_url)
 
-        self.notify_threshold = int(config.get("alerting", "notify_threshold") or 6)
+        self.notify_threshold = int(config.get("alerting", "notify_threshold") or 60)
         self.session_threshold = int(config.get("alerting", "session_threshold") or 7)
         self.ip_threshold = int(config.get("alerting", "ip_threshold") or 9)
         self.keywords = config.get("alerting", "keywords") or []
@@ -87,8 +87,16 @@ class AlertManager:
             )
             return
 
-        self._record_sent()
         msg = f"**🚫 DoS BAN TRIGGERED**\n**IP:** `{ip}`\n**Duration:** {duration}s\n**Reason:** {reason}"
+
+        # Check threshold before sending alert
+        if 50 < self.notify_threshold:
+            log.info(
+                f"[AlertManager] Suppressing Ban Alert for {ip} (Risk 50 < Threshold {self.notify_threshold})"
+            )
+            return
+
+        self._record_sent()
         # We assume WebhookNotifier has a generic send method or we reuse send_alert
         # WebhookNotifier.send_alert takes (session, ip, explanation, risk).
         # We might need to extend WebhookNotifier or abuse send_alert.

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 # Force env before imports to ensure it takes effect if used at module level
 TEST_DATA_DIR = tempfile.mkdtemp(prefix="sshpot_crit_test_")
-os.environ["FAUXSSH_DATA_DIR"] = TEST_DATA_DIR
+# os.environ logic moved to setUpClass
 
 # Import Core Modules
 from ssh_honeypot.core.utils import get_data_dir, PROJECT_ROOT
@@ -25,11 +25,20 @@ class TestDataIntegrity(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         print(f"\n[CRITICAL TEST] Using Isolated Data Dir: {TEST_DATA_DIR}")
+        # Ensure env vars are set before any tests run
+        os.environ["FAUXSSH_DATA_DIR"] = TEST_DATA_DIR
+        os.environ["SSHPOT_TEST_MODE"] = "true"
 
     @classmethod
     def tearDownClass(cls):
         print(f"[CRITICAL TEST] Cleaning up: {TEST_DATA_DIR}")
-        shutil.rmtree(TEST_DATA_DIR)
+        if os.path.exists(TEST_DATA_DIR):
+            shutil.rmtree(TEST_DATA_DIR, ignore_errors=True)
+        # Cleanup environment to prevent leakage to other tests in same process
+        if "FAUXSSH_DATA_DIR" in os.environ:
+            del os.environ["FAUXSSH_DATA_DIR"]
+        if "SSHPOT_TEST_MODE" in os.environ:
+            del os.environ["SSHPOT_TEST_MODE"]
 
     def test_utils_get_data_dir(self):
         """Verify core utility respects the environment variable."""

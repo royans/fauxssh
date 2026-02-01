@@ -9,6 +9,7 @@ except ImportError:
     whois = None
 
 from ssh_honeypot.core.logging_setup import log
+from ssh_honeypot.core.config import config
 
 
 class IPEnricher:
@@ -101,11 +102,29 @@ class IPEnricher:
 
         return "CORPORATE"
 
-    def enrich_ip(self, ip):
+    def enrich_ip(self, ip, db=None):
         """
         Orchestrates the enrichment. Returns dict suitable for DB.
         """
+        if not db:
+            from ssh_honeypot.core.database import get_db_backend
+
+            db = get_db_backend()
+
+        # Global Rate Limit Check (25% Safeguard)
+        l_rpm = config.get("throttling", "global", "ip_api", "rpm") or 10
+        l_rph = config.get("throttling", "global", "ip_api", "rph") or 200
+        l_rpd = config.get("throttling", "global", "ip_api", "rpd") or 1000
+
+        allowed, reason = db.check_api_rate_limit(
+            "ip_api", "GLOBAL", l_rpm, l_rph, l_rpd
+        )
+        if not allowed:
+            log.warning(f"[Enricher] Global Rate Limit Block: {reason}")
+            return None
+
         log.info(f"[Enricher] Enriching {ip}...")
+        db.record_api_usage("ip_api", "GLOBAL")
 
         rdns = self.get_reverse_dns(ip)
         geo = self.get_geoip_and_isp(ip)
@@ -121,6 +140,8 @@ class IPEnricher:
             "isp": geo.get("isp") if geo else None,
             "org": geo.get("org") if geo else None,
             "asn": geo.get("as") if geo else None,
+            "latitude": geo.get("lat") if geo else None,
+            "longitude": geo.get("lon") if geo else None,
             "network_type": self.analyze_network_type(geo),
             "raw_data": raw_data,
         }

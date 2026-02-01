@@ -1,6 +1,8 @@
 import os
 import random
 import datetime
+from ssh_honeypot.core.universal_cache import universal_cache
+import hashlib
 
 
 def handle_cisco_show(cmd, context):
@@ -109,11 +111,12 @@ Configuration register is 0xF
             # 1. Try DB Persistent Cache for this Persona
             db = context.get("db")
             persona_name = context.get("persona_config", {}).get("name", "default")
-            cache_key = f"cisco_running_config:{persona_name}"
-
             if db:
-                # Use PERSONA_CONFIG as a pseudo-CWD for global config storage
-                stored_config = db.get_cached_response(cache_key, "PERSONA_CONFIG")
+                # Use UniversalCache instead of PERSONA_CONFIG pseudo-cwd
+                # cache_key_hash = hashlib.md5(f"cisco_config:{persona_name}".encode()).hexdigest()
+                cached_item = universal_cache.get("cisco_config", persona_name)
+                if cached_item:
+                    stored_config = cached_item["output_text"]
 
             if not stored_config:
                 # 2. Try Persona Default
@@ -141,9 +144,15 @@ Output ONLY the raw configuration text, starting with 'version 15.0' or similar.
                         stored_config.replace("```cisco", "").replace("```", "").strip()
                     )
 
-                    # Store in DB for persistence across sessions
-                    if db and stored_config:
-                        db.cache_response(cache_key, "PERSONA_CONFIG", stored_config)
+                    # Store in UniversalCache for persistence across sessions
+                    if stored_config:
+                        universal_cache.set(
+                            service="cisco_config",
+                            key=persona_name,
+                            input_text=f"Cisco Running Config for {persona_name}",
+                            output_text=stored_config,
+                            ttl_days=365,  # Configs persist longer
+                        )
                 else:
                     stored_config = f"! Fallback Config\nhostname {hostname}\nend"
 

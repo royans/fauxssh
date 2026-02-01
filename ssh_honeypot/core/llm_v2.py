@@ -42,7 +42,7 @@ class GeminiProvider(BaseLLMProvider):
 
     def generate(self, prompt, context=None):
         if not self.model:
-            return '{"output": "Error: AI Core Offline (No Model).", "new_cwd": null}'
+            return '{"output": "INTERNAL_ERROR", "new_cwd": null}'
 
         try:
             generation_config = genai.types.GenerationConfig(

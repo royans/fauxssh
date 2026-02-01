@@ -11,6 +11,7 @@ def mock_server():
     server = MagicMock()
     server.honey_db = MagicMock()
     server.llm_interface = MagicMock()
+    server.honey_db.check_llm_rate_limit.return_value = (True, "OK")
     return server
 
 
@@ -61,8 +62,11 @@ def test_stats_request_disabled(mock_server):
         mock_conf.get.return_value = False
 
         # Should fallback to normal request handling (LLM or cache)
-        mock_server.honey_db.get_cached_response.return_value = "Normal Content"
-        handler.do_GET()
+        with patch(
+            "ssh_honeypot.services.http_server.server.universal_cache"
+        ) as mock_uc:
+            mock_uc.get.return_value = {"output_text": "Normal Content"}
+            handler.do_GET()
 
         output = output_buf.getvalue()
         assert b"Normal Content" in output

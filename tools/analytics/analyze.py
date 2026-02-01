@@ -34,9 +34,19 @@ if PROJECT_ROOT not in sys.path:
 try:
     from dotenv import load_dotenv
 
-    env_path = os.path.join(PROJECT_ROOT, ".env")
-    if os.path.exists(env_path):
-        load_dotenv(env_path)
+    # Detect test mode to avoid overriding test-defined env vars
+    is_test = os.getenv("SSHPOT_TEST_MODE") or "pytest" in sys.modules
+    override = not is_test
+
+    env_files = [
+        os.path.join(PROJECT_ROOT, ".env"),  # 1. Local (Lower priority)
+        os.path.join(
+            os.path.dirname(PROJECT_ROOT), ".env"
+        ),  # 2. Parent (Higher priority)
+    ]
+    for env_path in env_files:
+        if os.path.exists(env_path):
+            load_dotenv(env_path, override=override)
 except ImportError:
     pass
 

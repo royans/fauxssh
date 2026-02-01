@@ -85,7 +85,10 @@ def analyze_session(session_id, db=None, llm=None):
 
     if result and isinstance(result, dict):
         summary = result.get("summary", "No summary provided")
-        risk_score = result.get("risk_score", 0)
+        try:
+            risk_score = int(result.get("risk_score", 0))
+        except (ValueError, TypeError):
+            risk_score = 0
         mitre = result.get("mitre_codes", [])
 
         # Append MITRE codes to summary if present

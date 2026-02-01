@@ -48,7 +48,7 @@ class TestCDRepro:
 
         # Action: cd testfile
         # "testfile" exists as a file in mock_db
-        resp, updates = handler.handle_cd("cd testfile", context)
+        resp, updates, _ = handler.handle_cd("cd testfile", context)
 
         # Expectation (for BUG): It succeeds (new_cwd is set)
         # Expectation (for FIX): It fails (Not a directory)

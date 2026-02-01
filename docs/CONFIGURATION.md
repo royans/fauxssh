@@ -23,6 +23,10 @@ FAUXSSH_TELNET_PORT=2323
 FAUXSSH_ENABLE_REDIS=true
 FAUXSSH_REDIS_PORT=6379
 
+# Optional: MySQL Support (Default: On)
+FAUXSSH_ENABLE_MYSQL=true
+FAUXSSH_MYSQL_PORT=3306
+
 # Optional: Service Fallbacks
 
 # Optional: HTTP Honeypot (Default: On, Port 8080)

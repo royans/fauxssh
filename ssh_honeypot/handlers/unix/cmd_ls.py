@@ -240,7 +240,15 @@ or available locally via: info '(coreutils) ls invocation'
         reverse = False
 
         if "t" in flags:
-            sort_key = lambda x: x.get("created_at", "")
+
+            def sort_key(x):
+                val = x.get("created_at")
+                if val is None:
+                    return ""
+                if isinstance(val, (datetime.datetime, datetime.date)):
+                    return val.isoformat()
+                return str(val)
+
             reverse = True
 
         if "r" in flags:

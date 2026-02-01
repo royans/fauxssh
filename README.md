@@ -25,12 +25,15 @@ FauxSSH deceptively emulates a realistic Linux server, engaging attackers in lon
 - **🚨 Real-Time Alerting**: Stream high-risk sessions live to Discord or Slack.
 - **📊 Built-in Analytics**: CLI tools to visualize sessions, inspect malware, and correlate threat actors.
 
+## Recent Improvements (Jan 31)
+- **Multi-Service Protocol Filters**: Added dynamic filters to the dashboard (About -> Personalization). Researchers can now toggle visibility for SSH, Telnet, HTTP, MySQL, and Redis to focus on specific threat vectors.
+- **Smart Dashboard Visibility**: The dashboard now automatically hides cards for inactive services or unselected protocols, ensuring a clean, high-signal UI.
+- **Enhanced Persona Robustness**: Improved the persona engine to automatically handle diverse user data structures (String, List, Dict), preventing crashes during legacy command simulation (`last`, `who`).
+
 ## Recent Improvements (Jan 23)
 - **Risk Scoring Alignment**: Normalized all threat detection and reporting to a 0-100 scale for better granularity and alerting accuracy.
 - **Analytics Power-Tools**: Added `--top` and `--duration` flags to `analyze.py`, enabling rapid triage of frequent commands over specific time periods (e.g., last 15m, 14h, 3d).
 - **Auto-Formatting Hooks**: Enhanced the smart test runner to automatically correct code style issues in a loop, ensuring CI/CD compliance.
-
-## Recent Improvements (Jan 9)
 
 ## Quick Start
 

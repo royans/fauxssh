@@ -1,6 +1,6 @@
-# config.py
 import yaml
 import os
+import sys
 import copy
 from ssh_honeypot.core.utils import (
     PROJECT_ROOT,
@@ -186,14 +186,20 @@ class ConfigManager:
                 print(f"[!] Error loading config yaml: {e}")
 
     def _load_env(self):
-        """Robustly load .env from project root or parent."""
+        """Robustly load .env from parent then project root."""
+        # Detect test mode to avoid overriding test-defined env vars
+        is_test = os.getenv("SSHPOT_TEST_MODE") or "pytest" in sys.modules
+        override = not is_test
+
         env_files = [
-            os.path.join(PROJECT_ROOT, ".env"),
-            os.path.join(os.path.dirname(PROJECT_ROOT), ".env"),
+            os.path.join(PROJECT_ROOT, ".env"),  # 1. Local (Lower priority)
+            os.path.join(
+                os.path.dirname(PROJECT_ROOT), ".env"
+            ),  # 2. Parent (Higher priority)
         ]
         for env_path in env_files:
             if os.path.exists(env_path):
-                load_dotenv(env_path)
+                load_dotenv(env_path, override=override)
 
     def load_env_overrides(self):
         """

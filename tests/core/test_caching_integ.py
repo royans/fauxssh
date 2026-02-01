@@ -29,9 +29,22 @@ class TestCachingIntegration(unittest.TestCase):
             "persona_config": {"name": "test_persona"},
         }
 
+        # Force disable test mode for this specific test so caching is enabled
+        self._orig_test_mode = os.environ.get("SSHPOT_TEST_MODE")
+        self._orig_faux_test_mode = os.environ.get("FAUXSSH_TEST_MODE")
+        if "SSHPOT_TEST_MODE" in os.environ:
+            del os.environ["SSHPOT_TEST_MODE"]
+        if "FAUXSSH_TEST_MODE" in os.environ:
+            del os.environ["FAUXSSH_TEST_MODE"]
+
     def tearDown(self):
         if os.path.exists(self.db_path):
             os.remove(self.db_path)
+        # Restore test mode
+        if self._orig_test_mode is not None:
+            os.environ["SSHPOT_TEST_MODE"] = self._orig_test_mode
+        if self._orig_faux_test_mode is not None:
+            os.environ["FAUXSSH_TEST_MODE"] = self._orig_faux_test_mode
 
     def test_url_exclusion(self):
         # Command with URL should not be cached

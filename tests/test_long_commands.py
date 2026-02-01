@@ -1,6 +1,6 @@
 import pytest
 import unittest.mock
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import sys
 import os
 
@@ -83,31 +83,34 @@ class TestLongCommands:
         chain_cmd = " && ".join(part_list)
 
         # 1. Cache Miss
-        mock_db.get_cached_response.return_value = None
+        with patch("ssh_honeypot.core.command_handler.universal_cache") as mock_uc:
+            mock_uc.get.return_value = None
 
-        # 2. LLM Response
-        mock_llm.generate_response.return_value = (
-            '{"output": "simulated chain output...", "new_cwd": "/root"}'
-        )
+            # 2. LLM Response
+            mock_llm.generate_response.return_value = (
+                '{"output": "simulated chain output...", "new_cwd": "/root"}'
+            )
 
-        # Act
-        resp, updates, meta = h.process_command(chain_cmd, context)
+            # Act
+            resp, updates, meta = h.process_command(chain_cmd, context)
 
-        # Assertions
-        # 1. Check routing to handle_generic (implied by cache check on FULL command)
-        mock_db.get_cached_response.assert_called_with(chain_cmd, "/root")
+            # Assertions
+            # 1. Check routing to handle_generic (implied by cache check on FULL command)
+            # UniversalCache doesn't take cwd, just service and key.
+            # But the key generation logic inside CommandHandler uses cwd.
+            mock_uc.get.assert_called_once()
 
-        # 2. Check LLM Call
-        mock_llm.generate_response.assert_called_once()
-        args, _ = mock_llm.generate_response.call_args
-        assert args[0] == chain_cmd  # First arg is command
+            # 2. Check LLM Call
+            mock_llm.generate_response.assert_called_once()
+            args, _ = mock_llm.generate_response.call_args
+            assert args[0] == chain_cmd  # First arg is command
 
-        # 3. Check Caching
-        mock_db.cache_response.assert_called_once()
+            # 3. Check Caching
+            mock_uc.set.assert_called_once()
 
-        # 4. Check Return
-        assert "simulated chain" in resp
-        assert meta["source"] == "llm"
+            # 4. Check Return
+            assert "simulated chain" in resp
+            assert meta["source"] == "llm"
 
     def test_complex_chain_cache_hit(self):
         """
@@ -122,18 +125,18 @@ class TestLongCommands:
         chain_cmd = " && ".join([f"sleep {i}" for i in range(35)])
 
         # 1. Cache HIT
-        # db.get_cached_response returns raw text or JSON string
-        mock_db.get_cached_response.return_value = (
-            '{"output": "CACHED_OUTPUT", "new_cwd": "/root"}'
-        )
+        with patch("ssh_honeypot.core.command_handler.universal_cache") as mock_uc:
+            mock_uc.get.return_value = {
+                "output_text": '{"output": "CACHED_OUTPUT", "new_cwd": "/root"}'
+            }
 
-        # Act
-        resp, updates, meta = h.process_command(chain_cmd, context)
+            # Act
+            resp, updates, meta = h.process_command(chain_cmd, context)
 
-        # Assertions
-        mock_db.get_cached_response.assert_called_with(chain_cmd, "/root")
-        mock_llm.generate_response.assert_not_called()  # Should NOT hit LLM
+            # Assertions
+            mock_uc.get.assert_called_once()
+            mock_llm.generate_response.assert_not_called()  # Should NOT hit LLM
 
-        assert resp == "CACHED_OUTPUT"
-        assert meta["source"] == "llm-cache"
-        assert meta["cached"] is True
+            assert resp == "CACHED_OUTPUT"
+            assert meta["source"] == "llm-cache"
+            assert meta["cached"] is True

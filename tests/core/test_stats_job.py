@@ -47,6 +47,9 @@ class TestStatsJob(unittest.TestCase):
         mock_db.get_hourly_session_counts.return_value = [
             {"label": "12:00", "count": 5}
         ]
+        mock_db.get_recent_high_risk_events.return_value = [
+            {"type": "command", "ip": "1.1.1.1", "command": "malicious"}
+        ]
 
         # Run job
         run_stats_generation_job(mock_db)

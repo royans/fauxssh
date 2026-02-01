@@ -12,6 +12,12 @@ class DatabaseBackend(ABC):
         """Return a string describing the current connection."""
         pass
 
+    @property
+    @abstractmethod
+    def is_postgres(self) -> bool:
+        """Returns True if this is a PostgreSQL backend."""
+        pass
+
     @abstractmethod
     def start_session(
         self,
@@ -51,18 +57,23 @@ class DatabaseBackend(ABC):
         pass
 
     @abstractmethod
-    def get_cached_response(self, command, cwd):
-        """Retrieve a cached response for a command in a specific CWD."""
-        pass
-
-    @abstractmethod
-    def cache_response(self, command, cwd, response):
-        """Cache a response for future use."""
-        pass
-
-    @abstractmethod
     def get_fs_node(self, path):
         """Retrieve a filesystem node (file/dir) metadata and content."""
+        pass
+
+    @abstractmethod
+    def set_cache_item(self, **kwargs):
+        """Saves a detailed cache item to universal_cache."""
+        pass
+
+    @abstractmethod
+    def delete_cache_item(self, cache_key):
+        """Removes an item from universal_cache."""
+        pass
+
+    @abstractmethod
+    def get_cache_keys(self, service):
+        """Returns all cache keys for a given service."""
         pass
 
     @abstractmethod
@@ -134,10 +145,6 @@ class DatabaseBackend(ABC):
 
     @abstractmethod
     def get_ip_upload_usage(self, ip):
-        pass
-
-    @abstractmethod
-    def cleanup_http_cache(self, web_root="/var/www/html"):
         pass
 
     @abstractmethod
@@ -221,7 +228,8 @@ class DatabaseBackend(ABC):
         pass
 
     @abstractmethod
-    def get_unanalyzed_commands(self, limit=10):
+    @abstractmethod
+    def get_unanalyzed_commands(self, limit=10, allowed_protocols=None):
         pass
 
     @abstractmethod
@@ -251,7 +259,18 @@ class DatabaseBackend(ABC):
 
     @abstractmethod
     def add_malicious_payload(
-        self, url, url_hash, session_id, ip, timestamp=None, status="pending"
+        self,
+        url,
+        url_hash,
+        session_id,
+        ip,
+        timestamp=None,
+        status="pending",
+        payload_md5=None,
+        payload_size=None,
+        file_path=None,
+        snippet=None,
+        **kwargs,
     ):
         pass
 
@@ -277,6 +296,8 @@ class DatabaseBackend(ABC):
         error_message=None,
         payload_md5=None,
         payload_size=None,
+        snippet=None,
+        **kwargs,
     ):
         pass
 
@@ -324,15 +345,5 @@ class DatabaseBackend(ABC):
 
     @abstractmethod
     def purge_poisoned_cache(self):
-        """Purges any cached responses containing AI Core error messages."""
-        pass
-
-    @abstractmethod
-    def get_llm_response(self, prompt_hash):
-        """Retrieves a cached LLM response by prompt hash if it exists and is fresh."""
-        pass
-
-    @abstractmethod
-    def save_llm_response(self, prompt_hash, prompt_text, response):
-        """Caches an LLM response."""
+        """Purges any cached responses containing Internal Logic error messages."""
         pass

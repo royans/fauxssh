@@ -23,6 +23,7 @@ from ssh_honeypot.core import fs_seeder
 # Imports from Services
 from ssh_honeypot.services.ssh.server import start_ssh_server
 from ssh_honeypot.services.telnet.server import start_telnet_server
+from ssh_honeypot.services.llm_api.server import start_llm_api_service
 
 
 def main(argv=None):
@@ -190,10 +191,10 @@ def main(argv=None):
         log.warning("CRITICAL WARNING: GOOGLE_API_KEY IS MISSING!")
         log.warning("AI-powered content generation and analysis will be disabled.")
         log.warning("=" * 60)
-        log.error("GOOGLE_API_KEY not found. AI Core is OFFLINE.")
+        log.error("GOOGLE_API_KEY not found. Simulation Engine is OFFLINE.")
 
     # Clear any previously "poisoned" cache entries in background
-    # This ensures "AI Core Offline" doesn't stick around without blocking startup
+    # This ensures "Simulation Engine Offline" doesn't stick around without blocking startup
     def background_purge():
         try:
             db.purge_poisoned_cache()
@@ -319,7 +320,7 @@ def main(argv=None):
 
     # Start MCP Server (Optional)
     if str(os.getenv("FAUXSSH_ENABLE_MCP", "true")).lower() == "true":
-        mcp_port = int(os.getenv("FAUXSSH_MCP_PORT", 8000))
+        mcp_port = int(os.getenv("FAUXSSH_MCP_PORT", 8001))
         try:
             from ssh_honeypot.services.mcp.server import start_mcp_server
 
@@ -360,6 +361,12 @@ def main(argv=None):
             log.error("[!] HTTP Service module missing.")
         except Exception as e:
             log.error(f"[!] HTTP Service Failed to Start: {e}")
+
+    # Start LLM API Services (Ollama/OpenAI)
+    try:
+        start_llm_api_service(db, llm)
+    except Exception as e:
+        log.error(f"[LLM-API] Failed to start services: {e}")
 
     log.info(f"[Core] Honeypot services initialization complete.")
 

@@ -41,6 +41,10 @@ class BaseHandler:
         client_ip = context.get("client_ip")
         user = context.get("user")
 
+        # Check if it is a directory (Local Handlers should handle this with proper error)
+        if self.db.is_managed_directory(client_ip, user, abs_path) is True:
+            return "__IS_DIR__", "local"
+
         # Check User Uploads first
         user_node = self.db.get_user_node(client_ip, user, abs_path)
         if user_node and (user_node.get("content") is not None):
@@ -143,4 +147,4 @@ class BaseHandler:
             output_text = output_text.replace("alabaster", user)
             output_text = output_text.replace("Alabaster", user.capitalize())
 
-        return output_text, updates
+        return output_text, updates, {"source": "llm", "cached": False}

@@ -47,10 +47,16 @@ virustotal:
 analytics:
   ignore_ips: [] # ENV: ANALYTICS_IGNORE_IPS (comma-separated)
   show_empty_sessions: false
+  batch_size: 10
+  enabled_services:
+    - "ssh"
+    - "telnet"
+    - "mysql"
+    # - "http" # HTTP disabled by default for risk analysis to save tokens
 
 alerting:
   webhook_url: "" # ENV: ALERTING_WEBHOOK_URL
-  notify_threshold: 90
+  notify_threshold: 80
   session_threshold: 95
   ip_threshold: 99
   keywords: []
@@ -77,13 +83,33 @@ mysql:
 
 mcp:
   enabled: true
-  port: 8000
+  port: 8001
   max_llm_calls: 20
   throttle_delay: 2.0
 
 llm:
   model_name: "gemma-3-27b-it"
   api_key: "" # ENV: LLM_API_KEY
+
+llm_api:
+  ollama:
+    enabled: true
+    port: 11434
+    fake_models:
+      - "llama3:latest"
+      - "llama3:70b"
+      - "mistral:latest"
+      - "mixtral:8x7b"
+      - "codellama:latest"
+      - "phi3:latest"
+      - "neural-chat:latest"
+      - "starling-lm:latest"
+      - "yi:latest"
+      - "gemma:2b"
+      - "gemma:7b"
+  openai:
+    enabled: true
+    port: 8000
 
 http:
   enabled: true
@@ -108,6 +134,21 @@ throttling:
     rph: 50
     rpd: 100
   llm:
-    rpm: 5
-    rph: 20
-    rpd: 40
+    rpm: 10
+    rph: 50
+    rpd: 100
+
+  # Global API limits (25% of Free Tier)
+  global:
+    google_llm:
+      rpm: 10   # Increased from 3 to allow background analysis to succeed
+      rph: 400
+      rpd: 10000
+    ip_api:
+      rpm: 10
+      rph: 200
+      rpd: 1000
+    virustotal:
+      rpm: 1
+      rph: 30
+      rpd: 125

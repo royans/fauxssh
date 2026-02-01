@@ -254,6 +254,52 @@
             box-shadow: var(--shadow);
         }
 
+        /* --- Settings Toggle --- */
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 44px;
+            height: 24px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: var(--border);
+            transition: .4s;
+            border-radius: 24px;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+
+        input:checked+.slider {
+            background-color: var(--accent);
+        }
+
+        input:checked+.slider:before {
+            transform: translateX(20px);
+        }
+
         /* --- Main Masonry --- */
         .masonry {
             column-count: 2;
@@ -548,6 +594,97 @@
             font-size: 0.95rem;
             color: var(--text-main);
         }
+
+        /* --- Kill Chain Chart --- */
+        .chain-box {
+            display: flex;
+            gap: 4px;
+            height: 32px;
+            margin-bottom: 12px;
+            border-radius: 8px;
+            overflow: hidden;
+            background: var(--border);
+        }
+
+        .chain-segment {
+            height: 100%;
+            transition: width 0.3s;
+            position: relative;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 0.65rem;
+            font-weight: bold;
+        }
+
+        .chain-segment:hover {
+            filter: contrast(1.2);
+        }
+
+        /* --- Session Replay --- */
+        .terminal-wrap {
+            background: #0d1117;
+            color: #c9d1d9;
+            font-family: 'JetBrains Mono', monospace;
+            padding: 24px;
+            border-radius: 8px;
+            max-height: 550px;
+            overflow-y: auto;
+            font-size: 0.85rem;
+            line-height: 1.5;
+            border: 1px solid #30363d;
+        }
+
+        .term-prompt {
+            color: #58a6ff;
+            font-weight: bold;
+            margin-top: 10px;
+        }
+
+        .term-prompt::before {
+            content: "➜ ";
+        }
+
+        .term-out {
+            color: #8b949e;
+            white-space: pre-wrap;
+            margin-bottom: 15px;
+            margin-left: 20px;
+        }
+
+        /* Protocol Filters */
+        .filter-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 15px;
+        }
+
+        .filter-chip {
+            padding: 6px 14px;
+            border-radius: 20px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text-dim);
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            user-select: none;
+            font-weight: 500;
+        }
+
+        .filter-chip.active {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: white;
+        }
+
+        .filter-chip:hover:not(.active) {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
     </style>
 </head>
 
@@ -599,31 +736,83 @@
                     <div class="stat-value" id="summary-commands">0</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Session Capture</div>
+                    <div class="stat-label">Attacker Sessions</div>
                     <div class="stat-value" id="summary-sessions">0</div>
                 </div>
             </div>
 
+            <div style="margin-bottom: 25px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 12px;">
+                    <span style="font-size:0.9rem; font-weight:600; color:var(--text-main)">Protocol Filters</span>
+                    <button class="btn-copy" onclick="toggleAllProtocols()" id="btn-all-protocols"
+                        style="padding:4px 10px; font-size:0.75rem">Select All</button>
+                </div>
+                <div class="filter-group" id="protocol-filters">
+                    <div class="filter-chip" onclick="toggleProtocol('ssh')" data-proto="ssh">SSH</div>
+                    <div class="filter-chip" onclick="toggleProtocol('telnet')" data-proto="telnet">Telnet</div>
+                    <div class="filter-chip" onclick="toggleProtocol('http')" data-proto="http">HTTP</div>
+                    <div class="filter-chip" onclick="toggleProtocol('mysql')" data-proto="mysql">MySQL</div>
+                    <div class="filter-chip" onclick="toggleProtocol('redis')" data-proto="redis">Redis</div>
+                    <div class="filter-chip" onclick="toggleProtocol('mcp')" data-proto="mcp">MCP</div>
+                    <div class="filter-chip" onclick="toggleProtocol('llm-api')" data-proto="llm-api">LLM</div>
+                </div>
+            </div>
+
+
             <div class="chart-box">
                 <div class="chart-title">
-                    <div style="font-weight: 600;">Session Activity Trend</div>
+                    <h2>Traffic Velocity</h2>
                 </div>
                 <div style="height: 200px; width: 100%; position: relative;" id="chart-container">
                     <svg viewBox="0 0 1000 200" preserveAspectRatio="none"
-                        style="width:100%; height:100%; overflow:visible;">
+                        style="width: 100%; height: 100%; overflow: visible;" id="chart-svg">
                         <defs>
-                            <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
-                                <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.2" />
-                                <stop offset="100%" stop-color="var(--accent)" stop-opacity="0" />
+                            <linearGradient id="grad-ssh" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stop-color="#3fb950" stop-opacity="0.2" />
+                                <stop offset="100%" stop-color="#3fb950" stop-opacity="0" />
+                            </linearGradient>
+                            <linearGradient id="grad-telnet" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stop-color="#d29922" stop-opacity="0.2" />
+                                <stop offset="100%" stop-color="#d29922" stop-opacity="0" />
+                            </linearGradient>
+                            <linearGradient id="grad-http" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stop-color="#f85149" stop-opacity="0.2" />
+                                <stop offset="100%" stop-color="#f85149" stop-opacity="0" />
+                            </linearGradient>
+                            <linearGradient id="grad-mysql" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stop-color="#2f81f7" stop-opacity="0.2" />
+                                <stop offset="100%" stop-color="#2f81f7" stop-opacity="0" />
+                            </linearGradient>
+                            <linearGradient id="grad-redis" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stop-color="#a371f7" stop-opacity="0.2" />
+                                <stop offset="100%" stop-color="#a371f7" stop-opacity="0" />
+                            </linearGradient>
+                            <linearGradient id="grad-mcp" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stop-color="#f771a3" stop-opacity="0.2" />
+                                <stop offset="100%" stop-color="#f771a3" stop-opacity="0" />
+                            </linearGradient>
+                            <linearGradient id="grad-llm-api" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stop-color="#20E3B2" stop-opacity="0.2" />
+                                <stop offset="100%" stop-color="#20E3B2" stop-opacity="0" />
                             </linearGradient>
                         </defs>
-                        <path id="chart-area" fill="url(#g)" d=""></path>
-                        <path id="chart-line" fill="none" stroke="var(--accent)" stroke-width="3" stroke-linecap="round"
-                            d=""></path>
+                        <g id="chart-series"></g>
                         <g id="chart-labels"></g>
                         <g id="chart-points"></g>
                     </svg>
                 </div>
+                <div id="traffic-legend"
+                    style="display:flex; justify-content:center; flex-wrap:wrap; gap: 20px; margin-top: 25px; font-size: 0.8rem; color: var(--text-dim); border-top: 1px solid var(--border); padding-top: 15px;">
+                </div>
+            </div>
+
+            <div class="chart-box" id="box-kill-chain" style="display:none">
+                <div class="chart-title">
+                    <h2>Kill Chain Distribution</h2>
+                </div>
+                <div class="chain-box" id="kill-chain-bar"></div>
+                <div id="kill-chain-legend"
+                    style="display:flex; justify-content:space-around; font-size: 0.7rem; color: var(--text-dim)"></div>
             </div>
 
             <div class="masonry" id="dashboard-masonry">
@@ -688,6 +877,83 @@
                         </table>
                     </div>
                 </div>
+                <!-- New Protocol Cards -->
+                <div class="section-card" id="box-mysql" style="display:none">
+                    <h2>MySQL Activity</h2>
+                    <div class="table-wrap">
+                        <table id="table-mysql" class="table-fixed">
+                            <thead>
+                                <tr>
+                                    <th class="col-main">Query</th>
+                                    <th class="col-m1">Hits</th>
+                                    <th class="col-m2">IPs</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="section-card" id="box-redis" style="display:none">
+                    <h2>Redis activity</h2>
+                    <div class="table-wrap">
+                        <table id="table-redis" class="table-fixed">
+                            <thead>
+                                <tr>
+                                    <th class="col-main">Command</th>
+                                    <th class="col-m1">Hits</th>
+                                    <th class="col-m2">IPs</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="section-card" id="box-mcp" style="display:none">
+                    <h2>MCP Interactions</h2>
+                    <div class="table-wrap">
+                        <table id="table-mcp" class="table-fixed">
+                            <thead>
+                                <tr>
+                                    <th class="col-main">Method</th>
+                                    <th class="col-m1">Hits</th>
+                                    <th class="col-m2">IPs</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="section-card" id="box-llm-api-models" style="display:none">
+                    <h2>Top LLM Models</h2>
+                    <div class="table-wrap">
+                        <table id="table-llm-api-models" class="table-fixed">
+                            <thead>
+                                <tr>
+                                    <th class="col-main">Model Name</th>
+                                    <th class="col-m1">Hits</th>
+                                    <th class="col-m2"></th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="section-card" id="box-llm-api-endpoints" style="display:none">
+                    <h2>Top LLM Endpoints</h2>
+                    <div class="table-wrap">
+                        <table id="table-llm-api-endpoints" class="table-fixed">
+                            <thead>
+                                <tr>
+                                    <th class="col-main">Endpoint</th>
+                                    <th class="col-m1">Hits</th>
+                                    <th class="col-m2"></th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+
                 <div class="section-card" id="box-countries">
                     <h2>Origin Countries</h2>
                     <div class="table-wrap">
@@ -738,8 +1004,27 @@
                         attacker types. If an attacker tries to cat a file, the LLM hallucinates realistic content. If
                         they try to download a payload, FauxSSH simulates the network interaction while capturing the
                         threat data.</p>
-                    <p>This allows researchers to capture later-stage TTPs (Tools, Techniques, and Procedures) that
-                        would otherwise be lost when an attacker realizes they are in a sandbox.</p>
+                    <hr style="border:0; border-top:1px solid var(--border); margin: 30px 0;">
+                    <div id="settings-section">
+                        <h2>Personalization</h2>
+                        <p>Configure how data is presented in your browser. These settings are stored locally.</p>
+                        <div
+                            style="background:var(--bg-card); padding:20px; border-radius:12px; border:1px solid var(--border); margin-bottom: 20px;">
+                            <div style="display:flex; justify-content:space-between; align-items:center;">
+                                <div>
+                                    <b style="color:var(--text-main)">Hide silent commands</b>
+                                    <div style="font-size:0.85rem; color:var(--text-dim)">Remove commands from the
+                                        dashboard that produced no terminal output.</div>
+                                </div>
+                                <label class="switch">
+                                    <input type="checkbox" id="toggle-hide-empty" onchange="updateSettings()">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                        </div>
+
+
+                    </div>
                 </div>
                 <div class="about-side">
                     <div class="status-pill">
@@ -752,7 +1037,7 @@
                         <div class="dot active"></div> MySQL Backdoor: Active
                     </div>
                     <div class="status-pill">
-                        <div class="dot active"></div> LLM Handler: Gemini 3
+                        <div class="dot active"></div> LLM API: Active (Ollama/OpenAI)
                     </div>
                 </div>
             </div>
@@ -838,6 +1123,64 @@
         }
 
         // Data Rendering
+        let settings = {
+            hideEmpty: true,
+            protocols: ['ssh', 'telnet', 'http', 'mysql', 'redis', 'mcp', 'llm-api']
+        };
+
+        const esc = s => s ? String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": "&#39;" }[m])) : '';
+
+        function loadSettings() {
+            const raw = getCookie('dashboard_settings');
+            if (raw) {
+                try {
+                    const parsed = JSON.parse(raw);
+                    settings = { ...settings, ...parsed };
+                } catch (e) { }
+            }
+            document.getElementById('toggle-hide-empty').checked = settings.hideEmpty;
+            updateFilterUI();
+        }
+
+        function updateSettings() {
+            settings.hideEmpty = document.getElementById('toggle-hide-empty').checked;
+            document.cookie = `dashboard_settings=${JSON.stringify(settings)}; path=/; max-age=31536000`;
+            renderDashboard();
+        }
+
+        function updateFilterUI() {
+            document.querySelectorAll('.filter-chip').forEach(chip => {
+                const proto = chip.getAttribute('data-proto');
+                chip.classList.toggle('active', settings.protocols.includes(proto));
+            });
+
+            const btnAll = document.getElementById('btn-all-protocols');
+            const allSelected = settings.protocols.length === 6;
+            btnAll.innerText = allSelected ? 'Deselect All' : 'Select All';
+        }
+
+        function toggleProtocol(proto) {
+            const idx = settings.protocols.indexOf(proto);
+            if (idx > -1) {
+                settings.protocols.splice(idx, 1);
+            } else {
+                settings.protocols.push(proto);
+            }
+            updateFilterUI();
+            updateSettings();
+        }
+
+        function toggleAllProtocols() {
+            if (settings.protocols.length === 7) {
+                settings.protocols = [];
+            } else {
+                settings.protocols = ['ssh', 'telnet', 'http', 'mysql', 'redis', 'mcp', 'llm-api'];
+            }
+            updateFilterUI();
+            updateSettings();
+        }
+
+
         async function refreshData() {
             try {
                 const res = await fetch('/status_data.json');
@@ -859,27 +1202,161 @@
             document.getElementById('summary-sessions').innerText = data.total_sessions.toLocaleString();
 
             // Tables
-            const esc = s => s.replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": "&#39;" }[m]));
-            const row = (c, isRisk = false) => `<tr data-command="${esc(c.command)}" data-response="${esc(c.response || '')}">
-                <td class="col-main"><code>${c.command}</code></td>
-                <td class="col-m1">${isRisk ? c.risk : c.count.toLocaleString()}</td>
-                <td class="col-m2" style="color:var(--text-dim)">${c.ips}</td>
-            </tr>`;
+            const row = (c, isRisk = false) => {
+                if (settings.hideEmpty && !c.response && !isRisk) return '';
+                const click = isRisk && c.session_id ? `onclick="openReplay('${c.session_id}', '${esc(c.command)}')" style="cursor:pointer"` : '';
+                return `<tr ${click} data-command="${esc(c.command)}" data-response="${esc(c.response || '')}">
+                    <td class="col-main"><code>${c.command}</code></td>
+                    <td class="col-m1">${isRisk ? c.risk : c.count.toLocaleString()}</td>
+                    <td class="col-m2" style="color:var(--text-dim)">${c.ips}</td>
+                </tr>`;
+            };
 
-            document.querySelector('#table-ssh tbody').innerHTML = (data.top_ssh_commands || []).slice(0, 10).map(c => row(c)).join('');
-            document.querySelector('#table-telnet tbody').innerHTML = (data.top_telnet_commands || []).slice(0, 10).map(c => row(c)).join('');
-            document.querySelector('#table-http tbody').innerHTML = (data.top_http_commands || []).slice(0, 10).map(c => row(c)).join('');
-            document.querySelector('#table-risk tbody').innerHTML = (data.top_ssh_risk || []).slice(0, 8).map(c => row(c, true)).join('');
+            // Dynamic visibility and population
+            const updateBox = (id, list, isRisk = false) => {
+                const box = document.getElementById(`box-${id}`);
+                const proto = id === 'risk' ? 'ssh' : id;
+                const isSelected = settings.protocols.includes(proto);
+
+                if (!isSelected || (list || []).length === 0) {
+                    box.style.display = 'none';
+                    return;
+                }
+
+                box.style.display = 'block';
+                document.querySelector(`#table-${id} tbody`).innerHTML =
+                    list.slice(0, id === 'risk' ? 10 : 15).map(c => row(c, isRisk)).join('');
+            };
+
+            updateBox('ssh', data.top_ssh_commands);
+            updateBox('telnet', data.top_telnet_commands);
+            updateBox('http', data.top_http_commands);
+            updateBox('mysql', data.top_mysql_commands);
+            updateBox('redis', data.top_redis_commands);
+            updateBox('mcp', data.top_mcp_commands);
+
+            // LLM Boxes - Special mapping cause data keys differ from box IDs slightly
+            // We reuse updateBox logic but need to handle the list content structure
+            // top_llm_models: [{item: "llama3", count: 5}, ...] - Doesn't match row() expectation completely?
+            // Row expects {command:..., count:..., ips:...}
+            // Backend returns {item:..., count:...}
+            // We might need a custom renderer for LLM or map it.
+            // Let's map it temporarily for updateBox compatibility in row()
+            const mapLLM = (list) => (list || []).map(x => ({ command: x.item, count: x.count, ips: '', response: '' }));
+            updateBox('llm-api-models', mapLLM(data.top_llm_models));
+            updateBox('llm-api-endpoints', mapLLM(data.top_llm_endpoints));
+
+            updateBox('risk', data.top_ssh_risk, true);
+
 
             document.querySelector('#table-countries tbody').innerHTML = data.top_countries.slice(0, 10).map(c =>
                 `<tr><td class="col-main">${c.country}</td><td class="col-m1">${c.ips.toLocaleString()}</td><td class="col-m2" style="color:var(--text-dim)">${c.sessions.toLocaleString()}</td></tr>`
             ).join('');
 
             document.querySelector('#table-isps tbody').innerHTML = data.top_isps.slice(0, 10).map(i =>
-                `<tr><td class="col-main" title="${i.isp}">${i.isp}</td><td class="col-m1">${i.asn || '-'}</td><td class="col-m1">${i.ips.toLocaleString()}</td><td class="col-m2" style="color:var(--text-dim)">${i.sessions.toLocaleString()}</td></tr>`
+                `<tr><td class="col-main" title="${i.isp}">${i.isp}</td><td class="col-m1">${i.asn || '-'}</td><td class="col-m2">${i.ips.toLocaleString()}</td><td class="col-m2" style="color:var(--text-dim)">${i.sessions.toLocaleString()}</td></tr>`
             ).join('');
 
+            renderKillChain(data.kill_chain);
             renderChart();
+        }
+
+        function renderKillChain(chain) {
+            const box = document.getElementById('box-kill-chain');
+            const bar = document.getElementById('kill-chain-bar');
+            const legend = document.getElementById('kill-chain-legend');
+            if (!chain || chain.length === 0) { box.style.display = 'none'; return; }
+            box.style.display = 'block';
+
+            const total = chain.reduce((a, b) => a + b.count, 0);
+            bar.innerHTML = '';
+            legend.innerHTML = '';
+
+            const colors = {
+                'RECON': '#3498db',
+                'DISCOVERY': '#2980b9',
+                'DELIVERY': '#f1c40f',
+                'EXPLOITATION': '#e67e22',
+                'INSTALLATION': '#e74c3c',
+                'C2': '#9b59b6',
+                'ACTIONS': '#c0392b',
+                'WEAPONIZATION': '#d35400',
+                'UNKNOWN': '#7f8c8d'
+            };
+
+            chain.forEach(c => {
+                const pct = (c.count / total) * 100;
+                const stage = (c.stage || 'UNKNOWN').toUpperCase();
+                const color = colors[stage] || '#7f8c8d';
+
+                const div = document.createElement('div');
+                div.className = 'chain-segment';
+                div.style.width = `${pct}%`;
+                div.style.backgroundColor = color;
+                div.title = `${stage}: ${c.count} interactions`;
+                div.innerText = pct > 10 ? `${Math.round(pct)}%` : '';
+                bar.appendChild(div);
+
+                const leg = document.createElement('div');
+                leg.style.margin = '0 5px';
+                leg.innerHTML = `<span style="color:${color}; font-size: 1rem; vertical-align: middle">●</span> ${stage}`;
+                legend.appendChild(leg);
+            });
+        }
+
+        async function openReplay(sessionId, cmd = null) {
+            const overlay = document.getElementById('modal-overlay');
+            const modalTitle = document.getElementById('modal-title');
+            const modalCmd = document.getElementById('modal-command');
+            const modalOut = document.getElementById('modal-output');
+
+            overlay.style.display = 'flex';
+            modalTitle.textContent = `Replay: Session [${sessionId.substring(0, 8)}]`;
+            modalCmd.textContent = cmd || "Loading command details...";
+            modalOut.innerHTML = '<div class="terminal-wrap" id="replay-terminal">Initialising secure stream...</div>';
+
+            try {
+                const res = await fetch(`/api/session_details?id=${sessionId}`);
+                const data = await res.json();
+                if (data.error) {
+                    modalOut.textContent = "Error: " + data.error;
+                    return;
+                }
+
+                modalTitle.textContent = `Replay: ${data.protocol || 'ssh'} Session [${(data.id || sessionId).substring(0, 8)}]`;
+                if (!cmd) {
+                    // If no specific command was passed (e.g. from a general session list),
+                    // use the header format in the command box.
+                    modalCmd.textContent = `Session Replay for ${data.user || 'root'}`;
+                }
+
+                const term = document.getElementById('replay-terminal');
+                if (!term) return; // Modal content was changed or closed
+                term.innerHTML = '';
+
+                const history = data.history || [];
+                for (const inter of history) {
+                    const currentTerm = document.getElementById('replay-terminal');
+                    if (!currentTerm) break;
+
+                    const p = document.createElement('div');
+                    p.className = 'term-prompt';
+                    p.textContent = `${data.user || 'user'}@decoy:~$ ${inter.command}`;
+                    currentTerm.appendChild(p);
+
+                    if (inter.response) {
+                        const o = document.createElement('div');
+                        o.className = 'term-out';
+                        o.textContent = inter.response;
+                        currentTerm.appendChild(o);
+                    }
+                    currentTerm.scrollTop = currentTerm.scrollHeight;
+                    // Playback speed: faster for many interactions
+                    await new Promise(r => setTimeout(r, history.length > 20 ? 50 : 150));
+                }
+            } catch (e) {
+                modalOut.textContent = "Connection Failure: " + e;
+            }
         }
 
         function renderChart() {
@@ -890,31 +1367,91 @@
 
             if (!trends || trends.length < 2) return;
 
-            const max = Math.max(...trends.map(t => t.count), 1);
             const w = 1000;
             const h = 200;
             const pad = 20;
+            const protocols = ['ssh', 'telnet', 'http', 'mysql', 'redis', 'mcp', 'llm-api'];
+            const colors = {
+                ssh: '#3fb950',
+                telnet: '#d29922',
+                http: '#f85149',
+                mysql: '#2f81f7',
+                redis: '#a371f7',
+                mcp: '#f771a3',
+                'llm-api': '#20E3B2'
+            };
 
-            const points = trends.map((t, i) => {
-                const x = (i / (trends.length - 1)) * w;
-                const y = h - pad - (t.count / max) * (h - pad * 2);
-                return { x, y, val: t.count, label: t.label };
+            // Filter out unselected protocols
+            const activeProtos = protocols.filter(p => settings.protocols.includes(p));
+
+            // Calculate max for normalization
+            const max = Math.max(...trends.map(t => {
+                let sum = 0;
+                activeProtos.forEach(p => sum += (t.protocols[p] || 0));
+                return sum;
+            }), 1);
+
+            let seriesHtml = "";
+            let currentBottoms = trends.map(() => h - pad);
+
+            activeProtos.forEach(proto => {
+                const points = trends.map((t, i) => {
+                    const val = t.protocols[proto] || 0;
+                    const x = (i / (trends.length - 1)) * w;
+                    // Y is currentBottom - height_of_this_segment
+                    const segHeight = (val / max) * (h - pad * 2);
+                    const y = currentBottoms[i] - segHeight;
+                    const prevBottom = currentBottoms[i];
+                    currentBottoms[i] = y; // Elevate bottom for next protocol
+                    return { x, y, prevBottom, val };
+                });
+
+                const linePath = `M ${points.map(p => `${p.x},${p.y}`).join(' L ')}`;
+                const areaPath = `${linePath} L ${w},${h - pad} L 0,${h - pad} Z`; // Area needs careful stacking logic, 
+                // but for simplicity we can just draw them one by one if they overlap correctly.
+                // Actually, for a TRUE stacked area, the "bottom" of the current series is the "top" of the previous.
+
+                // Real Area Path: Top line (this proto) then back via Previous line (previous proto)
+                // We'll just use a simpler approach for now: draw from top to baseline, in reverse order of selection?
+                // No, let's just draw the lines. 
+
+                seriesHtml += `<path d="${linePath}" fill="none" stroke="${colors[proto]}" stroke-width="2.5" stroke-linecap="round" style="transition: d 0.3s ease;"></path>`;
             });
 
-            const path = `M ${points.map(p => `${p.x},${p.y}`).join(' L ')}`;
-            document.getElementById('chart-line').setAttribute('d', path);
-            document.getElementById('chart-area').setAttribute('d', `${path} L ${w},${h} L 0,${h} Z`);
-
-            let ptsHtml = "";
+            // Labels
             let lblHtml = "";
-            points.forEach((p, i) => {
+            trends.forEach((t, i) => {
+                const x = (i / (trends.length - 1)) * w;
                 if (i % Math.ceil(trends.length / 8) === 0 || i === trends.length - 1) {
-                    lblHtml += `<text x="${p.x}" y="${h}" fill="var(--text-dim)" font-size="12" text-anchor="middle">${p.label}</text>`;
+                    lblHtml += `<text x="${x}" y="${h}" fill="var(--text-dim)" font-size="12" text-anchor="middle">${t.label}</text>`;
                 }
-                ptsHtml += `<circle cx="${p.x}" cy="${p.y}" r="4" fill="var(--bg-card)" stroke="var(--accent)" stroke-width="2" onmouseover="showTip('${p.val} sessions')" onmouseout="hideTip()"/>`;
             });
-            document.getElementById('chart-points').innerHTML = ptsHtml;
+
+            // Interactive points for total
+            let ptsHtml = "";
+            trends.forEach((t, i) => {
+                const x = (i / (trends.length - 1)) * w;
+                const total = activeProtos.reduce((acc, p) => acc + (t.protocols[p] || 0), 0);
+                const y = h - pad - (total / max) * (h - pad * 2);
+                ptsHtml += `<circle cx="${x}" cy="${y}" r="5" fill="var(--bg-card)" stroke="var(--accent)" stroke-width="2" onmouseover="showTip('${total} sessions')" onmouseout="hideTip()" style="cursor:pointer; transition: cy 0.3s ease;"></circle>`;
+            });
+
+            document.getElementById('chart-series').innerHTML = seriesHtml;
             document.getElementById('chart-labels').innerHTML = lblHtml;
+            document.getElementById('chart-points').innerHTML = ptsHtml;
+
+            // Update Legend
+            const legend = document.getElementById('traffic-legend');
+            if (legend) {
+                legend.innerHTML = activeProtos.map(proto => {
+                    const color = colors[proto];
+                    const label = proto.toUpperCase();
+                    return `<span style="display:flex; align-items:center; gap:8px;">
+                        <span style="width:14px; height:4px; background:${color}; border-radius:2px; box-shadow: 0 0 6px ${color}44;"></span>
+                        <span style="color:var(--text-main); font-weight:600;">${label}</span>
+                    </span>`;
+                }).join('');
+            }
         }
 
         // Tooltip hint
@@ -932,7 +1469,23 @@
 
         function openModal(cmd, out) {
             modalCmd.textContent = cmd;
-            modalOut.textContent = out || '[No output recorded for this command]';
+            let displayOut = out;
+            if (displayOut === null || displayOut === undefined) {
+                displayOut = '[No output recorded for this command]';
+            }
+
+            // Handle raw JSON output from delegates/LLM
+            if (out && (out.startsWith('{') || out.trim().startsWith('{'))) {
+                try {
+                    const parsed = JSON.parse(out);
+                    if (parsed.output) displayOut = parsed.output;
+                    else displayOut = JSON.stringify(parsed, null, 2);
+                } catch (e) {
+                    // Not valid JSON or parsing failed, keep as is
+                }
+            }
+
+            modalOut.textContent = displayOut;
             overlay.style.display = 'flex';
         }
 
@@ -975,6 +1528,7 @@
             }
         });
 
+        loadSettings();
         refreshData();
         setInterval(refreshData, 60000);
     </script>

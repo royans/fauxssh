@@ -35,8 +35,25 @@ class LastCommand(BaseHandler):
         from ssh_honeypot.core.config import config
 
         # Inject Persona Users (Historical)
+        if not self.db:
+            return (
+                "\nwtmp begins Wed Jan 01 00:00:00 2026\n",
+                {},
+                {"source": "handler", "cached": False},
+            )
+
         persona_users = config.get("persona", "system", "users") or []
         for p_user in persona_users:
+            if p_user is None:
+                continue
+            if isinstance(p_user, dict):
+                p_user = p_user.get("name")
+
+            if not p_user:
+                continue
+
+            p_user = str(p_user)
+
             # Add 1-2 fake historical entries for this user
             for _ in range(random.randint(1, 2)):
                 tty = f"pts/{random.randint(0, 10)}"

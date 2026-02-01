@@ -48,7 +48,7 @@ class TestComplexScenarios(unittest.TestCase):
 
         db = HoneyDB()
         conn = db._get_conn()
-        conn.execute("DELETE FROM command_cache WHERE command = '_global_process_list'")
+        conn.execute("DELETE FROM universal_cache WHERE cache_key LIKE 'ssh:%'")
         conn.commit()
         conn.commit()
         conn.close()

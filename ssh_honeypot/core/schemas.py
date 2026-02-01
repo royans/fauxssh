@@ -53,9 +53,36 @@ class AlertingConfig(BaseModel):
 class MCPConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     enabled: bool = True
-    port: int = 8000
+    port: int = 8001  # Moved to 8001 to free up 8000 for OpenAI
     max_llm_calls: int = 20
     throttle_delay: float = 2.0
+
+
+class OllamaConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    enabled: bool = True
+    port: int = 11434
+    fake_models: List[str] = Field(
+        default_factory=lambda: [
+            "llama3:latest",
+            "mistral:latest",
+            "dolphin-mixtral:latest",
+            "codellama:7b",
+            "qwen:14b",
+        ]
+    )
+
+
+class OpenAIConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    enabled: bool = True
+    port: int = 8000
+
+
+class LLMAPIConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    ollama: OllamaConfig = Field(default_factory=OllamaConfig)
+    openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
 
 
 class RealismConfig(BaseModel):
@@ -116,6 +143,9 @@ class AnalyticsConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     ignore_ips: List[str] = Field(default_factory=list)
     show_empty_sessions: bool = False
+    enabled_services: List[str] = Field(
+        default_factory=lambda: ["ssh", "telnet", "mysql"]
+    )
 
 
 class TelnetConfig(BaseModel):

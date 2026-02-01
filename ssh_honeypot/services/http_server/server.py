@@ -11,6 +11,7 @@ from ssh_honeypot.core.logging_setup import log
 from ssh_honeypot.core.config import config
 from ssh_honeypot.core.dos_protection import dos_protector
 from ssh_honeypot.core.clogging import clogger
+from ssh_honeypot.core.universal_cache import universal_cache
 
 # Non-logged management paths
 MANAGEMENT_PATHS = {
@@ -126,7 +127,8 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
         client_ip = self.get_client_ip()
 
         # 0. Management & Stats (Bypass logging and DoS)
-        if config.get("http", "showstats") and self.path in MANAGEMENT_PATHS:
+        is_mgmt = self.path in MANAGEMENT_PATHS or self.path.startswith("/api/")
+        if config.get("http", "showstats") and is_mgmt:
             if self.path in [
                 "/stats_request.html",
                 "/stats_request",
@@ -181,6 +183,33 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                         return
                 except Exception as e:
                     log.error(f"[HTTP] Error serving stats data: {e}")
+
+            if self.path.startswith("/api/session_details"):
+                try:
+                    from urllib.parse import parse_qs, urlparse
+
+                    query = parse_qs(urlparse(self.path).query)
+                    sess_id = query.get("id", [None])[0]
+                    if sess_id:
+                        data = self.server.honey_db.get_session_details(sess_id)
+                        if data:
+                            resp = json.dumps(data).encode("utf-8")
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json")
+                            self.send_header("Content-Length", str(len(resp)))
+                            self.end_headers()
+                            self.wfile.write(resp)
+                            return
+
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(b'{"error": "Session not found"}')
+                    return
+                except Exception as e:
+                    log.error(f"[HTTP] Error in session_details api: {e}")
+                    self.send_response(500)
+                    self.end_headers()
+                    return
 
         # 1. DoS Protection (Honeypot requests only)
         if not dos_protector.is_allowed(client_ip, "HTTP"):
@@ -305,13 +334,14 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
         except Exception as vfse:
             log.error(f"[HTTP] VFS Lookup Error: {vfse}")
 
-        # 2. Caching Check (Only if not in VFS)
+        # 2. Universal Caching Check (Only if not in VFS)
         content = ""
-        cached = db.get_cached_response(cache_key, "HTTP_ROOT")
+        cache_key_hash = hashlib.md5(cache_key.encode()).hexdigest()
+        cached_item = universal_cache.get("http_cache", cache_key_hash)
         source_type = "llm"
 
-        if cached:
-            content = cached
+        if cached_item:
+            content = cached_item["output_text"]
             source_type = "cache"
             log.debug(f"[HTTP] Served Cached: {cache_key}")
         else:
@@ -382,7 +412,13 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                     pass
 
                 # Cache it
-                db.cache_response(cache_key, "HTTP_ROOT", content)
+                universal_cache.set(
+                    service="http_cache",
+                    key=cache_key_hash,
+                    input_text=cache_key,
+                    output_text=content,
+                    ttl_days=30,
+                )
             except Exception as e:
                 log.error(f"[HTTP] LLM Error: {e}")
                 content = self._get_fallback_404()
@@ -509,8 +545,8 @@ def start_http_server(port, db, llm):
             f"[HTTP] Starting Honeypot on {bind_ip}:{port} ({config.get('http', 'server_header')}) [{family_str}]"
         )
         # Perform Startup Cache Cleanup (Invalidate VFS overrides)
-        web_root = config.get("http", "web_root") or "/var/www/html"
-        db.cleanup_http_cache(web_root)
+        # For universal_cache, we might want to just let TTL handle it or implement a clear service method
+        # db.cleanup_http_cache(web_root)
 
         server.serve_forever()
     except Exception as e:

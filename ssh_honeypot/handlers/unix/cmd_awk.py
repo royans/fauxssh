@@ -1,4 +1,5 @@
 from ssh_honeypot.handlers.base import BaseHandler
+from ssh_honeypot.core.universal_cache import universal_cache
 import shlex
 import re
 import hashlib
@@ -107,12 +108,19 @@ class AwkCommand(BaseHandler):
 
         # Fallback to current Generic/LLM handler
         content_hash = hashlib.md5(content.encode("utf-8", "ignore")).hexdigest()
-        cache_key = f"{cmd}::data_hash={content_hash}"
-        cached = self.db.get_cached_response(cache_key, context.get("cwd"))
-        if cached:
+        cache_key = hashlib.md5(
+            f"{cmd}::data_hash={content_hash}:{context.get('cwd')}".encode()
+        ).hexdigest()
+
+        cached_item = universal_cache.get("awk_command", cache_key)
+        if cached_item:
+            cached = cached_item["output_text"]
             j, t = self._extract_json_or_text(cached)
-            r, u = self._process_llm_json(j, t)
+            r, u, _ = self._process_llm_json(j, t)
             return r, u, {"source": "cache", "cached": True}
+
+        # Legacy variable for downstream
+        cached = None
 
         # Warn: prompt string expects target_path but we might be using stdin (content)
         t_label = files[0] if files else "STDIN"
@@ -121,7 +129,14 @@ class AwkCommand(BaseHandler):
         resp = self.llm.generate_response(
             prompt, context.get("cwd"), context.get("history", []), [], []
         )
-        self.db.cache_response(cache_key, context.get("cwd"), resp)
+        if resp and "INTERNAL_ERROR" not in resp:
+            universal_cache.set(
+                service="awk_command",
+                key=cache_key,
+                input_text=f"{cmd} (data_hash={content_hash})",
+                output_text=resp,
+                ttl_days=30,
+            )
         j, t = self._extract_json_or_text(resp)
-        r, u = self._process_llm_json(j, t)
+        r, u, _ = self._process_llm_json(j, t)
         return r, u, {"source": "llm", "cached": False}

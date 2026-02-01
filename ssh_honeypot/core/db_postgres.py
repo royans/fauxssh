@@ -1,10 +1,13 @@
-from .db_interface import DatabaseBackend
-from .logging_setup import log
 import json
 import time
 import datetime
 import hashlib
 import os
+
+from .db_interface import DatabaseBackend
+from .logging_setup import log
+from .db_utils import sync_db_schema
+from .utils import sanitize_path
 
 try:
     import psycopg2
@@ -46,6 +49,12 @@ class PooledConnectionWrapper:
     def rollback(self):
         return self._conn.rollback()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
 
 class PostgresBackend(DatabaseBackend):
     def __init__(self, config=None):
@@ -80,6 +89,10 @@ class PostgresBackend(DatabaseBackend):
         pool_status = "Active" if self._pool else "Inactive"
         return f"PostgreSQL Backend (Host: {host}, DB: {dbname}, Pool: {pool_status})"
 
+    @property
+    def is_postgres(self):
+        return True
+
     def _load_skeleton(self):
         try:
             from ssh_honeypot.core.fs_seeder import get_skeleton_data
@@ -91,7 +104,7 @@ class PostgresBackend(DatabaseBackend):
         except ImportError:
             # Fallback for direct testing
             try:
-                from fs_seeder import get_skeleton_data
+                from fs_seeder import get_skeleton_data  # pylint: disable=import-error
 
                 self.skeleton_cache = get_skeleton_data()
             except:
@@ -134,293 +147,7 @@ class PostgresBackend(DatabaseBackend):
         Initialize the database schema.
         """
         log.info("[Postgres] Initializing Database Schema...")
-        conn = self._get_conn()
-        try:
-            cursor = conn.cursor()
-
-            # Sessions
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id SERIAL PRIMARY KEY,
-                    session_id TEXT UNIQUE,
-                    remote_ip TEXT,
-                    username TEXT,
-                    password TEXT,
-                    start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    end_time TIMESTAMP,
-                    client_version TEXT,
-                    protocol TEXT DEFAULT 'ssh',
-                    summary TEXT,
-                    risk_score INTEGER,
-                    fingerprint TEXT
-                )
-            """
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(start_time)"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_sessions_ip ON sessions(remote_ip)"
-            )
-
-            # Interactions
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS interactions (
-                    id SERIAL PRIMARY KEY,
-                    session_id TEXT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    cwd TEXT,
-                    command TEXT,
-                    response TEXT,
-                    source TEXT,
-                    request_md5 TEXT,
-                    response_md5 TEXT,
-                    response_head TEXT,
-                    response_size INTEGER,
-                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
-                )
-            """
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_interactions_session ON interactions(session_id)"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_interactions_ts ON interactions(timestamp)"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_interactions_md5 ON interactions(request_md5)"
-            )
-
-            # Auth Events
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS auth_events (
-                    id SERIAL PRIMARY KEY,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    client_ip TEXT,
-                    username TEXT,
-                    auth_method TEXT,
-                    auth_data TEXT,
-                    success BOOLEAN,
-                    client_version TEXT,
-                    fingerprint TEXT,
-                    protocol TEXT DEFAULT 'ssh'
-                )
-            """
-            )
-
-            # Global Filesystem
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS global_filesystem (
-                    path TEXT PRIMARY KEY,
-                    parent_path TEXT,
-                    type TEXT,
-                    metadata TEXT,
-                    content TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_parent ON global_filesystem(parent_path)"
-            )
-
-            # User Filesystem
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS user_filesystem (
-                    ip TEXT,
-                    username TEXT,
-                    path TEXT,
-                    parent_path TEXT,
-                    type TEXT,
-                    metadata TEXT,
-                    content TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_accessed TIMESTAMP,
-                    is_deleted INTEGER DEFAULT 0,
-                    PRIMARY KEY (ip, username, path)
-                )
-            """
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_user_parent ON user_filesystem(ip, username, parent_path)"
-            )
-
-            # Command Cache
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS command_cache (
-                    id SERIAL PRIMARY KEY,
-                    cmd_hash TEXT UNIQUE,
-                    command TEXT,
-                    cwd TEXT,
-                    response TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """
-            )
-
-            # Session Summaries Cache
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS session_summaries_cache (
-                    chain_hash TEXT PRIMARY KEY,
-                    summary TEXT,
-                    risk_score INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """
-            )
-
-            # IP Intelligence
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ip_intelligence (
-                    ip TEXT PRIMARY KEY,
-                    hostname TEXT,
-                    city TEXT,
-                    country TEXT,
-                    isp TEXT,
-                    org TEXT,
-                    asn TEXT,
-                    network_type TEXT,
-                    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    enriched INTEGER DEFAULT 0,
-                    raw_data TEXT,
-                    abuse_tags TEXT DEFAULT '[]'
-                )
-            """
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_ip_intel_enriched ON ip_intelligence(enriched, last_seen)"
-            )
-
-            # Malicious Payloads
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS malicious_payloads (
-                    id SERIAL PRIMARY KEY,
-                    url TEXT,
-                    url_hash TEXT UNIQUE,
-                    session_id TEXT,
-                    ip TEXT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    status TEXT DEFAULT 'pending',
-                    payload_md5 TEXT,
-                    payload_size INTEGER,
-                    file_path TEXT,
-                    retry_count INTEGER DEFAULT 0,
-                    error_message TEXT,
-                    virustotal_result TEXT,
-                    vt_last_scanned TIMESTAMP,
-                    vt_scan_id TEXT
-                )
-            """
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_payload_status ON malicious_payloads(status)"
-            )
-
-            # LLM Usage
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS llm_usage (
-                    id SERIAL PRIMARY KEY,
-                    ip TEXT NOT NULL,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    source TEXT DEFAULT 'http'
-                )
-            """
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_llm_usage_ip_time ON llm_usage(ip, timestamp)"
-            )
-
-            # LLM Response Cache (Jan 19)
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS llm_response_cache (
-                    prompt_hash TEXT PRIMARY KEY,
-                    prompt_text TEXT,
-                    response TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """
-            )
-
-            # LLM Response Cache (Jan 19)
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS llm_response_cache (
-                    prompt_hash TEXT PRIMARY KEY,
-                    prompt_text TEXT,
-                    response TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """
-            )
-
-            # Payload Requests (Many-to-One Tracker)
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS payload_requests (
-                    id SERIAL PRIMARY KEY,
-                    payload_id INTEGER,
-                    ip TEXT,
-                    session_id TEXT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(payload_id) REFERENCES malicious_payloads(id)
-                )
-            """
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_payload_req_pid ON payload_requests(payload_id)"
-            )
-
-            # Requested URLs
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS requested_urls (
-                    id SERIAL PRIMARY KEY,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    session_id TEXT,
-                    url TEXT,
-                    method TEXT,
-                    user_agent TEXT,
-                    command_text TEXT,
-                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
-                )
-            """
-            )
-
-            # Command Analysis
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS command_analysis (
-                    command_hash TEXT PRIMARY KEY,
-                    command_text TEXT,
-                    activity_type TEXT,
-                    stage TEXT,
-                    risk_score INTEGER,
-                    explanation TEXT,
-                    analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """
-            )
-
-            conn.commit()
-        except Exception as e:
-            log.error(f"[Postgres] Failed to init DB: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
+        sync_db_schema(self)
 
     # ----------------------------------------------------------------
     # Implementation
@@ -637,7 +364,7 @@ class PostgresBackend(DatabaseBackend):
                         response_head,
                         response_size,
                         duration_ms,
-                        created_at if created_at else datetime.now(),
+                        created_at if created_at else datetime.datetime.now(),
                     ),
                 )
             conn.commit()
@@ -676,35 +403,9 @@ class PostgresBackend(DatabaseBackend):
         except Exception as e:
             log.error(f"[Postgres] Error in Payload Pipeline: {e}")
 
-    def get_cached_response(self, command, cwd):
-        h = hashlib.sha256(f"{cwd}:{command}".encode()).hexdigest()
-        conn = self._get_conn()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT response FROM command_cache WHERE cmd_hash = %s", (h,)
-            )
-            row = cursor.fetchone()
-            return row[0] if row else None
-        finally:
-            conn.close()
+    # Removed get_cached_response (Deprecated)
 
-    def cache_response(self, command, cwd, response):
-        h = hashlib.sha256(f"{cwd}:{command}".encode()).hexdigest()
-        conn = self._get_conn()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO command_cache (cmd_hash, command, cwd, response) 
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (cmd_hash) DO UPDATE SET response = EXCLUDED.response
-                """,
-                (h, command, cwd, response),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    # Removed cache_response (Deprecated)
 
     def get_fs_node(self, path):
         conn = self._get_conn()
@@ -856,7 +557,11 @@ class PostgresBackend(DatabaseBackend):
                         client_ip,
                         username,
                         auth_method,
-                        auth_data,
+                        (
+                            json.dumps(auth_data)
+                            if isinstance(auth_data, dict)
+                            else auth_data
+                        ),
                         success,
                         client_version,
                         fp_json,
@@ -975,6 +680,65 @@ class PostgresBackend(DatabaseBackend):
         finally:
             conn.close()
 
+    def record_api_usage(self, service, identifier):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO api_usage (service, identifier) VALUES (%s, %s)",
+                (service, identifier),
+            )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Error recording API usage for {service}: {e}")
+        finally:
+            conn.close()
+
+    def check_api_rate_limit(
+        self, service, identifier, rpm_limit, rph_limit, rpd_limit
+    ):
+        """
+        Generic rate limit checker for any service/identifier (Postgres implementation).
+        Returns (allowed: bool, reason: str)
+        """
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+
+            # RPM
+            cursor.execute(
+                "SELECT COUNT(*) FROM api_usage WHERE service = %s AND identifier = %s AND timestamp > NOW() - INTERVAL '60 seconds'",
+                (service, identifier),
+            )
+            rpm_count = cursor.fetchone()[0]
+            if rpm_count >= rpm_limit:
+                return False, f"RPM Limit Exceeded ({service}: {rpm_count}/{rpm_limit})"
+
+            # RPH
+            cursor.execute(
+                "SELECT COUNT(*) FROM api_usage WHERE service = %s AND identifier = %s AND timestamp > NOW() - INTERVAL '1 hour'",
+                (service, identifier),
+            )
+            rph_count = cursor.fetchone()[0]
+            if rph_count >= rph_limit:
+                return False, f"RPH Limit Exceeded ({service}: {rph_count}/{rph_limit})"
+
+            # RPD
+            cursor.execute(
+                "SELECT COUNT(*) FROM api_usage WHERE service = %s AND identifier = %s AND timestamp > NOW() - INTERVAL '24 hours'",
+                (service, identifier),
+            )
+            rpd_count = cursor.fetchone()[0]
+            if rpd_count >= rpd_limit:
+                return False, f"RPD Limit Exceeded ({service}: {rpd_count}/{rpd_limit})"
+
+            return True, "OK"
+        except Exception as e:
+            log.error(f"[Postgres] Error checking API limits for {service}: {e}")
+            return True, "Error check failed (Fail Open)"
+        finally:
+            conn.close()
+
     def check_llm_rate_limit(self, ip, rpm_limit, rph_limit, rpd_limit):
         conn = self._get_conn()
         try:
@@ -1058,7 +822,7 @@ class PostgresBackend(DatabaseBackend):
                     "type": item["type"],
                     "metadata": json.dumps(meta),
                     "content": item.get("content"),
-                    "created_at": datetime.datetime.now().isoformat(),
+                    "created_at": datetime.datetime.now(),
                 }
 
         # 3. Check Global DB
@@ -1100,7 +864,7 @@ class PostgresBackend(DatabaseBackend):
                     "type": item["type"],
                     "metadata": json.dumps(meta),
                     "content": item.get("content"),
-                    "created_at": datetime.datetime.now().isoformat(),
+                    "created_at": datetime.datetime.now(),
                     "source_layer": "skeleton",
                 }
 
@@ -1131,7 +895,7 @@ class PostgresBackend(DatabaseBackend):
     def is_managed_directory(self, ip, username, path):
         # 1. Check User Home
         home_dir = "/root" if username == "root" else f"/home/{username}"
-        if path == home_dir or path.startswith(home_dir + "/"):
+        if path == home_dir:
             return True
 
         # 2. Check User DB
@@ -1523,6 +1287,116 @@ class PostgresBackend(DatabaseBackend):
         finally:
             conn.close()
 
+    def get_session_details(self, session_id):
+        """Fetches full session details and interaction sequence for replay."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            cursor.execute(
+                "SELECT * FROM sessions WHERE session_id = %s", (session_id,)
+            )
+            session = cursor.fetchone()
+            if not session:
+                return None
+
+            cursor.execute(
+                "SELECT timestamp, command, response, source FROM interactions WHERE session_id = %s ORDER BY timestamp ASC, id ASC",
+                (session_id,),
+            )
+            interactions = []
+            for r in cursor.fetchall():
+                row_dict = dict(r)
+                if isinstance(
+                    row_dict.get("timestamp"), (datetime.datetime, datetime.date)
+                ):
+                    row_dict["timestamp"] = row_dict["timestamp"].isoformat()
+                interactions.append(row_dict)
+
+            duration = 0
+            if session["end_time"] and session["start_time"]:
+                duration = (session["end_time"] - session["start_time"]).total_seconds()
+
+            return {
+                "id": session["session_id"],
+                "session_id": session["session_id"],  # Compat
+                "ip": session["remote_ip"],
+                "remote_ip": session["remote_ip"],  # Compat
+                "protocol": session["protocol"],
+                "user": session["username"],
+                "username": session["username"],  # Compat
+                "start_time": (
+                    session["start_time"].isoformat()
+                    if hasattr(session["start_time"], "isoformat")
+                    else str(session["start_time"])
+                ),
+                "duration": duration,
+                "history": interactions,
+                "interactions": interactions,  # Compat
+            }
+        finally:
+            conn.close()
+
+    def get_recent_high_risk_events(self, limit=10):
+        """Fetches latest risky sessions and payloads for the ticker."""
+        conn = self._get_conn()
+        events = []
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+
+            # 1. High Risk Commands
+            cursor.execute(
+                """
+                SELECT i.timestamp, i.command, s.remote_ip, ca.risk_score, ca.explanation
+                FROM interactions i
+                JOIN sessions s ON i.session_id = s.session_id
+                JOIN command_analysis ca ON i.request_md5 = ca.command_hash
+                WHERE ca.risk_score >= 80
+                ORDER BY i.timestamp DESC LIMIT %s
+                """,
+                (limit,),
+            )
+            for r in cursor.fetchall():
+                events.append(
+                    {
+                        "type": "command",
+                        "time": (
+                            r["timestamp"].isoformat()
+                            if hasattr(r["timestamp"], "isoformat")
+                            else str(r["timestamp"])
+                        ),
+                        "command": r["command"],
+                        "ip": r["remote_ip"],
+                        "risk": r["risk_score"],
+                        "reason": r["explanation"],
+                    }
+                )
+
+            # 2. Latest Payloads
+            cursor.execute(
+                "SELECT timestamp, url, ip FROM malicious_payloads ORDER BY timestamp DESC LIMIT %s",
+                (limit,),
+            )
+            for r in cursor.fetchall():
+                events.append(
+                    {
+                        "type": "payload",
+                        "time": (
+                            r["timestamp"].isoformat()
+                            if hasattr(r["timestamp"], "isoformat")
+                            else str(r["timestamp"])
+                        ),
+                        "url": r["url"],
+                        "ip": r["ip"],
+                        "risk": 100,
+                        "reason": "Malware Download",
+                    }
+                )
+
+            events.sort(key=lambda x: x["time"], reverse=True)
+            return events[:limit]
+        finally:
+            conn.close()
+
     def get_session_interactions(self, session_id):
         conn = self._get_conn()
         try:
@@ -1612,12 +1486,22 @@ class PostgresBackend(DatabaseBackend):
         finally:
             conn.close()
 
-    def get_unanalyzed_commands(self, limit=10):
+    def get_unanalyzed_commands(self, limit=10, allowed_protocols=None):
         conn = self._get_conn()
         try:
             cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cursor.execute(
-                """
+
+            protocol_filter = ""
+            params = []
+
+            if allowed_protocols:
+                # Use ANY for cleaner array handling in PG
+                protocol_filter = "AND s.protocol = ANY(%s)"
+                params.append(allowed_protocols)
+
+            params.append(limit)
+
+            query = f"""
                 SELECT i.id, i.session_id, i.command, i.request_md5, s.remote_ip
                 FROM interactions i
                 JOIN sessions s ON i.session_id = s.session_id
@@ -1625,11 +1509,12 @@ class PostgresBackend(DatabaseBackend):
                 WHERE ca.command_hash IS NULL
                 AND i.request_md5 IS NOT NULL
                 AND i.command != ''
+                {protocol_filter}
                 ORDER BY i.id DESC
                 LIMIT %s
-                """,
-                (limit,),
-            )
+                """
+
+            cursor.execute(query, tuple(params))
             return [dict(r) for r in cursor.fetchall()]
         except Exception as e:
             log.error(f"[Postgres] Error fetching unanalyzed commands: {e}")
@@ -1659,11 +1544,13 @@ class PostgresBackend(DatabaseBackend):
             "top_http_commands": [],
             "top_redis_commands": [],
             "top_mcp_commands": [],
-            "top_passwords": [],
-            "top_ssh_users": [],
-            "top_ssh_risk": [],
+            "top_llm_models": [],
+            "top_llm_endpoints": [],
             "total_payloads": 0,
             "protocol_activity": {},
+            "kill_chain": [],
+            "top_ssh_risk": [],
+            "multi_window": {},
         }
         try:
             cursor = conn.cursor()
@@ -1692,7 +1579,9 @@ class PostgresBackend(DatabaseBackend):
                     params,
                 )
                 row = cursor.fetchone()
-                ips, sessions = (row[0] or 0, row[1] or 0) if row else (0, 0)
+                ips, sessions = (
+                    (row[0] or 0, row[1] or 0) if row and len(row) >= 2 else (0, 0)
+                )
 
                 ei_part = f" AND i.timestamp <= {end_expr}" if end_expr else ""
                 cursor.execute(
@@ -1723,6 +1612,18 @@ class PostgresBackend(DatabaseBackend):
                     "sessions": sessions,
                     "commands": commands,
                     "networks": networks,
+                }
+
+            # Multi-window Metrics
+            windows = {"24H": 24, "48H": 48, "1W": 168, "2W": 336}
+            for label, h in windows.items():
+                w_filter = f"NOW() - INTERVAL '{h} hours'"
+                w_stats = get_window_stats(w_filter)
+                stats["multi_window"][label] = {
+                    "ips": w_stats["ips"],
+                    "networks": w_stats["networks"],
+                    "interactions": w_stats["commands"],
+                    "sessions": w_stats["sessions"],
                 }
 
             # Current window totals
@@ -1765,6 +1666,39 @@ class PostgresBackend(DatabaseBackend):
                     )
                     stats["protocol_activity"][proto] = r[2]
 
+            # --- LLM ANALYTICS ---
+            llm_query = f"""
+                SELECT command FROM interactions i
+                JOIN sessions s ON i.session_id = s.session_id
+                WHERE i.source = 'llm-api' AND i.timestamp > {time_filter} {interaction_ip_filter}
+            """
+            cursor.execute(llm_query, params)
+            llm_rows = cursor.fetchall()
+            if llm_rows:
+                from collections import Counter
+
+                model_counts = Counter()
+                endpoint_counts = Counter()
+                for (cmd_text,) in llm_rows:
+                    if not cmd_text:
+                        continue
+                    parts = cmd_text.split("\n", 1)
+                    endpoint = parts[0].strip()
+                    endpoint_counts[endpoint] += 1
+                    if len(parts) > 1:
+                        try:
+                            payload = json.loads(parts[1])
+                            model = payload.get("model", "unknown")
+                            model_counts[model] += 1
+                        except:
+                            pass
+                stats["top_llm_models"] = [
+                    {"item": k, "count": v} for k, v in model_counts.most_common(10)
+                ]
+                stats["top_llm_endpoints"] = [
+                    {"item": k, "count": v} for k, v in endpoint_counts.most_common(10)
+                ]
+
             # --- TOP TABLES ---
 
             # Top Countries (Unique IPs and Sessions)
@@ -1780,21 +1714,28 @@ class PostgresBackend(DatabaseBackend):
             stats["top_countries"] = [
                 {"country": r[0] or "Unknown", "ips": r[1], "sessions": r[2]}
                 for r in cursor.fetchall()
+                if len(r) >= 3
             ]
 
             # Top ISPs (Unique IPs and Sessions)
             query = f"""
-                SELECT intel.org, COUNT(DISTINCT s.remote_ip) as unique_ips, COUNT(DISTINCT s.session_id) as sessions
+                SELECT intel.org, intel.asn, COUNT(DISTINCT s.remote_ip) as unique_ips, COUNT(DISTINCT s.session_id) as sessions
                 FROM sessions s 
                 JOIN ip_intelligence intel ON s.remote_ip = intel.ip 
                 WHERE s.start_time > {time_filter} {interaction_ip_filter}
-                GROUP BY intel.org 
+                GROUP BY intel.org, intel.asn
                 ORDER BY unique_ips DESC LIMIT 50
             """
             cursor.execute(query, params)
             stats["top_isps"] = [
-                {"isp": r[0] or "Unknown", "ips": r[1], "sessions": r[2]}
+                {
+                    "isp": r[0] or "Unknown",
+                    "asn": r[1] or "-",
+                    "ips": r[2],
+                    "sessions": r[3],
+                }
                 for r in cursor.fetchall()
+                if len(r) >= 4
             ]
 
             # Top SSH Users
@@ -1868,9 +1809,10 @@ class PostgresBackend(DatabaseBackend):
             stats["top_redis_commands"] = get_top_commands("redis")
             stats["top_mcp_commands"] = get_top_commands("mcp")
 
+            # --- TOP SSH RISK ---
             query = f"""
                 SELECT i.command, COALESCE(MAX(ca.risk_score), 0) as max_risk, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips,
-                       SUBSTRING(MAX(i.response) FROM 1 FOR 1000) as sample_response
+                       SUBSTRING(MAX(i.response) FROM 1 FOR 1000) as sample_response, MAX(i.session_id) as sample_session
                 FROM interactions i
                 JOIN sessions s ON i.session_id = s.session_id
                 JOIN command_analysis ca ON i.request_md5 = ca.command_hash
@@ -1880,9 +1822,8 @@ class PostgresBackend(DatabaseBackend):
                 LIMIT 50
             """
             cursor.execute(query, params)
-            stats["top_ssh_risk"] = []
             for r in cursor.fetchall():
-                if len(r) >= 5:
+                if len(r) >= 6:
                     stats["top_ssh_risk"].append(
                         {
                             "command": r[0],
@@ -1890,8 +1831,26 @@ class PostgresBackend(DatabaseBackend):
                             "count": r[2],
                             "ips": r[3],
                             "response": r[4],
+                            "session_id": r[5],
                         }
                     )
+
+            # --- KILL CHAIN STAGES ---
+            query = f"""
+                SELECT ca.stage, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips
+                FROM interactions i
+                JOIN sessions s ON i.session_id = s.session_id
+                JOIN command_analysis ca ON i.request_md5 = ca.command_hash
+                WHERE i.timestamp > {time_filter} {interaction_ip_filter}
+                GROUP BY ca.stage
+                ORDER BY count DESC
+            """
+            cursor.execute(query, params)
+            stats["kill_chain"] = [
+                {"stage": r[0], "count": r[1], "ips": r[2]}
+                for r in cursor.fetchall()
+                if len(r) >= 3
+            ]
 
             # Recent Unique Commands
             query = f"""
@@ -1928,7 +1887,7 @@ class PostgresBackend(DatabaseBackend):
                     "bot": int(row[1] or 0),
                 }
 
-            # Top IPs Summary (for reference)
+            # Top IPs Summary
             query = f"""
                 SELECT remote_ip, COUNT(*) as count 
                 FROM sessions 
@@ -1957,16 +1916,18 @@ class PostgresBackend(DatabaseBackend):
                 day_start = f"NOW() - INTERVAL '{i+1} days'"
                 day_end = f"NOW() - INTERVAL '{i} days'"
                 cursor.execute(
-                    f"SELECT COUNT(*) FROM sessions WHERE start_time > {day_start} AND start_time <= {day_end}"
+                    f"SELECT protocol, COUNT(*) FROM sessions WHERE start_time > {day_start} AND start_time <= {day_end} GROUP BY protocol"
                 )
-                row_c = cursor.fetchone()
-                count = row_c[0] if row_c else 0
+                protocol_counts = {r[0]: r[1] for r in cursor.fetchall()}
+                count = sum(protocol_counts.values())
 
                 # Get label like 'Jan 21'
                 cursor.execute(f"SELECT TO_CHAR(NOW() - INTERVAL '{i} days', 'Mon DD')")
                 row_label = cursor.fetchone()
                 label = row_label[0] if row_label else f"Day-{i}"
-                res.append({"label": label, "count": count})
+                res.append(
+                    {"label": label, "count": count, "protocols": protocol_counts}
+                )
         except Exception as e:
             log.error(f"[Postgres] Error fetching daily session counts: {e}")
         finally:
@@ -1983,10 +1944,10 @@ class PostgresBackend(DatabaseBackend):
                 hour_start = f"NOW() - INTERVAL '{i+1} hours'"
                 hour_end = f"NOW() - INTERVAL '{i} hours'"
                 cursor.execute(
-                    f"SELECT COUNT(*) FROM sessions WHERE start_time > {hour_start} AND start_time <= {hour_end}"
+                    f"SELECT protocol, COUNT(*) FROM sessions WHERE start_time > {hour_start} AND start_time <= {hour_end} GROUP BY protocol"
                 )
-                row_c = cursor.fetchone()
-                count = row_c[0] if row_c else 0
+                protocol_counts = {r[0]: r[1] for r in cursor.fetchall()}
+                count = sum(protocol_counts.values())
 
                 # Get label like '14:00'
                 cursor.execute(
@@ -1994,7 +1955,9 @@ class PostgresBackend(DatabaseBackend):
                 )
                 row_label = cursor.fetchone()
                 label = row_label[0] if row_label else f"H-{i}"
-                res.append({"label": label, "count": count})
+                res.append(
+                    {"label": label, "count": count, "protocols": protocol_counts}
+                )
         except Exception as e:
             log.error(f"[Postgres] Error fetching hourly session counts: {e}")
         finally:
@@ -2093,17 +2056,41 @@ class PostgresBackend(DatabaseBackend):
             conn.close()
 
     def add_malicious_payload(
-        self, url, url_hash, session_id, ip, timestamp=None, status="pending"
+        self,
+        url,
+        url_hash,
+        session_id,
+        ip,
+        timestamp=None,
+        status="pending",
+        payload_md5=None,
+        payload_size=None,
+        file_path=None,
+        snippet=None,
+        **kwargs,  # Catch-all for future safety
     ):
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
             # 1. Insert/Get Payload ID
+            # Upsert logic - if it exists, simple ignore. But if we have new metadata (md5/size),
+            # we might want to update it. For now, matching the original logic (DO NOTHING).
+            # But the caller might expect metadata to be saved.
+            # Let's insert what we can.
+
             cursor.execute(
                 """
-                INSERT INTO malicious_payloads (url, url_hash, session_id, ip, timestamp, status)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (url_hash) DO NOTHING
+                INSERT INTO malicious_payloads (
+                    url, url_hash, session_id, ip, timestamp, status, 
+                    payload_md5, payload_size, file_path, snippet
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (url_hash) DO UPDATE SET
+                    payload_md5 = EXCLUDED.payload_md5,
+                    payload_size = EXCLUDED.payload_size,
+                    file_path = EXCLUDED.file_path,
+                    snippet = EXCLUDED.snippet,
+                    status = EXCLUDED.status
                 RETURNING id
             """,
                 (
@@ -2113,6 +2100,10 @@ class PostgresBackend(DatabaseBackend):
                     ip,
                     timestamp or datetime.datetime.now(),
                     status,
+                    payload_md5,
+                    payload_size,
+                    file_path,
+                    snippet,
                 ),
             )
             row = cursor.fetchone()
@@ -2278,36 +2269,41 @@ class PostgresBackend(DatabaseBackend):
         payload_id,
         status,
         file_path=None,
-        error=None,
+        error_message=None,
         payload_md5=None,
         payload_size=None,
+        snippet=None,
+        **kwargs,
     ):
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
-            updates = ["status = %s"]
+            sql = "UPDATE malicious_payloads SET status = %s"
             params = [status]
 
             if file_path:
-                updates.append("file_path = %s")
-                params.append(file_path)
-            if error:
-                updates.append("error_message = %s")
-                params.append(error)
+                sql += ", file_path = %s"
+                params.append(sanitize_path(file_path))
+            if error_message:
+                sql += ", error_message = %s"
+                params.append(error_message)
             if payload_md5:
-                updates.append("payload_md5 = %s")
+                sql += ", payload_md5 = %s"
                 params.append(payload_md5)
             if payload_size is not None:
-                updates.append("payload_size = %s")
+                sql += ", payload_size = %s"
                 params.append(payload_size)
+            if snippet:
+                sql += ", snippet = %s"
+                params.append(snippet)
 
             # Increment retry count if failed
             if status == "failed":
-                updates.append("retry_count = retry_count + 1")
+                sql += ", retry_count = retry_count + 1"
 
+            sql += " WHERE id = %s"
             params.append(payload_id)
 
-            sql = f"UPDATE malicious_payloads SET {', '.join(updates)} WHERE id = %s"
             cursor.execute(sql, tuple(params))
             conn.commit()
         except Exception as e:
@@ -2452,67 +2448,183 @@ class PostgresBackend(DatabaseBackend):
             conn.close()
 
     def purge_poisoned_cache(self):
-        """Purges cached responses containing AI Core error messages."""
+        """Purges cached responses containing Internal Logic error messages."""
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
-            # Clear from command_cache
-            cursor.execute(
-                "DELETE FROM command_cache WHERE response LIKE %s",
-                ("%AI Core Offline%",),
+            query_cc = (
+                "DELETE FROM command_cache WHERE response LIKE %s OR response LIKE %s"
             )
-            # Clear from interactions
-            cursor.execute(
-                "DELETE FROM interactions WHERE response LIKE %s",
-                ("%AI Core Offline%",),
+            cursor.execute(query_cc, ("%Internal Logic Offline%", "%INTERNAL_ERROR%"))
+
+            query_int = (
+                "DELETE FROM interactions WHERE response LIKE %s OR response LIKE %s"
             )
+            cursor.execute(query_int, ("%Internal Logic Offline%", "%INTERNAL_ERROR%"))
             conn.commit()
             log.info("[Postgres] Purged poisoned cache entries.")
         except Exception as e:
             log.error(f"[Postgres] Error purging cache: {e}")
+            conn.rollback()
         finally:
             conn.close()
 
-    def get_llm_response(self, prompt_hash):
-        """Retrieves a cached LLM response by prompt hash if it exists and is fresh (30 days)."""
+    def get_cache_keys(self, service):
+        """Returns all cache keys and their input texts for a given service."""
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as c:
+                    c.execute(
+                        "SELECT cache_key, input_text FROM universal_cache WHERE service = %s",
+                        (service,),
+                    )
+                    return [
+                        {"cache_key": row[0], "input_text": row[1]}
+                        for row in c.fetchall()
+                    ]
+        except Exception as e:
+            log.error(f"[Postgres] Failed to get cache keys: {e}")
+            return []
+
+    def get_cache_item(self, cache_key):
+        """Retrieves a cached item from universal_cache (Postgres)."""
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
-            # PostGres syntax: NOW() - INTERVAL '30 days'
             cursor.execute(
                 """
-                SELECT response FROM llm_response_cache 
-                WHERE prompt_hash = %s AND created_at > NOW() - INTERVAL '30 days'
+                SELECT service, version, input_text, input_hash, output_text, output_hash, 
+                       output_size, is_binary, risk_score, attack_stage, explanation, metadata,
+                       hit_count, created_at, updated_at, expires_at
+                FROM universal_cache 
+                WHERE cache_key = %s AND (expires_at IS NULL OR expires_at > NOW())
                 """,
-                (prompt_hash,),
+                (cache_key,),
             )
             row = cursor.fetchone()
-            return row[0] if row else None
+            if not row:
+                return None
+
+            # Update hit count
+            cursor.execute(
+                "UPDATE universal_cache SET hit_count = hit_count + 1, last_hit_at = NOW() WHERE cache_key = %s",
+                (cache_key,),
+            )
+            conn.commit()
+
+            return {
+                "service": row[0],
+                "version": row[1],
+                "input_text": row[2],
+                "input_hash": row[3],
+                "output_text": row[4],
+                "output_hash": row[5],
+                "output_size": row[6],
+                "is_binary": bool(row[7]),
+                "risk_score": row[8],
+                "attack_stage": row[9],
+                "explanation": row[10],
+                "metadata": row[11],
+                "hit_count": row[12],
+                "created_at": row[13],
+                "updated_at": row[14],
+                "expires_at": row[15],
+            }
         except Exception as e:
-            log.error(f"[Postgres] Error getting LLM cache: {e}")
+            log.error(f"[Postgres] Error getting universal cache: {e}")
             return None
         finally:
             conn.close()
 
-    def save_llm_response(self, prompt_hash, prompt_text, response):
-        """Caches an LLM response."""
-        conn = self._get_conn()
+    def set_cache_item(
+        self,
+        cache_key,
+        service,
+        output_text,
+        version=1,
+        input_text=None,
+        input_hash=None,
+        output_hash=None,
+        output_size=None,
+        is_binary=False,
+        risk_score=None,
+        attack_stage=None,
+        explanation=None,
+        metadata=None,
+        ttl_days=30,
+    ):
+        """Saves an item to universal_cache (Postgres)."""
+
+    def set_cache_item(self, **kwargs):
+        """Saves a detailed cache item to universal_cache."""
         try:
-            cursor = conn.cursor()
-            # Upsert in Postgres (ON CONFLICT)
-            cursor.execute(
-                """
-                INSERT INTO llm_response_cache (prompt_hash, prompt_text, response)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (prompt_hash) DO UPDATE SET
-                    response = EXCLUDED.response,
-                    updated_at = CURRENT_TIMESTAMP,
-                    created_at = CURRENT_TIMESTAMP -- Reset expiry
-                """,
-                (prompt_hash, prompt_text, response),
-            )
-            conn.commit()
+            with self._get_conn() as conn:
+                with conn.cursor() as c:
+                    c.execute(
+                        """
+                        INSERT INTO universal_cache (
+                            cache_key, service, version, input_text, input_hash, output_text, output_hash,
+                            output_size, is_binary, risk_score, attack_stage, explanation, metadata,
+                            hit_count, created_at, updated_at, expires_at
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), 
+                            NOW() + interval '%s days'
+                        )
+                        ON CONFLICT (cache_key) DO UPDATE SET
+                            output_text = EXCLUDED.output_text,
+                            output_hash = EXCLUDED.output_hash,
+                            output_size = EXCLUDED.output_size,
+                            updated_at = NOW(),
+                            expires_at = EXCLUDED.expires_at,
+                            metadata = EXCLUDED.metadata;
+                        """,
+                        (
+                            kwargs.get("cache_key"),
+                            kwargs.get("service"),
+                            kwargs.get("version", 1),
+                            kwargs.get("input_text"),
+                            kwargs.get("input_hash"),
+                            kwargs.get("output_text"),
+                            kwargs.get("output_hash"),
+                            kwargs.get("output_size"),
+                            kwargs.get("is_binary", False),
+                            kwargs.get("risk_score"),
+                            kwargs.get("attack_stage"),
+                            kwargs.get("explanation"),
+                            kwargs.get("metadata"),
+                            0,  # hit_count
+                            kwargs.get("ttl_days", 30),
+                        ),
+                    )
+            return True
         except Exception as e:
-            log.error(f"[Postgres] Error saving LLM cache: {e}")
-        finally:
-            conn.close()
+            log.error(f"[Postgres] Failed to save cache item: {e}")
+            return False
+
+    def delete_cache_item(self, cache_key):
+        """Removes an item from universal_cache."""
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as c:
+                    c.execute(
+                        "DELETE FROM universal_cache WHERE cache_key = %s", (cache_key,)
+                    )
+            return True
+        except Exception as e:
+            log.error(f"[Postgres] Failed to delete cache item: {e}")
+            return False
+
+    def get_llm_response(self, prompt_hash):
+        """Legacy wrapper - redirected to get_cache_item."""
+        item = self.get_cache_item(prompt_hash)
+        return item["output_text"] if item else None
+
+    def save_llm_response(self, prompt_hash, prompt_text, response):
+        """Legacy wrapper - redirected to set_cache_item."""
+        self.set_cache_item(
+            cache_key=prompt_hash,
+            service="llm",
+            input_text=prompt_text,
+            output_text=response,
+            ttl_days=30,
+        )

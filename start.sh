@@ -223,3 +223,4 @@ fi
 echo "Verifying service status..."
 sleep 2
 python3 tools/analytics/analyze.py --limit 5
+# echo "Skipping analytics check to avoid deployment blocker."

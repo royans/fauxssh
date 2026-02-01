@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from ssh_honeypot.core.database import HoneyDB
 from ssh_honeypot.core.config import config, get_data_dir
 from ssh_honeypot.core.utils import sanitize_path
+from ssh_honeypot.core.universal_cache import universal_cache
 
 try:
     from ssh_honeypot.core.analyzers.virustotal import VirusTotalAnalyzer
@@ -93,8 +94,13 @@ class PayloadManager:
         Enforces 1 request per host per day logic.
         """
         try:
-            # 1. Deduplicate by exact URL (processed already?)
+            # 1. Deduplicate by exact URL
             url_hash = hashlib.md5(url.encode()).hexdigest()
+
+            cached = universal_cache.get("payload_download", url_hash)
+            if cached:
+                logger.info(f"[PayloadManager] URL already in cache: {url}")
+                return True
 
             # 2. Host Rate Limiting (1 per day)
             parsed = urlparse(url)
@@ -157,6 +163,11 @@ class PayloadManager:
                     f"[PayloadManager] Saved uploaded payload to {sanitize_path(file_path)}"
                 )
 
+            # Generate smart snippet
+            from ssh_honeypot.core.utils import extract_snippet
+
+            snippet = extract_snippet(content_bytes)
+
             # Add to DB as 'completed' (ready for analysis)
             added = self.db.add_malicious_payload(
                 url=url,
@@ -165,10 +176,23 @@ class PayloadManager:
                 ip=ip,
                 timestamp=timestamp or datetime.now(),
                 status="completed",
+                file_path=file_path,
+                payload_md5=md5,
+                payload_size=size,
+                snippet=snippet,
             )
 
             if added:
-                # We need the ID to update status with file path/md5
+                # We need the ID to update status with file path/md5/snippet (logic simplified above to add directly)
+                # But to maintain compatibility if add_malicious_payload doesn't accept all args yet:
+                # Check db schema first or just use update if needed.
+                # Re-reading add_malicious_payload signature is safer.
+                # Assuming add_malicious_payload takes **kwargs or we update it separately.
+                # Let's check DB signature first or assume update pattern.
+                pass
+
+                # ACTUALLY: The original code utilized update_payload_status AFTER adding.
+                # Let's keep that pattern but include snippet.
                 payload = self.db.get_payload_by_hash(url_hash)
                 if payload:
                     self.db.update_payload_status(
@@ -177,6 +201,7 @@ class PayloadManager:
                         payload_md5=md5,
                         payload_size=size,
                         file_path=file_path,
+                        snippet=snippet,
                     )
                 logger.info(
                     f"[PayloadManager] Queued uploaded file for analysis: {filename}"
@@ -203,7 +228,7 @@ class PayloadManager:
 
             try:
                 # Download
-                content = self._download_file(url)
+                content = self.download_file(url)
                 if not content:
                     self.db.update_payload_status(
                         payload_id, "failed", error="Empty or failed download"
@@ -231,12 +256,20 @@ class PayloadManager:
                         f"[PayloadManager] Saved new payload to {sanitize_path(file_path)}"
                     )
 
+                # Capture snippet (first 500 chars)
+                snippet = None
+                try:
+                    snippet = content[:500].decode("utf-8", "ignore")
+                except:
+                    snippet = str(content[:500])
+
                 self.db.update_payload_status(
                     payload_id,
                     "completed",
                     payload_md5=md5,
                     payload_size=size,
                     file_path=file_path,
+                    snippet=snippet,
                 )
 
             except Exception as e:
@@ -378,10 +411,24 @@ class PayloadManager:
 
             self.db.update_payload_vt_status(payload_id, result_json, scan_id)
 
+            # Save to Universal Cache
+            if result_json:
+                universal_cache.set(
+                    service="payload_analysis",
+                    key=file_hash,
+                    output_text=result_json,
+                    ttl_days=30,
+                )
+
         except Exception as e:
             logger.error(f"[PayloadManager] Analysis Error: {e}")
-            self.db.update_payload_vt_status(
-                payload_id, result=json.dumps({"error": str(e)})
+            error_json = json.dumps({"error": str(e)})
+            self.db.update_payload_vt_status(payload_id, result=error_json)
+            universal_cache.set(
+                service="payload_analysis",
+                key=file_hash,
+                output_text=error_json,
+                ttl_days=30,
             )
 
     def _is_safe_url(self, url):
@@ -437,7 +484,7 @@ class PayloadManager:
         except Exception as e:
             return False, f"Validation error: {e}"
 
-    def _download_file(self, url, timeout=10, max_size=10 * 1024 * 1024):
+    def download_file(self, url, timeout=10, max_size=10 * 1024 * 1024):
         """Helper to download with safety limits."""
         # Pre-flight SSRF Check
         is_safe, reason = self._is_safe_url(url)
@@ -446,21 +493,81 @@ class PayloadManager:
             raise ValueError(f"SSRF Protection Blocked: {reason}")
 
         try:
-            headers = {"User-Agent": "curl/7.68.0"}  # Pretend to be legitimate tool
-            with requests.get(
+            # We use a realistic User-Agent to avoid blocks
+            headers = {"User-Agent": "curl/7.81.0"}
+            r = requests.get(
                 url, headers=headers, stream=True, timeout=timeout, verify=False
-            ) as r:
-                r.raise_for_status()
+            )
+            r.raise_for_status()
 
-                content = b""
-                for chunk in r.iter_content(chunk_size=8192):
-                    content += chunk
-                    if len(content) > max_size:
-                        raise ValueError(f"File exceeds max size ({max_size} bytes)")
-                return content
+            content = b""
+            for chunk in r.iter_content(chunk_size=8192):
+                content += chunk
+                if len(content) > max_size:
+                    raise ValueError(f"File exceeds max size ({max_size} bytes)")
+            return content
         except Exception as e:
             logger.warning(f"Download failed for {url}: {e}")
             raise e
+
+    def download_and_analyze_sync(self, url, session_id, remote_ip):
+        """
+        Synchronously download and queue for analysis.
+        Returns the content if successful.
+        """
+        try:
+            content = self.download_file(url)
+            if content:
+                # Store it in the payload directory and DB immediately
+                md5 = hashlib.md5(content).hexdigest()
+                url_hash = hashlib.md5(url.encode()).hexdigest()
+
+                # Double check cache
+                cached = universal_cache.get("payload_download", url_hash)
+                if cached:
+                    return cached.get("output_bytes") or cached.get("output_text")
+
+                filename = f"dangerous_{md5}.txt"
+                file_path = os.path.join(PAYLOAD_DIR, filename)
+
+                if not os.path.exists(file_path):
+                    with open(file_path, "wb") as f:
+                        f.write(content)
+
+                # Capture snippet (first 500 chars)
+                snippet = None
+                try:
+                    snippet = content[:500].decode("utf-8", "ignore")
+                except:
+                    snippet = str(content[:500])
+
+                # Add to DB
+                self.db.add_malicious_payload(
+                    url=url,
+                    url_hash=url_hash,
+                    session_id=session_id,
+                    ip=remote_ip,
+                    status="completed",
+                    payload_md5=md5,
+                    payload_size=len(content),
+                    file_path=file_path,
+                    snippet=snippet,
+                )
+
+                # Save to Universal Cache
+                universal_cache.set(
+                    service="payload_download",
+                    key=url_hash,
+                    input_text=url,
+                    output_text=content,
+                    is_binary=True,
+                    ttl_days=30,
+                )
+
+                return content
+        except Exception as e:
+            logger.error(f"[PayloadManager] Sync download failed for {url}: {e}")
+        return None
 
     def backfill_from_interactions(self):
         """

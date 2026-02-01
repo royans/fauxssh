@@ -10,11 +10,9 @@ try:
 
     # 1. Search specific paths relevant to deployment structure
     candidate_paths = [
-        # Explicit locations
-        os.path.join(PROJECT_ROOT, ".env"),  # ./sshpot/.env (Clone root)
-        os.path.join(
-            os.path.dirname(PROJECT_ROOT), ".env"
-        ),  # ../.env (User deploy root, e.g. ~/c/.env)
+        # Explicit locations (Local then Parent)
+        os.path.join(PROJECT_ROOT, ".env"),  # ./sshpot/.env (Local)
+        os.path.join(os.path.dirname(PROJECT_ROOT), ".env"),  # ../.env (Parent)
     ]
 
     # 2. Try implicit search
@@ -173,11 +171,70 @@ def create_dual_stack_socket(bind_ip, port, backlog=64):
             sock.setsockopt(IPPROTO_IPV6, IPV6_V6ONLY, 0)
         except Exception as e:
             from ssh_honeypot.core.logging_setup import log
+            import sys
 
             log.warning(f"[Socket] Could not set IPV6_V6ONLY=0: {e}")
 
-            print(f"DEBUG: Binding to {bind_ip}:{port}")
-            sys.stderr.write(f"DEBUG: Binding to {bind_ip}:{port}\n")
     sock.bind((bind_ip, port))
     sock.listen(backlog)
     return sock
+
+
+def find_available_port(start=20000, end=30000):
+    """
+    Finds a random available port in the given range.
+    """
+    import socket
+    import random
+
+    while True:
+        port = random.randint(start, end)
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(("127.0.0.1", port))
+            sock.close()
+            return port
+        except OSError:
+            continue
+
+
+def extract_snippet(content, max_len=500):
+    """
+    Extracts a text snippet from content (bytes or str).
+    If binary, extracts printable strings of length >= 4.
+    """
+    if not content:
+        return ""
+
+    # Ensure bytes
+    if isinstance(content, str):
+        content_bytes = content.encode("utf-8", errors="ignore")
+    else:
+        content_bytes = content
+
+    # 1. Try UTF-8 first (fast path for text files)
+    try:
+        text = content_bytes.decode("utf-8")
+        # Check for null bytes to detect binary masqerading as text
+        if "\x00" in text:
+            raise UnicodeDecodeError("null bytes", b"", 0, 1, "null bytes")
+        return text[:max_len]
+    except UnicodeDecodeError:
+        pass
+
+    # 2. Binary: Extract Strings
+    # Logic: Printable chars (32-126) + tab/newline, min length 4
+    import re
+
+    # Bytes regex for printable strings
+    pattern = re.compile(b"[ -~\\t\\r\\n]{4,}")
+
+    found = pattern.findall(content_bytes)
+    if not found:
+        return "<Binary Data - No Strings Found>"
+
+    # Join found strings
+    text = b"\n".join(found).decode("utf-8", errors="ignore")
+    if len(text) > max_len:
+        return text[:max_len] + "..."
+    return text

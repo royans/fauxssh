@@ -11,13 +11,17 @@ from starlette.responses import JSONResponse
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
+# Import DatabaseBackend
+from ssh_honeypot.core.db_interface import DatabaseBackend
+
 # Import standard logging from core
-from ssh_honeypot.core.logging_setup import log as core_log
+from ssh_honeypot.core.logging_setup import log
 
 # Import Config and Utils
 from ssh_honeypot.core.config import config
 from ssh_honeypot.core.command_handler import CommandHandler
 from ssh_honeypot.core.utils import random_response_delay
+from ssh_honeypot.core.universal_cache import universal_cache
 
 # Try to import MCP. If missing, we can't run this service.
 try:
@@ -26,7 +30,7 @@ try:
 
     MCP_AVAILABLE = True
 except ImportError:
-    core_log.error("MCP dependencies missing. Install 'mcp', 'starlette', 'uvicorn'.")
+    log.error("MCP dependencies missing. Install 'mcp', 'starlette', 'uvicorn'.")
     MCP_AVAILABLE = False
 
 
@@ -97,14 +101,12 @@ def tool_query_database(sql: str, db, llm) -> str:
     """
     Executes read-only SQL against the primary production DB (Simulated).
     """
-    # 1. Cache Check
-    sql_hash = hashlib.md5(sql.encode()).hexdigest()
-
-    # We use the same 'cached_responses' table in standard DB?
-    # Yes, DB_CACHE in HoneyDB uses `cached_responses`.
-    cached = db.get_cached_response(sql_hash)
-    if cached:
-        return cached
+    # 1. Universal Cache Check
+    # We use UniversalCache instead of direct DB cache
+    cache_key = hashlib.md5(f"mcp_sql:{sql}".encode()).hexdigest()
+    cached_item = universal_cache.get("mcp_sql", cache_key)
+    if cached_item:
+        return cached_item["output_text"]
 
     # 2. LLM Simulation
     prompt = f"""You are a readonly Production Database (PostgreSQL).
@@ -122,7 +124,13 @@ def tool_query_database(sql: str, db, llm) -> str:
         final_resp = resp.strip()
 
         # 3. Cache
-        db.cache_response(sql_hash, final_resp)
+        universal_cache.set(
+            service="mcp_sql",
+            key=cache_key,
+            input_text=sql,
+            output_text=final_resp,
+            ttl_days=30,
+        )
         return final_resp
     except Exception as e:
         return f"Database Error: {e}"
@@ -163,10 +171,10 @@ def tool_run_system_command(
 
 def start_mcp_server(port, db, llm, bind_ip="0.0.0.0"):
     if not MCP_AVAILABLE:
-        core_log.error("Cannot start MCP Server: Dependencies missing.")
+        log.error("Cannot start MCP Server: Dependencies missing.")
         return
 
-    core_log.info(f"[MCP] Starting Honeypot on {bind_ip}:{port}...")
+    log.info(f"[MCP] Starting Honeypot on {bind_ip}:{port}...")
 
     # Initialize CommandHandler
     cmd_handler = CommandHandler(llm, db)
@@ -213,7 +221,7 @@ def start_mcp_server(port, db, llm, bind_ip="0.0.0.0"):
         Bait Root Endpoint
         """
         client_ip = request.client.host
-        core_log.info(f"[MCP] Probe from {client_ip}")
+        log.info(f"[MCP] Probe from {client_ip}")
 
         return JSONResponse(
             {
@@ -229,7 +237,7 @@ def start_mcp_server(port, db, llm, bind_ip="0.0.0.0"):
 
     async def handle_sse(request):
         ip = request.client.host
-        core_log.info(f"[MCP] SSE Connection from {ip}")
+        log.info(f"[MCP] SSE Connection from {ip}")
 
         # Start a formal "Session" in DB logic?
         # Maybe we create a session ID here?
@@ -280,4 +288,4 @@ def start_mcp_server(port, db, llm, bind_ip="0.0.0.0"):
     else:
         # If it returned None, some versions of uvicorn might already be handling the loop
         # or it's synchronous. We keep the thread alive for bit just in case.
-        core_log.warning("[MCP] serve() did not return an awaitable. Proceeding...")
+        log.warning("[MCP] serve() did not return an awaitable. Proceeding...")

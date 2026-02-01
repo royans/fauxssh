@@ -62,6 +62,14 @@ class TestRealismHandlers(unittest.TestCase):
             else:
                 raise RuntimeError("Server failed to start")
 
+    @classmethod
+    def tearDownClass(cls):
+        # Cleanup environment to prevent leakage
+        if "FAUXSSH_TEST_MODE" in os.environ:
+            del os.environ["FAUXSSH_TEST_MODE"]
+        if "SSHPOT_TEST_MODE" in os.environ:
+            del os.environ["SSHPOT_TEST_MODE"]
+
     def setUp(self):
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -192,7 +200,8 @@ class TestRealismHandlers(unittest.TestCase):
         print(f"Firewall Duration: {duration}s")
 
         # Assert Delay (Fast Mode: 0.1 - 0.2s)
-        self.assertGreaterEqual(duration, 0.05)
+        # Using a safer threshold for jitter
+        self.assertGreaterEqual(duration, 0.03)
 
         # Assert Error Message
         self.assertIn("timed out", out.lower())

@@ -20,35 +20,41 @@ class TestPermissions(unittest.TestCase):
 
     def test_touch_permissions(self):
         # 1. Blocked: /etc/test
-        out, updates = self.handler.handle_touch("touch /etc/test", self.context)
+        out, updates, meta = self.handler.handle_touch("touch /etc/test", self.context)
         self.assertIn("Permission denied", out)
         self.assertDictEqual(updates, {})
 
         # 2. Allowed: /tmp/test
         # Mock get_user_node to return None (file doesn't exist)
         self.mock_db.get_user_node.return_value = None
-        out, updates = self.handler.handle_touch("touch /tmp/test", self.context)
+        out, updates, meta = self.handler.handle_touch("touch /tmp/test", self.context)
         self.assertEqual(out, "")
         self.assertTrue(len(updates.get("file_modifications", [])) > 0)
 
         # 3. Allowed: /home/test/foo
-        out, updates = self.handler.handle_touch(
+        out, updates, meta = self.handler.handle_touch(
             "touch foo", self.context
         )  # in cwd /home/test
         self.assertEqual(out, "")
         self.assertTrue(len(updates.get("file_modifications", [])) > 0)
 
     def test_mkdir_permissions(self):
-        out, updates = self.handler.handle_mkdir("mkdir /boot/newdir", self.context)
+        out, updates, meta = self.handler.handle_mkdir(
+            "mkdir /boot/newdir", self.context
+        )
         self.assertIn("Permission denied", out)
 
         # /root/ should now be allowed (root's home)
         self.mock_db.get_user_node.return_value = None
-        out, updates = self.handler.handle_mkdir("mkdir /root/newdir", self.context)
+        out, updates, meta = self.handler.handle_mkdir(
+            "mkdir /root/newdir", self.context
+        )
         self.assertEqual(out, "")
 
         self.mock_db.get_user_node.return_value = None
-        out, updates = self.handler.handle_mkdir("mkdir /tmp/newdir", self.context)
+        out, updates, meta = self.handler.handle_mkdir(
+            "mkdir /tmp/newdir", self.context
+        )
         self.assertEqual(out, "")
 
     def test_cp_permissions(self):
@@ -58,15 +64,17 @@ class TestPermissions(unittest.TestCase):
             return_value=("src_content", "local")
         )
 
-        out, updates = self.handler.handle_cp("cp src /etc/dest", self.context)
+        out, updates, meta = self.handler.handle_cp("cp src /etc/dest", self.context)
         self.assertIn("Permission denied", out)
 
     def test_mv_permissions(self):
         # mv source /etc/
         # Mock handle_cp to return failed permission
-        self.handler.handle_cp = MagicMock(return_value=("cp: Permission denied", {}))
+        self.handler.handle_cp = MagicMock(
+            return_value=("cp: Permission denied", {}, {"source": "handler"})
+        )
 
-        out, updates = self.handler.handle_mv("mv src /etc/dest", self.context)
+        out, updates, meta = self.handler.handle_mv("mv src /etc/dest", self.context)
         self.assertIn("Permission denied", out)
 
     def test_redirection_permissions(self):

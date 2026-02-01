@@ -19,7 +19,7 @@ class TestNetworkEmulation(unittest.TestCase):
     def test_ip_addr_output(self):
         """Verify ip addr format"""
         output = network_persona.get_ip_addr_output()
-        ip = config.get("persona", "network", "interfaces", "eth0")
+        ip = network_persona.ip_eth0
         self.assertIn("eth0", output)
         self.assertIn(f"{ip}/24", output)
         self.assertIn("UP,LOWER_UP", output)
@@ -27,17 +27,16 @@ class TestNetworkEmulation(unittest.TestCase):
 
     def test_ip_route_output(self):
         """Verify ip route format"""
-        """Verify ip route format"""
         output = network_persona.get_ip_route_output()
-        gw = config.get("persona", "network", "routes", "default")
-        ip = config.get("persona", "network", "interfaces", "eth0")
+        gw = network_persona.gateway
+        ip = network_persona.ip_eth0
         self.assertIn(f"default via {gw}", output)
         self.assertIn(ip, output)
 
     def test_ifconfig_output(self):
         """Verify ifconfig format"""
         output = network_persona.get_ifconfig_output()
-        ip = config.get("persona", "network", "interfaces", "eth0")
+        ip = network_persona.ip_eth0
         self.assertIn("eth0: flags", output)
         self.assertIn(f"inet {ip}", output)
         self.assertIn("netmask 255.255.255.0", output)

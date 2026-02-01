@@ -24,20 +24,13 @@ class TestVirusTotalAnalyzer(unittest.TestCase):
         if os.path.exists(usage_file):
             os.remove(usage_file)
 
-    @patch("ssh_honeypot.core.analyzers.virustotal.get_data_dir")
-    def test_startup_check_success(self, mock_get_data_dir):
-        mock_get_data_dir.return_value = os.getcwd()
-        # Ensure separate usage file for test
-        with patch.object(VirusTotalAnalyzer, "_load_usage") as mock_load:
-            # We want to use real load usage logic but redirected path,
-            # but modifying __init__ is hard.
-            # Instead, we just let it use the mocked get_data_dir which points to cwd.
-            pass
+    @patch("ssh_honeypot.core.database.get_db_backend")
+    def test_startup_check_success(self, mock_db_getter):
+        mock_db = MagicMock()
+        mock_db.check_api_rate_limit.return_value = (True, "")
+        mock_db_getter.return_value = mock_db
 
         analyzer = VirusTotalAnalyzer()
-        analyzer.usage_file = "test_vt_usage.json"
-        # Reset usage data
-        analyzer.usage_data = {"date": "2024-01-01", "count": 0}
 
         # Mock the result stats
         mock_file_obj = MagicMock()
@@ -46,19 +39,15 @@ class TestVirusTotalAnalyzer(unittest.TestCase):
 
         self.assertTrue(analyzer.verify_auth_at_startup())
         self.mock_client.get_object.assert_called_once()
-        # Should increment count
-        self.assertEqual(analyzer.usage_data["count"], 1)
+        mock_db.record_api_usage.assert_called_with("virustotal", "GLOBAL")
 
-    @patch("ssh_honeypot.core.analyzers.virustotal.get_data_dir")
-    def test_daily_limit(self, mock_get_data_dir):
-        mock_get_data_dir.return_value = os.getcwd()
+    @patch("ssh_honeypot.core.database.get_db_backend")
+    def test_daily_limit(self, mock_db_getter):
+        mock_db = MagicMock()
+        mock_db.check_api_rate_limit.return_value = (False, "Daily limit reached")
+        mock_db_getter.return_value = mock_db
+
         analyzer = VirusTotalAnalyzer()
-        analyzer.usage_file = "test_vt_usage.json"
-
-        # Simulate limit reached
-        import datetime
-
-        analyzer.usage_data = {"date": str(datetime.date.today()), "count": 450}
 
         # Verification should fail due to limit
         self.assertFalse(analyzer.verify_auth_at_startup())
@@ -66,11 +55,8 @@ class TestVirusTotalAnalyzer(unittest.TestCase):
         # Scan should fail
         self.assertIsNone(analyzer.scan_file("foo"))
 
-    @patch("ssh_honeypot.core.analyzers.virustotal.get_data_dir")
-    def test_rate_limit_wait(self, mock_get_data_dir):
-        mock_get_data_dir.return_value = os.getcwd()
+    def test_rate_limit_wait(self):
         analyzer = VirusTotalAnalyzer()
-        analyzer.usage_file = "test_vt_usage.json"
         analyzer.min_delay = 0.5  # Shorten for test
 
         start = time.time()

@@ -77,7 +77,38 @@ class SecurityFilter:
 
     def sanitize_output(self, llm_output):
         """
-        Sanitizes output from LLM to ensure no leakage of sensitive tokens.
-        (Future implementation)
+        Sanitizes output from LLM to ensure no leakage of AI-related terminology.
         """
-        return llm_output
+        if not llm_output:
+            return llm_output
+
+        # Common leaks to mask
+        leaks = [
+            "AI",
+            "LLM",
+            "GPT",
+            "Gemini",
+            "Assistant",
+            "Large Language Model",
+            "Artificial Intelligence",
+            "Model Offline",
+            "Malfunction",
+            "OpenAI",
+            "Google",
+            "Anthropic",
+            "ChatGPT",
+            "Claude",
+            "Brad",
+        ]
+
+        sanitized = llm_output
+        for leak in leaks:
+            # Use regex for word boundary and case-insensitivity
+            pattern = re.compile(rf"\b{re.escape(leak)}\b", re.IGNORECASE)
+            # Replace with mundane terms
+            if leak.lower() in ["malfunction", "offline"]:
+                sanitized = pattern.sub("internal error", sanitized)
+            else:
+                sanitized = pattern.sub("system", sanitized)
+
+        return sanitized

@@ -8,8 +8,9 @@ import time
 try:
     from .db_interface import DatabaseBackend
     from .logging_setup import log
-    from .config import get_data_dir
+    from .config import get_data_dir, config
     from .utils import sanitize_path
+    from .db_utils import sync_db_schema
 except ImportError:
     from db_interface import DatabaseBackend
     from ssh_honeypot.core.logging_setup import log
@@ -61,6 +62,10 @@ class SQLiteBackend(DatabaseBackend):
     def get_connection_info(self):
         return f"SQLite Backend (Path: {self.db_path})"
 
+    @property
+    def is_postgres(self):
+        return False
+
     def get_max_interaction_id(self):
         conn = self._get_conn()
         try:
@@ -75,383 +80,15 @@ class SQLiteBackend(DatabaseBackend):
             conn.close()
 
     def _init_db(self):
-        # Directory creation handled by get_data_dir()
-
-        conn = sqlite3.connect(self.db_path)
-        # Enable WAL mode for better concurrency
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous = NORMAL;")  # Faster writes in WAL mode
-        conn.execute(
-            "PRAGMA busy_timeout = 30000;"
-        )  # Ensure persistent timeout setting
-        c = conn.cursor()
-
-        # Sessions Table
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT UNIQUE,
-            remote_ip TEXT,
-            username TEXT,
-            password TEXT,
-            start_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-            end_time DATETIME,
-            client_version TEXT,
-            protocol TEXT DEFAULT 'ssh',
-            summary TEXT,
-            risk_score INTEGER
-        )"""
-        )
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(start_time)"
-        )
-        c.execute("CREATE INDEX IF NOT EXISTS idx_sessions_ip ON sessions(remote_ip)")
-
-        # Migration: Add columns to existing sessions table if needed
-        try:
-            c.execute("ALTER TABLE sessions ADD COLUMN summary TEXT")
-        except sqlite3.OperationalError:
-            pass  # Already exists
-
-        try:
-            c.execute("ALTER TABLE sessions ADD COLUMN risk_score INTEGER")
-        except sqlite3.OperationalError:
-            pass  # Already exists
-
-        try:
-            c.execute("ALTER TABLE sessions ADD COLUMN protocol TEXT DEFAULT 'ssh'")
-        except sqlite3.OperationalError:
-            pass  # Already exists
-
-        # Session Summaries Cache (LLM Optimization)
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS session_summaries_cache (
-            chain_hash TEXT PRIMARY KEY,
-            summary TEXT,
-            risk_score INTEGER,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )"""
-        )
-
-        # Interactions Log (Audit Trail)
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS interactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            cwd TEXT,
-            command TEXT,
-            response TEXT,
-            request_md5 TEXT,
-            FOREIGN KEY(session_id) REFERENCES sessions(session_id)
-        )"""
-        )
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_interactions_md5 ON interactions(request_md5)"
-        )
-
-        # Global Filesystem Table (Simulated File System)
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS global_filesystem (
-                path TEXT PRIMARY KEY,
-                parent_path TEXT,
-                type TEXT,
-                metadata TEXT,
-                content TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """
-        )
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_parent ON global_filesystem(parent_path)"
-        )
-
-        # User-Specific Filesystem (Isolated Uploads)
-        # Scoped by IP and Username
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS user_filesystem (
-                ip TEXT,
-                username TEXT,
-                path TEXT,
-                parent_path TEXT,
-                type TEXT,
-                metadata TEXT,
-                content TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_accessed DATETIME,
-                is_deleted BOOLEAN DEFAULT 0,
-                PRIMARY KEY (ip, username, path)
-            )
-        """
-        )
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_user_parent ON user_filesystem(ip, username, parent_path)"
-        )
-
-        # Cache Table (Simulated State)
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS command_cache (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cmd_hash TEXT UNIQUE,
-            command TEXT,
-            cwd TEXT,
-            response TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )"""
-        )
-
-        # Auth Events Log (Login Attempts)
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS auth_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            client_ip TEXT,
-            username TEXT,
-            auth_method TEXT,
-            auth_data TEXT,
-            success BOOLEAN,
-            client_version TEXT,
-            fingerprint TEXT,
-            protocol TEXT DEFAULT 'ssh'
-        )"""
-        )
-
-        # Threat Analysis Table
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS command_analysis (
-            command_hash TEXT PRIMARY KEY,
-            command_text TEXT,
-            activity_type TEXT,
-            stage TEXT,
-            risk_score INTEGER,
-            explanation TEXT,
-            analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )"""
-        )
-
-        # Custom Migrations
-        try:
-            c.execute("ALTER TABLE sessions ADD COLUMN fingerprint TEXT")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            c.execute("ALTER TABLE auth_events ADD COLUMN fingerprint TEXT")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            c.execute("ALTER TABLE interactions ADD COLUMN source TEXT")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            c.execute("ALTER TABLE interactions ADD COLUMN request_md5 TEXT")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            c.execute("ALTER TABLE user_filesystem ADD COLUMN last_accessed DATETIME")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            c.execute(
-                "ALTER TABLE user_filesystem ADD COLUMN is_deleted BOOLEAN DEFAULT 0"
-            )
-        except sqlite3.OperationalError:
-            pass
-
-        # LLM Usage Tracking (Rate Limiting)
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS llm_usage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ip TEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            source TEXT DEFAULT 'http'
-        )"""
-        )
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_llm_usage_ip_time ON llm_usage(ip, timestamp)"
-        )
-
-        # LLM Response Cache (Jan 19)
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS llm_response_cache (
-            prompt_hash TEXT PRIMARY KEY,
-            prompt_text TEXT,
-            response TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )"""
-        )
-
-        # Analytics: Response Tracking (Jan 3)
-        try:
-            c.execute("ALTER TABLE interactions ADD COLUMN response_md5 TEXT")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            c.execute("ALTER TABLE interactions ADD COLUMN response_head TEXT")
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            c.execute("ALTER TABLE interactions ADD COLUMN response_size INTEGER")
-        except sqlite3.OperationalError:
-            pass
-
-        # Protocol Support (Jan 7)
-        try:
-            c.execute("ALTER TABLE sessions ADD COLUMN protocol TEXT DEFAULT 'ssh'")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            c.execute("ALTER TABLE auth_events ADD COLUMN protocol TEXT DEFAULT 'ssh'")
-        except sqlite3.OperationalError:
-            pass
-
-        # Indexes (Jan 7) - Performance Optimization
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_interactions_session ON interactions(session_id)"
-        )
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_interactions_md5 ON interactions(request_md5)"
-        )
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_interactions_ts ON interactions(timestamp)"
-        )
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(start_time)"
-        )
-        c.execute("CREATE INDEX IF NOT EXISTS idx_sessions_ip ON sessions(remote_ip)")
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(start_time)"
-        )
-        c.execute("CREATE INDEX IF NOT EXISTS idx_sessions_ip ON sessions(remote_ip)")
-
-        # Requested URLs Log (Network Intelligence)
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS requested_urls (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            session_id TEXT,
-            url TEXT,
-            method TEXT,
-            user_agent TEXT,
-            command_text TEXT,
-            FOREIGN KEY(session_id) REFERENCES sessions(session_id)
-        )"""
-        )
-
-        # IP Intelligence (Jan 10)
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS ip_intelligence (
-            ip TEXT PRIMARY KEY,
-            hostname TEXT,
-            city TEXT,
-            country TEXT,
-            isp TEXT,
-            org TEXT,
-            asn TEXT,
-            network_type TEXT,
-            first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-            last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-            enriched BOOLEAN DEFAULT 0,
-            raw_data TEXT,
-            abuse_tags TEXT DEFAULT '[]'
-        )"""
-        )
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_ip_intel_enriched ON ip_intelligence(enriched, last_seen)"
-        )
-
-        # Requested URLs Log (Network Intelligence)
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS requested_urls (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            session_id TEXT,
-            url TEXT,
-            method TEXT,
-            user_agent TEXT,
-            command_text TEXT,
-            FOREIGN KEY(session_id) REFERENCES sessions(session_id)
-        )"""
-        )
-
-        # Malicious Payloads (Jan 10)
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS malicious_payloads (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT,
-            url_hash TEXT UNIQUE,
-            session_id TEXT,
-            ip TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            status TEXT DEFAULT 'pending',
-            payload_md5 TEXT,
-            payload_size INTEGER,
-            file_path TEXT,
-            retry_count INTEGER DEFAULT 0,
-
-            error_message TEXT,
-            virustotal_result TEXT,
-            vt_last_scanned DATETIME,
-            vt_scan_id TEXT
-        )"""
-        )
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_payload_status ON malicious_payloads(status)"
-        )
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_payload_md5 ON malicious_payloads(payload_md5)"
-        )
-
-        # Payload Requests (Many-to-One Tracker, Jan 24 Fix)
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS payload_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            payload_id INTEGER,
-            ip TEXT,
-            session_id TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(payload_id) REFERENCES malicious_payloads(id)
-        )"""
-        )
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_payload_req_pid ON payload_requests(payload_id)"
-        )
-
-        try:
-            c.execute(
-                "ALTER TABLE malicious_payloads ADD COLUMN virustotal_result TEXT"
-            )
-        except:
-            pass
-        try:
-            c.execute(
-                "ALTER TABLE malicious_payloads ADD COLUMN vt_last_scanned DATETIME"
-            )
-        except:
-            pass
-        try:
-            c.execute("ALTER TABLE malicious_payloads ADD COLUMN vt_scan_id TEXT")
-        except:
-            pass
-
-        try:
-            c.execute("ALTER TABLE ip_intelligence ADD COLUMN asn TEXT")
-        except:
-            pass
-
-        conn.commit()
-        conn.close()
+        sync_db_schema(self)
 
     def _get_conn(self):
-        return sqlite3.connect(self.db_path, timeout=30.0)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        # Enable WAL mode and performance optimizations
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn.execute("PRAGMA busy_timeout = 30000;")
+        return conn
 
     def log_url_request(
         self,
@@ -714,8 +351,8 @@ class SQLiteBackend(DatabaseBackend):
                 conn.execute(
                     """
                     INSERT INTO interactions 
-                    (timestamp, session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (timestamp, session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size, duration_ms) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                     (
                         created_at,
@@ -728,14 +365,15 @@ class SQLiteBackend(DatabaseBackend):
                         response_md5,
                         response_head,
                         response_size,
+                        duration_ms,
                     ),
                 )
             else:
                 conn.execute(
                     """
                     INSERT INTO interactions 
-                    (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size, duration_ms) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                     (
                         session_id,
@@ -747,6 +385,7 @@ class SQLiteBackend(DatabaseBackend):
                         response_md5,
                         response_head,
                         response_size,
+                        duration_ms,
                     ),
                 )
             conn.commit()
@@ -785,19 +424,7 @@ class SQLiteBackend(DatabaseBackend):
         except Exception as e:
             log.error(f"[DB] Error in Payload Pipeline: {e}")
 
-    def get_cached_response(self, command, cwd):
-        if cache:
-            val = cache.get_content(command, cwd)
-            if val is not None:
-                return val
-
-        h = hashlib.sha256(f"{cwd}:{command}".encode()).hexdigest()
-        conn = self._get_conn()
-        c = conn.cursor()
-        c.execute("SELECT response FROM command_cache WHERE cmd_hash = ?", (h,))
-        row = c.fetchone()
-        conn.close()
-        return row[0] if row else None
+    # Removed get_cached_response (Deprecated in favor of UniversalCache)
 
     def get_fs_node(self, path):
         conn = self._get_conn()
@@ -1043,6 +670,77 @@ class SQLiteBackend(DatabaseBackend):
         finally:
             conn.close()
 
+    def record_api_usage(self, service, identifier="GLOBAL"):
+        """Records usage of an external API."""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "INSERT INTO api_usage (service, identifier) VALUES (?, ?)",
+                (service, identifier),
+            )
+            conn.commit()
+        except Exception as e:
+            log.error(f"[DB] Error recording API usage ({service}): {e}")
+        finally:
+            conn.close()
+
+    def check_api_rate_limit(
+        self, service, identifier, rpm_limit, rph_limit, rpd_limit
+    ):
+        """
+        Generic rate limit checker for any service/identifier.
+        Returns (allowed: bool, reason: str)
+        """
+        # Block caching
+        cache_key = f"api_block:{service}:{identifier}"
+        # We need a check in the cache specifically for this key prefix
+        if cache and cache.is_blocked(identifier, cache_key):
+            return False, f"Rate Limit Exceeded (Cached: {service})"
+
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+
+            # Check RPM
+            c.execute(
+                "SELECT COUNT(*) FROM api_usage WHERE service = ? AND identifier = ? AND timestamp > datetime('now', '-60 seconds')",
+                (service, identifier),
+            )
+            rpm_count = c.fetchone()[0]
+            if rpm_count >= rpm_limit:
+                if cache:
+                    cache.set_block(identifier, cache_key, ttl=60)
+                return False, f"RPM Limit Exceeded ({service}: {rpm_count}/{rpm_limit})"
+
+            # Check RPH
+            c.execute(
+                "SELECT COUNT(*) FROM api_usage WHERE service = ? AND identifier = ? AND timestamp > datetime('now', '-1 hour')",
+                (service, identifier),
+            )
+            rph_count = c.fetchone()[0]
+            if rph_count >= rph_limit:
+                if cache:
+                    cache.set_block(identifier, cache_key, ttl=3600)
+                return False, f"RPH Limit Exceeded ({service}: {rph_count}/{rph_limit})"
+
+            # Check RPD
+            c.execute(
+                "SELECT COUNT(*) FROM api_usage WHERE service = ? AND identifier = ? AND timestamp > datetime('now', '-24 hours')",
+                (service, identifier),
+            )
+            rpd_count = c.fetchone()[0]
+            if rpd_count >= rpd_limit:
+                if cache:
+                    cache.set_block(identifier, cache_key, ttl=86400)
+                return False, f"RPD Limit Exceeded ({service}: {rpd_count}/{rpd_limit})"
+
+            return True, "OK"
+        except Exception as e:
+            log.error(f"[DB] Error checking API limits for {service}: {e}")
+            return True, "Error check failed (Fail Open)"
+        finally:
+            conn.close()
+
     def get_user_node(self, ip, username, path):
         # 1. Check User DB (Modifications)
         conn = self._get_conn()
@@ -1224,13 +922,7 @@ class SQLiteBackend(DatabaseBackend):
         # 1. Check User Home (Always managed)
         home_dir = "/root" if username == "root" else f"/home/{username}"
 
-        # DEBUG TRACE
-        print(
-            f"[DB MANAGED CHECK] User: {username}, Path: '{path}', Home: '{home_dir}'"
-        )
-
-        if path == home_dir or path.startswith(home_dir + "/"):
-            print("[DB MANAGED] Matched Home Dir")
+        if path == home_dir:
             return True
 
         # 2. Check User DB for exact path existence (as a directory or parent of items)
@@ -1273,19 +965,6 @@ class SQLiteBackend(DatabaseBackend):
 
         return False
 
-    def cache_response(self, command, cwd, response):
-        if cache:
-            cache.set_content(command, cwd, response)
-
-        h = hashlib.sha256(f"{cwd}:{command}".encode()).hexdigest()
-        conn = self._get_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO command_cache (cmd_hash, command, cwd, response) VALUES (?, ?, ?, ?)",
-            (h, command, cwd, response),
-        )
-        conn.commit()
-        conn.close()
-
     def get_ip_upload_usage(self, ip):
         conn = self._get_conn()
         c = conn.cursor()
@@ -1305,139 +984,6 @@ class SQLiteBackend(DatabaseBackend):
                 pass
 
         return total_size
-
-    def cleanup_http_cache(self, web_root="/var/www/html"):
-        """
-        Removes cached HTTP responses for files that exist on the local filesystem (VFS).
-        This is typically run at startup to ensure local files override cached hallucinations.
-
-        Args:
-            web_root: The root directory to scan in the VFS (Global/User layers).
-        """
-        conn = self._get_conn()
-        deleted_count = 0
-        try:
-            c = conn.cursor()
-
-            # 1. Find all files in Global/User FS that look like web content
-            # We check Global Filesystem mostly, as User FS is session specific,
-            # but HTTP cache is currently global (HTTP_ROOT).
-            # So we scan global_filesystem for overrides.
-
-            # Note: We prioritize Global Filesystem (Persona) files.
-            # Ideally we'd scan user_fs too if we had per-user cache,
-            # but current cache key is just "HTTP <METHOD> <PATH>" + "HTTP_ROOT" cwd.
-
-            # Get list of files in VFS under web_root
-            # Using LIKE for prefix match
-            c.execute(
-                "SELECT path FROM global_filesystem WHERE path LIKE ? AND type='file'",
-                (f"{web_root}%",),
-            )
-            rows = c.fetchall()
-
-            for (path,) in rows:
-                # /var/www/html/index.html -> /index.html
-                if path.startswith(web_root):
-                    rel_path = path[len(web_root) :]
-                    if not rel_path.startswith("/"):
-                        rel_path = "/" + rel_path
-
-                    # Construct keys to invalidate
-                    # 1. Exact match (GET/POST/HEAD)
-                    # We use LIKE to match all methods: "HTTP % {rel_path}"
-                    # But cache key might have extra args for POST.
-                    # "HTTP % {rel_path}%"
-
-                    pattern = f"HTTP % {rel_path}%"
-                    c.execute(
-                        "DELETE FROM command_cache WHERE command LIKE ? AND cwd='HTTP_ROOT'",
-                        (pattern,),
-                    )
-                    deleted_count += c.rowcount
-
-                    # Invalidate In-Memory Cache (if enabled)
-                    if cache:
-                        # Invalidate common methods for this path
-                        for method in ["GET", "POST", "HEAD"]:
-                            cmd_key = f"HTTP {method} {rel_path}"
-                            cache.delete_content(cmd_key, "HTTP_ROOT")
-
-                    # 2. Index Logic
-                    # If file is index.html/php/htm, also invalidate directory root
-                    # e.g. /index.html -> /
-                    filename = os.path.basename(rel_path)
-                    if filename.lower() in ["index.html", "index.php", "index.htm"]:
-                        dir_path = os.path.dirname(rel_path)
-                        # Ensure dir_path ends with / or matches exactly?
-                        # Cache key for root is usually "HTTP GET /"
-                        # If dir_path is "/", pattern is "HTTP % /%"
-
-                        # Handle Root specially
-                        if dir_path == "/":
-                            # Matches "HTTP GET /" and "HTTP GET / extra"
-                            # But be careful not to match "/other"
-                            # So we match "HTTP % /" exactly OR "HTTP % / %" (with body hash)
-                            c.execute(
-                                "DELETE FROM command_cache WHERE command LIKE 'HTTP % /' AND cwd='HTTP_ROOT'"
-                            )
-                            deleted_count += c.rowcount
-                            c.execute(
-                                "DELETE FROM command_cache WHERE command LIKE 'HTTP % / %' AND cwd='HTTP_ROOT'"
-                            )
-                            deleted_count += c.rowcount
-
-                            # Invalidate Cache Root
-                            if cache:
-                                for method in ["GET", "POST", "HEAD"]:
-                                    cache.delete_content(
-                                        f"HTTP {method} /", "HTTP_ROOT"
-                                    )
-
-                        else:
-                            # For subdir /foo/index.html -> /foo/
-                            # Remove trailing slash for uniformity in basic requests?
-                            # Servers usually redirect /foo -> /foo/
-                            # Let's clean both "/foo" and "/foo/"
-
-                            # Clean "/foo"
-                            p1 = f"HTTP % {dir_path}"
-                            c.execute(
-                                "DELETE FROM command_cache WHERE command LIKE ? AND cwd='HTTP_ROOT'",
-                                (p1,),
-                            )
-                            deleted_count += c.rowcount
-
-                            # Clean "/foo/"
-                            if not dir_path.endswith("/"):
-                                p2 = f"HTTP % {dir_path}/"
-                                c.execute(
-                                    "DELETE FROM command_cache WHERE command LIKE ? AND cwd='HTTP_ROOT'",
-                                    (p2,),
-                                )
-                                deleted_count += c.rowcount
-
-                            # Invalidate Cache Dir
-                            if cache:
-                                for method in ["GET", "POST", "HEAD"]:
-                                    cache.delete_content(
-                                        f"HTTP {method} {dir_path}", "HTTP_ROOT"
-                                    )
-                                    if not dir_path.endswith("/"):
-                                        cache.delete_content(
-                                            f"HTTP {method} {dir_path}/", "HTTP_ROOT"
-                                        )
-
-            if deleted_count > 0:
-                conn.commit()
-                log.info(
-                    f"[HTTP] Startup Cache Cleanup: Invalidated {deleted_count} entries shadowing local files."
-                )
-
-        except Exception as e:
-            log.error(f"[DB] Error cleaning HTTP cache: {e}")
-        finally:
-            conn.close()
 
     def prune_uploads(self, days=30):
         cutoff_time = datetime.datetime.now() - datetime.timedelta(days=days)
@@ -1726,6 +1272,8 @@ class SQLiteBackend(DatabaseBackend):
             "top_http_commands": [],  # Added HTTP
             "top_redis_commands": [],
             "top_mcp_commands": [],
+            "top_llm_models": [],  # Added LLM
+            "top_llm_endpoints": [],  # Added LLM
             "top_passwords": [],
             "top_ssh_users": [],
             "top_ssh_risk": [],
@@ -1842,6 +1390,46 @@ class SQLiteBackend(DatabaseBackend):
                     2
                 ]  # Use command count for activity sorting
 
+            # --- LLM ANALYTICS (Python-side Processing for robustness) ---
+            # Fetch raw commands for 'llm-api'
+            llm_query = f"""
+                SELECT command FROM interactions 
+                WHERE source = 'llm-api' AND timestamp > {time_filter}
+            """
+            c.execute(llm_query)
+            llm_rows = c.fetchall()
+
+            if llm_rows:
+                from collections import Counter
+                import json
+
+                model_counts = Counter()
+                endpoint_counts = Counter()
+
+                for (cmd_text,) in llm_rows:
+                    if not cmd_text:
+                        continue
+
+                    parts = cmd_text.split("\n", 1)
+                    endpoint = parts[0].strip()
+                    endpoint_counts[endpoint] += 1
+
+                    if len(parts) > 1:
+                        try:
+                            payload = json.loads(parts[1])
+                            model = payload.get("model", "unknown")
+                            model_counts[model] += 1
+                        except:
+                            pass
+
+                # Format for Chart.js/Table
+                stats["top_llm_models"] = [
+                    {"item": k, "count": v} for k, v in model_counts.most_common(10)
+                ]
+                stats["top_llm_endpoints"] = [
+                    {"item": k, "count": v} for k, v in endpoint_counts.most_common(10)
+                ]
+
             # --- TOP TABLES ---
 
             # Top Countries (Unique IPs and Sessions)
@@ -1929,11 +1517,26 @@ class SQLiteBackend(DatabaseBackend):
             stats["top_redis_commands"] = get_top_commands("redis")
             stats["top_mcp_commands"] = get_top_commands("mcp")
 
+            # --- KILL CHAIN STAGES (Approved Enhancement) ---
+            query = f"""
+                SELECT ca.stage, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips
+                FROM interactions i
+                JOIN sessions s ON i.session_id = s.session_id
+                JOIN command_analysis ca ON i.request_md5 = ca.command_hash
+                WHERE i.timestamp > {time_filter} {interaction_ip_filter}
+                GROUP BY ca.stage
+                ORDER BY count DESC
+            """
+            c.execute(query, params)
+            stats["kill_chain"] = [
+                {"stage": r[0], "count": r[1], "ips": r[2]} for r in c.fetchall()
+            ]
+
             # Top SSH Commands by Risk (Freq and unique IP counts)
             # Improved sorting: Risk first, then unique IPs, then total count
             query = f"""
                 SELECT i.command, COALESCE(MAX(ca.risk_score), 0) as max_risk, COUNT(*) as count, COUNT(DISTINCT s.remote_ip) as unique_ips,
-                       SUBSTR(MAX(i.response), 1, 1000) as sample_response
+                       SUBSTR(MAX(i.response), 1, 1000) as sample_response, MAX(i.session_id) as sample_session
                 FROM interactions i
                 JOIN sessions s ON i.session_id = s.session_id
                 JOIN command_analysis ca ON i.request_md5 = ca.command_hash
@@ -1950,6 +1553,7 @@ class SQLiteBackend(DatabaseBackend):
                     "count": r[2],
                     "ips": r[3],
                     "response": r[4],
+                    "session_id": r[5],
                 }
                 for r in c.fetchall()
             ]
@@ -2010,14 +1614,17 @@ class SQLiteBackend(DatabaseBackend):
                 day_start = f"datetime('now', '-{i+1} days')"
                 day_end = f"datetime('now', '-{i} days')"
                 c.execute(
-                    f"SELECT COUNT(*) FROM sessions WHERE start_time > {day_start} AND start_time <= {day_end}"
+                    f"SELECT protocol, COUNT(*) FROM sessions WHERE start_time > {day_start} AND start_time <= {day_end} GROUP BY protocol"
                 )
-                count = c.fetchone()[0] or 0
+                protocol_counts = {r[0]: r[1] for r in c.fetchall()}
+                count = sum(protocol_counts.values())
 
                 # Get label like 'Jan 21'
                 c.execute(f"SELECT strftime('%b %d', 'now', '-{i} days')")
                 label = c.fetchone()[0]
-                res.append({"label": label, "count": count})
+                res.append(
+                    {"label": label, "count": count, "protocols": protocol_counts}
+                )
         except Exception as e:
             log.error(f"[SQLite] Error fetching daily session counts: {e}")
         finally:
@@ -2034,14 +1641,17 @@ class SQLiteBackend(DatabaseBackend):
                 hour_start = f"datetime('now', '-{i+1} hours')"
                 hour_end = f"datetime('now', '-{i} hours')"
                 c.execute(
-                    f"SELECT COUNT(*) FROM sessions WHERE start_time > {hour_start} AND start_time <= {hour_end}"
+                    f"SELECT protocol, COUNT(*) FROM sessions WHERE start_time > {hour_start} AND start_time <= {hour_end} GROUP BY protocol"
                 )
-                count = c.fetchone()[0] or 0
+                protocol_counts = {r[0]: r[1] for r in c.fetchall()}
+                count = sum(protocol_counts.values())
 
                 # Get label like '14:00'
                 c.execute(f"SELECT strftime('%H:%M', 'now', '-{i} hours')")
                 label = c.fetchone()[0]
-                res.append({"label": label, "count": count})
+                res.append(
+                    {"label": label, "count": count, "protocols": protocol_counts}
+                )
         except Exception as e:
             log.error(f"[SQLite] Error fetching hourly session counts: {e}")
         finally:
@@ -2085,26 +1695,6 @@ class SQLiteBackend(DatabaseBackend):
         finally:
             conn.close()
         return sessions
-
-    def get_unique_creds_last_24h(self, ip):
-        """
-        Returns a list of (username, password) tuples that were successfully used
-        by this IP in the last 24 hours.
-        """
-        conn = self._get_conn()
-        cutoff = datetime.datetime.now() - datetime.timedelta(hours=24)
-        c = conn.cursor()
-        c.execute(
-            """
-            SELECT username, password 
-            FROM sessions 
-            WHERE remote_ip = ? AND start_time > ?
-        """,
-            (ip, cutoff),
-        )
-        rows = c.fetchall()
-        conn.close()
-        return list(set(rows))  # Deduplicate
 
     def validate_anti_harvesting(self, ip, username, password):
         """
@@ -2454,27 +2044,40 @@ class SQLiteBackend(DatabaseBackend):
         conn.close()
         return creds
 
-    def get_unanalyzed_commands(self, limit=10):
+    def get_unanalyzed_commands(self, limit=10, allowed_protocols=None):
         """
-        Returns distinct commands (hash, text, session_id, ip) from interactions that are NOT in command_analysis.
+        Returns distinct commands (hash, text, session_id, ip) from interactions that are:
+        1. NOT in command_analysis (New)
+        2. OR in command_analysis but older than 3 weeks (Re-analysis)
         Prioritizes most recent commands (by ID).
         """
         conn = self._get_conn()
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
 
-        query = """
-            SELECT i.request_md5, i.command, i.session_id, s.remote_ip
+        protocol_filter = ""
+        params = []
+        if allowed_protocols:
+            placeholders = ",".join(["?"] * len(allowed_protocols))
+            protocol_filter = f"AND s.protocol IN ({placeholders})"
+            params.extend(allowed_protocols)
+
+        # Updated query to include re-analysis of old commands (> 3 weeks)
+        query = f"""
+            SELECT i.request_md5, i.command, i.session_id, s.remote_ip, MAX(i.timestamp) as last_seen
             FROM interactions i
             JOIN sessions s ON i.session_id = s.session_id
+            LEFT JOIN command_analysis ca ON i.request_md5 = ca.command_hash
             WHERE i.request_md5 IS NOT NULL 
               AND i.request_md5 != 'unknown'
-              AND i.request_md5 NOT IN (SELECT command_hash FROM command_analysis)
+              AND (ca.command_hash IS NULL OR ca.analyzed_at < datetime('now', '-21 days'))
+              {protocol_filter}
             GROUP BY i.request_md5
             ORDER BY MAX(i.id) DESC
             LIMIT ?
         """
-        c.execute(query, (limit,))
+        params.append(limit)
+        c.execute(query, tuple(params))
         results = [dict(row) for row in c.fetchall()]
         conn.close()
         return results
@@ -2679,7 +2282,18 @@ class SQLiteBackend(DatabaseBackend):
 
     # --- Malicious Payload Methods (Jan 10) ---
     def add_malicious_payload(
-        self, url, url_hash, session_id, ip, timestamp=None, status="pending"
+        self,
+        url,
+        url_hash,
+        session_id,
+        ip,
+        timestamp=None,
+        status="pending",
+        payload_md5=None,
+        payload_size=None,
+        file_path=None,
+        snippet=None,
+        **kwargs,
     ):
         conn = self._get_conn()
         try:
@@ -2692,11 +2306,30 @@ class SQLiteBackend(DatabaseBackend):
             # 1. Insert/Get Payload ID
             cursor.execute(
                 """
-                INSERT INTO malicious_payloads (url, url_hash, session_id, ip, timestamp, status)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT (url_hash) DO NOTHING
+                INSERT INTO malicious_payloads (
+                    url, url_hash, session_id, ip, timestamp, status,
+                    payload_md5, payload_size, file_path, snippet
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (url_hash) DO UPDATE SET
+                    payload_md5 = excluded.payload_md5,
+                    payload_size = excluded.payload_size,
+                    file_path = excluded.file_path,
+                    snippet = excluded.snippet,
+                    status = excluded.status
             """,
-                (url, url_hash, session_id, ip, ts, status),
+                (
+                    url,
+                    url_hash,
+                    session_id,
+                    ip,
+                    ts,
+                    status,
+                    payload_md5,
+                    payload_size,
+                    file_path,
+                    snippet,
+                ),
             )
 
             # Fetch the ID (either newly inserted or existing)
@@ -2867,6 +2500,8 @@ class SQLiteBackend(DatabaseBackend):
         payload_size=None,
         file_path=None,
         error=None,
+        snippet=None,
+        **kwargs,
     ):
         conn = self._get_conn()
         try:
@@ -2882,6 +2517,9 @@ class SQLiteBackend(DatabaseBackend):
             if file_path:
                 sql += ", file_path = ?"
                 params.append(sanitize_path(file_path))
+            if snippet:
+                sql += ", snippet = ?"
+                params.append(snippet)
             if error:
                 sql += ", error_message = ?"
                 params.append(error)
@@ -3097,16 +2735,16 @@ class SQLiteBackend(DatabaseBackend):
             conn.close()
 
     def purge_poisoned_cache(self):
-        """Purges cached responses containing AI Core error messages."""
+        """Purges cached responses containing Internal Logic error messages."""
         conn = self._get_conn()
         try:
-            # Clear from command_cache
-            conn.execute(
-                "DELETE FROM command_cache WHERE response LIKE '%AI Core Offline%'"
+            # Purge legacy and new internal error markers
+            c = conn.cursor()
+            c.execute(
+                "DELETE FROM command_cache WHERE response LIKE '%Internal Logic Offline%' OR response LIKE '%INTERNAL_ERROR%'"
             )
-            # Clear from interactions
-            conn.execute(
-                "DELETE FROM interactions WHERE response LIKE '%AI Core Offline%'"
+            c.execute(
+                "DELETE FROM interactions WHERE response LIKE '%Internal Logic Offline%' OR response LIKE '%INTERNAL_ERROR%'"
             )
             conn.commit()
             log.info("[SQLite] Purged poisoned cache entries.")
@@ -3115,44 +2753,255 @@ class SQLiteBackend(DatabaseBackend):
         finally:
             conn.close()
 
-    def get_llm_response(self, prompt_hash):
-        """Retrieves a cached LLM response by prompt hash if it exists and is fresh (30 days)."""
+    def get_cache_keys(self, service):
+        """Returns all cache keys and their input texts for a given service."""
         conn = self._get_conn()
         try:
             c = conn.cursor()
-            # Check if exists and is younger than 30 days
+            c.execute(
+                "SELECT cache_key, input_text FROM universal_cache WHERE service = ?",
+                (service,),
+            )
+            return [{"cache_key": row[0], "input_text": row[1]} for row in c.fetchall()]
+        except Exception as e:
+            log.error(f"[SQLite] Failed to get cache keys: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_cache_item(self, cache_key):
+        """Retrieves a cached item from universal_cache if it exists and is fresh."""
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            # We use datetime('now') to check expiry
             c.execute(
                 """
-                SELECT response FROM llm_response_cache 
-                WHERE prompt_hash = ? AND created_at > datetime('now', '-30 days')
+                SELECT service, version, input_text, input_hash, output_text, output_hash, 
+                       output_size, is_binary, risk_score, attack_stage, explanation, metadata,
+                       hit_count, created_at, updated_at, expires_at
+                FROM universal_cache 
+                WHERE cache_key = ? AND (expires_at IS NULL OR expires_at > datetime('now'))
                 """,
-                (prompt_hash,),
+                (cache_key,),
             )
             row = c.fetchone()
-            return row[0] if row else None
+            if not row:
+                return None
+
+            # Update hit count asynchronously in real world, but here we do it sync
+            c.execute(
+                "UPDATE universal_cache SET hit_count = hit_count + 1, last_hit_at = datetime('now') WHERE cache_key = ?",
+                (cache_key,),
+            )
+            conn.commit()
+
+            return {
+                "service": row[0],
+                "version": row[1],
+                "input_text": row[2],
+                "input_hash": row[3],
+                "output_text": row[4],
+                "output_hash": row[5],
+                "output_size": row[6],
+                "is_binary": bool(row[7]),
+                "risk_score": row[8],
+                "attack_stage": row[9],
+                "explanation": row[10],
+                "metadata": row[11],
+                "hit_count": row[12],
+                "created_at": row[13],
+                "updated_at": row[14],
+                "expires_at": row[15],
+            }
         except Exception as e:
-            log.error(f"[SQLite] Error getting LLM cache: {e}")
+            log.error(f"[SQLite] Error getting universal cache: {e}")
             return None
         finally:
             conn.close()
 
-    def save_llm_response(self, prompt_hash, prompt_text, response):
-        """Caches an LLM response."""
+    def set_cache_item(
+        self,
+        cache_key,
+        service,
+        output_text,
+        version=1,
+        input_text=None,
+        input_hash=None,
+        output_hash=None,
+        output_size=None,
+        is_binary=False,
+        risk_score=None,
+        attack_stage=None,
+        explanation=None,
+        metadata=None,
+        ttl_days=30,
+    ):
+        """Saves an item to universal_cache."""
+        conn = self._get_conn()
+
+    def set_cache_item(self, **kwargs):
+        """Saves a detailed cache item to universal_cache."""
         conn = self._get_conn()
         try:
-            # Use REPLACE to update timestamp if it already exists (though hash collision unlikely different prompt)
-            # Actually, we should update updated_at if we overwrite.
-            # But REPLACE deletes and inserts new row, so created_at resets to CURRENT_TIMESTAMP which is what we want (refresh TTL)
-            conn.execute(
+            c = conn.cursor()
+            c.execute(
                 """
-                INSERT OR REPLACE INTO llm_response_cache (prompt_hash, prompt_text, response)
-                VALUES (?, ?, ?)
+                INSERT OR REPLACE INTO universal_cache (
+                    cache_key, service, version, input_text, input_hash, output_text, output_hash,
+                    output_size, is_binary, risk_score, attack_stage, explanation, metadata,
+                    hit_count, created_at, updated_at, expires_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 
+                    datetime('now', '+' || ? || ' days')
+                )
                 """,
-                (prompt_hash, prompt_text, response),
+                (
+                    kwargs.get("cache_key"),
+                    kwargs.get("service"),
+                    kwargs.get("version", 1),
+                    kwargs.get("input_text"),
+                    kwargs.get("input_hash"),
+                    kwargs.get("output_text"),
+                    kwargs.get("output_hash"),
+                    kwargs.get("output_size"),
+                    kwargs.get("is_binary", False),
+                    kwargs.get("risk_score"),
+                    kwargs.get("attack_stage"),
+                    kwargs.get("explanation"),
+                    kwargs.get("metadata"),
+                    0,  # initial hit count
+                    kwargs.get("ttl_days", 30),
+                ),
             )
             conn.commit()
+            return True
         except Exception as e:
-            log.error(f"[SQLite] Error saving LLM cache: {e}")
+            log.error(f"[SQLite] Failed to save cache item: {e}")
+            return False
+
+    def delete_cache_item(self, cache_key):
+        """Removes an item from universal_cache."""
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            c.execute("DELETE FROM universal_cache WHERE cache_key = ?", (cache_key,))
+            conn.commit()
+            return True
+        except Exception as e:
+            log.error(f"[SQLite] Failed to delete cache item: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def get_llm_response(self, prompt_hash):
+        """Legacy wrapper - redirected to get_cache_item."""
+        item = self.get_cache_item(prompt_hash)
+        return item["output_text"] if item else None
+
+    def save_llm_response(self, prompt_hash, prompt_text, response):
+        """Legacy wrapper - redirected to set_cache_item."""
+        self.set_cache_item(
+            cache_key=prompt_hash,
+            service="llm",
+            input_text=prompt_text,
+            output_text=response,
+            ttl_days=30,
+        )
+
+    def get_session_details(self, session_id):
+        """Returns full transcript for a specific session."""
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            c.execute(
+                "SELECT start_time, end_time, protocol, remote_ip, username FROM sessions WHERE session_id = ?",
+                (session_id,),
+            )
+            sess = c.fetchone()
+            if not sess:
+                return None
+
+            c.execute(
+                "SELECT timestamp, command, response FROM interactions WHERE session_id = ? ORDER BY timestamp ASC",
+                (session_id,),
+            )
+            interactions = [
+                {"timestamp": r[0], "command": r[1], "response": r[2]}
+                for r in c.fetchall()
+            ]
+
+            return {
+                "id": session_id,  # Frontend expects "id"
+                "session_id": session_id,  # Keep for compat
+                "start_time": sess[0],
+                "end_time": sess[1],
+                "protocol": sess[2],
+                "remote_ip": sess[3],
+                "user": sess[4],  # Frontend expects "user"
+                "username": sess[4],  # Keep for compat
+                "history": interactions,  # Frontend expects "history"
+                "interactions": interactions,  # Keep for compat
+            }
+        except Exception as e:
+            log.error(f"[DB] Error fetching session details {session_id}: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def get_recent_high_risk_events(self, limit=10):
+        """Fetches latest risky sessions and payloads for the ticker."""
+        conn = self._get_conn()
+        events = []
+        try:
+            c = conn.cursor()
+            # 1. High Risk Commands
+            c.execute(
+                """
+                SELECT i.timestamp, i.command, s.remote_ip, ca.risk_score, ca.explanation
+                FROM interactions i
+                JOIN sessions s ON i.session_id = s.session_id
+                JOIN command_analysis ca ON i.request_md5 = ca.command_hash
+                WHERE ca.risk_score >= 80
+                ORDER BY i.timestamp DESC LIMIT ?
+                """,
+                (limit,),
+            )
+            for r in c.fetchall():
+                events.append(
+                    {
+                        "type": "command",
+                        "time": r[0],
+                        "command": r[1],
+                        "ip": r[2],
+                        "risk": r[3],
+                        "reason": r[4],
+                    }
+                )
+
+            # 2. Latest Payloads
+            c.execute(
+                "SELECT timestamp, url, ip FROM malicious_payloads ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            )
+            for r in c.fetchall():
+                events.append(
+                    {
+                        "type": "payload",
+                        "time": r[0],
+                        "url": r[1],
+                        "ip": r[2],
+                        "risk": 100,
+                        "reason": "Malware Download",
+                    }
+                )
+
+            # Sort combined
+            events.sort(key=lambda x: x["time"], reverse=True)
+            return events[:limit]
+        except Exception as e:
+            log.error(f"[DB] Error fetching ticker events: {e}")
+            return []
         finally:
             conn.close()
 

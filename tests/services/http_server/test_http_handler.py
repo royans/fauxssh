@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 from ssh_honeypot.services.http_server.server import HoneyHTTPHandler
 from io import BytesIO
+import hashlib
 
 
 @pytest.fixture
@@ -12,14 +13,15 @@ def mock_server():
     server.config = MagicMock()
 
     # Setup DB mocks
-    server.honey_db.get_cached_response.return_value = None  # Default miss
-    server.honey_db.cache_response = MagicMock()
-    server.honey_db.start_session = MagicMock()
-    server.honey_db.cache_response = MagicMock()
     server.honey_db.start_session = MagicMock()
     server.honey_db.log_interaction = MagicMock()
     server.honey_db.check_llm_rate_limit = MagicMock(return_value=(True, "OK"))
-    return server
+
+    # Patch universal_cache
+    with patch("ssh_honeypot.services.http_server.server.universal_cache") as mock_uc:
+        server.universal_cache = mock_uc
+        server.universal_cache.get.return_value = None
+        yield server
 
 
 def create_handler(server, output_buf, path="/index.html", method="GET"):
@@ -74,8 +76,12 @@ def test_http_get_cache_miss(mock_server):
         assert "GET" in kwargs["override_prompt"]
 
         # Verify Cache Set
-        mock_server.honey_db.cache_response.assert_called_with(
-            "HTTP GET /index.html", "HTTP_ROOT", "<html>New Content</html>"
+        mock_server.universal_cache.set.assert_called_with(
+            service="http_cache",
+            key=hashlib.md5("HTTP GET /index.html".encode()).hexdigest(),
+            input_text="HTTP GET /index.html",
+            output_text="<html>New Content</html>",
+            ttl_days=30,
         )
 
         # Verify Output
@@ -102,7 +108,7 @@ def test_http_get_cache_hit(mock_server):
 
         mock_conf.get.side_effect = config_side_effect
 
-        mock_server.honey_db.get_cached_response.return_value = "CachedContent"
+        mock_server.universal_cache.get.return_value = {"output_text": "CachedContent"}
 
         handler.do_GET()
 

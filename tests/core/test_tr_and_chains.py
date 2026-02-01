@@ -17,25 +17,25 @@ def handler():
 
 def test_tr_simple_replace(handler):
     context = {"stdin": "hello world"}
-    res, _ = handler.handle_tr("tr 'l' 'x'", context)
+    res, _, _ = handler.handle_tr("tr 'l' 'x'", context)
     assert res == "hexxo worxd"
 
 
 def test_tr_delete(handler):
     context = {"stdin": "hello world"}
-    res, _ = handler.handle_tr("tr -d 'l'", context)
+    res, _, _ = handler.handle_tr("tr -d 'l'", context)
     assert res == "heo word"
 
 
 def test_tr_ranges(handler):
     context = {"stdin": "hello world"}
-    res, _ = handler.handle_tr("tr 'a-z' 'A-Z'", context)
+    res, _, _ = handler.handle_tr("tr 'a-z' 'A-Z'", context)
     assert res == "HELLO WORLD"
 
 
 def test_tr_newlines(handler):
     context = {"stdin": "line1\nline2\n"}
-    res, _ = handler.handle_tr("tr '\\n' ' '", context)
+    res, _, _ = handler.handle_tr("tr '\\n' ' '", context)
     assert res == "line1 line2 "
 
 

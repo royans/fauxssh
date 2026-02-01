@@ -1,7 +1,7 @@
 import sys
 import os
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from ssh_honeypot.core.command_handler import CommandHandler
@@ -16,17 +16,20 @@ class TestRealisticHandlers:
         self.mock_db.get_cached_response.return_value = None
         self.mock_db.get_user_node.return_value = None
         self.mock_db.get_fs_node.return_value = None
-        return CommandHandler(self.mock_llm, self.mock_db)
+        h = CommandHandler(self.mock_llm, self.mock_db)
+        h.payload_manager = MagicMock()
+        h.payload_manager.download_and_analyze_sync.return_value = None
+        return h
 
     def test_handle_pwd(self, handler):
         context = {"cwd": "/var/log", "user": "root"}
-        resp, updates = handler.handle_pwd("pwd", context)
+        resp, updates, _ = handler.handle_pwd("pwd", context)
         assert resp == "/var/log\n"
         assert updates == {}
 
     def test_handle_whoami(self, handler):
         context = {"cwd": "/", "user": "hackerman"}
-        resp, updates = handler.handle_whoami("whoami", context)
+        resp, updates, _ = handler.handle_whoami("whoami", context)
         assert resp == "hackerman\n"
 
     def test_handle_wget_success(self, handler):
@@ -36,18 +39,26 @@ class TestRealisticHandlers:
         # Mock LLM
         handler.llm.generate_response.return_value = "#!/bin/bash\necho malware"
 
-        resp, updates = handler.handle_wget(cmd, context)
-
         # New behavior: Hybrid Success
+        # Mock update_user_file so it doesn't try to auto-serialize our context mocks (if any)
+        # We need to test the logic WITHOUT running actual DB calls
+        # because the "context" object or the "handler" object might be leaking mock objects into serialization
+
+        # Patch the INSTANCE in the universal_cache module, because handle_wget imports it from there.
+        with patch("ssh_honeypot.core.universal_cache.universal_cache") as mock_uc:
+            mock_uc.get.return_value = None
+
+            # Mock update_user_file on the db mock itself
+            handler.db.update_user_file = MagicMock()
+
+            resp, updates, _ = handler.handle_wget(cmd, context)
+
         assert "200 OK" in resp or "Saving to" in resp
-        # It won't return file modification in the updates dict directly anymore,
-        # because it calls honey_db.update_user_file directly.
-        # But we can check the return string implies success.
 
     def test_handle_wget_no_url(self, handler):
         context = {"cwd": "/tmp"}
         cmd = "wget"
-        resp, updates = handler.handle_wget(cmd, context)
+        resp, updates, _ = handler.handle_wget(cmd, context)
         assert "missing URL" in resp
 
     def test_ls_help(self, handler):
