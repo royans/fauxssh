@@ -21,12 +21,16 @@ class TestLoggingIntegration(unittest.TestCase):
         self.db_path = os.path.join(self.test_dir, "test_honeypot.sqlite")
         self.json_log_path = os.path.join(self.test_dir, "test_events.json.log")
 
-        # 2. Reset Singletons
+        # 2. Reset Singletons & Handlers
         EventLogger._instance = None
         EventLogger._logger = None
+
+        # Aggressively close and remove ALL handlers for the target logger
         logger = logging.getLogger(LOGGER_NAME)
-        for h in logger.handlers[:]:
-            logger.removeHandler(h)
+        if logger.handlers:
+            for h in logger.handlers[:]:
+                h.close()
+                logger.removeHandler(h)
 
         # 3. Patch the real config instance's get method
         # This ensures ALL modules using 'config' see our test values
@@ -61,6 +65,14 @@ class TestLoggingIntegration(unittest.TestCase):
         self.slogger._db = self.old_db
         self.config_patcher.stop()
         self.gdd_patcher.stop()
+
+        # Cleanup handlers again
+        EventLogger._instance = None
+        logger = logging.getLogger(LOGGER_NAME)
+        for h in logger.handlers[:]:
+            h.close()
+            logger.removeHandler(h)
+
         shutil.rmtree(self.test_dir)
 
     def _mock_config_get(self, *args):

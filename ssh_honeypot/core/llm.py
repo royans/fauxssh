@@ -2,6 +2,7 @@ import requests
 import json
 import os
 import re
+import time
 
 import hashlib
 
@@ -26,16 +27,40 @@ except ImportError:
 class LLMInterface:
     def __init__(self, api_key=None):
         # Fetch API KEY lazily, prioritizing config which handles .env loading
+        self.provider = config.get("llm", "provider") or "google"
+
+        # --- IPv4 Enforcement ---
+        if config.get("llm", "force_ipv4"):
+            try:
+                import socket
+                import urllib3.util.connection as connection
+
+                def allowed_gai_family():
+                    """Force IPv4 (AF_INET) for all requests."""
+                    return socket.AF_INET
+
+                connection.allowed_gai_family = allowed_gai_family
+                log.info("[LLM] Forced IPv4 for API calls (via urllib3 patch)")
+            except Exception as e:
+                log.error(f"[LLM] Failed to force IPv4: {e}")
+        # ------------------------
+
         raw_key = (
-            api_key or config.get("llm", "api_key") or os.getenv("GOOGLE_API_KEY") or ""
+            api_key
+            or config.get("llm", "api_key")
+            or os.getenv("LLM_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+            or ""
         )
         self.api_key = raw_key.strip()
         log.debug(
-            f"LLMInterface Init - api_key arg: {bool(api_key)}, self.api_key set: {bool(self.api_key)} (Len: {len(self.api_key)})"
+            f"LLMInterface Init - Provider: {self.provider}, Key set: {bool(self.api_key)}"
         )
 
-        if not self.api_key:
-            log.warning("[WARN] No GOOGLE_API_KEY provided. LLM calls will fail.")
+        if not self.api_key and self.provider != "ollama":
+            log.warning(
+                f"[WARN] No API KEY provided for {self.provider}. LLM calls will fail."
+            )
 
         # Load Prompt Template
         self.prompt_template = ""
@@ -49,11 +74,11 @@ class LLMInterface:
             log.error(f"[!] Error loading prompt template: {e}")
             self.prompt_template = "Error: Prompt template missing."
 
-    def query(self, prompt, **kwargs):
+    def query(self, prompt, protocol="generic", **kwargs):
         """
         Generic query method for arbitary prompts (used by MySQL/Redis layers).
         """
-        return self._call_api(prompt)
+        return self._call_api(prompt, protocol=protocol)
 
     def generate_response(
         self,
@@ -67,6 +92,7 @@ class LLMInterface:
         honeypot_ip="192.168.1.55",
         override_prompt=None,
         persona_config=None,
+        protocol="ssh",
         **kwargs,
     ):
         """
@@ -80,25 +106,15 @@ class LLMInterface:
         log.debug(
             f"generate_response called for '{command}'. Key Len: {len(self.api_key) if self.api_key else 0}"
         )
-        if not self.api_key:
-            # Fallback for Offline Mode / Missing Key
-            # Retain immersion: better to say "command not found" than "AI Offline"
-            # Unless we want to simulate a network error for network commands.
-
-            # Simple heuristic
-            cmd_base = command.split()[0] if command else ""
-            if cmd_base in ["curl", "wget", "ssh", "nc", "ping"]:
-                return (
-                    "ssh: connect to host example.com port 22: Connection timed out"
-                    if cmd_base == "ssh"
-                    else f"{cmd_base}: unable to resolve host address"
-                )
-
-            return f"bash: {cmd_base}: command not found"
+        if not self.api_key and self.provider != "ollama":
+            return self._get_bash_fallback(command, protocol=protocol)
 
         # If raw prompt override is provided, skip template logic
         if override_prompt:
-            return self._call_api(override_prompt)
+            res = self._call_api(override_prompt)
+            if "INTERNAL_ERROR" in res:
+                return self._get_bash_fallback(command, protocol=protocol)
+            return res
 
         # Construct Context String
         history_str = ""
@@ -112,13 +128,13 @@ class LLMInterface:
 
             # Parse previous JSON responses if they exist in history, otherwise treat as text
             try:
-                if resp.strip().startswith("{"):
+                if resp and resp.strip().startswith("{"):
                     r_json = json.loads(resp)
-                    resp_text = r_json.get("output", "")
+                    resp_text = (r_json or {}).get("output", "")
                 else:
-                    resp_text = resp
+                    resp_text = resp or ""
             except:
-                resp_text = resp
+                resp_text = resp or ""
 
             # Filter out "command not found" errors from context to prevent LLM repetition loops
             if "command not found" in resp_text:
@@ -142,7 +158,7 @@ class LLMInterface:
             template = None
             if persona_config:
                 # Check nested keys strictly
-                if "prompts" in persona_config:
+                if "prompts" in persona_config and persona_config["prompts"]:
                     template = persona_config["prompts"].get("system_prompt")
 
             if not template:
@@ -157,7 +173,11 @@ class LLMInterface:
 
             # Determine hostname from persona or config
             host_val = None
-            if persona_config and "system" in persona_config:
+            if (
+                persona_config
+                and "system" in persona_config
+                and persona_config["system"]
+            ):
                 host_val = persona_config["system"].get("hostname")
             if not host_val:
                 host_val = config.get("server", "hostname") or "npc-main-server-01"
@@ -195,7 +215,28 @@ class LLMInterface:
             log.error(f"[!] Prompt Formatting Error: {e}")
             return '{"output": "Error: Internal System Error", "new_cwd": null}'
 
-        return self._call_api(prompt)
+        res = self._call_api(prompt, protocol=protocol)
+        if "INTERNAL_ERROR" in res:
+            return self._get_bash_fallback(command, protocol=protocol)
+        return res
+
+    def _get_bash_fallback(self, command, protocol="ssh"):
+        """Standard bash fallback for missing/failed LLM."""
+        if protocol == "http":
+            return "<html><body><h1>500 Internal Server Error</h1><p>The server encountered an internal error and was unable to complete your request.</p></body></html>"
+        if protocol == "mysql":
+            return "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)"
+        if protocol == "redis":
+            return "-ERR internal error"
+
+        cmd_base = command.split()[0] if command else ""
+        if cmd_base in ["curl", "wget", "ssh", "nc", "ping"]:
+            return (
+                "ssh: connect to host example.com port 22: Connection timed out"
+                if cmd_base == "ssh"
+                else f"{cmd_base}: unable to resolve host address"
+            )
+        return f"bash: {cmd_base}: command not found"
 
     def generate_content(self, command, url, persona_summary):
         """
@@ -209,14 +250,16 @@ class LLMInterface:
             prompt = template.format(
                 command=command, url=url, persona_summary=persona_summary
             )
-            return self._call_api(prompt, is_command=False)
+            return self._call_api(
+                prompt, command=command, is_command=False, protocol="http"
+            )
         except Exception as e:
             log.error(f"[!] Content Generation Error: {e}")
             return "Error: Content generation failed."
 
-    def _call_api(self, prompt, command=None, is_command=True):
+    def _call_api(self, prompt, command=None, is_command=True, protocol="ssh"):
         # 1. Check Cache
-        prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+        prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
 
         cached_item = universal_cache.get("llm", prompt_hash)
         if cached_item:
@@ -227,19 +270,31 @@ class LLMInterface:
 
         # Global Rate Limit Check
         db_backend = get_db_backend()
-        l_rpm = config.get("throttling", "global", "google_llm", "rpm") or 3
-        l_rph = config.get("throttling", "global", "google_llm", "rph") or 100
+        l_rpm = config.get("throttling", "global", "google_llm", "rpm") or 10
+        l_rph = config.get("throttling", "global", "google_llm", "rph") or 400
         l_rpd = config.get("throttling", "global", "google_llm", "rpd") or 10000
 
         allowed, reason = db_backend.check_api_rate_limit(
             "google_llm", "GLOBAL", l_rpm, l_rph, l_rpd
         )
         if not allowed:
+            # SHHH: Silent return for rate limit blocks to prevent debug file spam
             log.warning(f"[LLM] Global Rate Limit Block: {reason}")
             return '{"output": "Error: System resources exhausted. Please try again later.", "new_cwd": null}'
 
         db_backend.record_api_usage("google_llm", "GLOBAL")
 
+        # Route to provider
+        if self.provider == "openai":
+            return self._call_openai(prompt, prompt_hash, command, is_command, protocol)
+        elif self.provider == "ollama":
+            return self._call_ollama(prompt, prompt_hash, command, is_command, protocol)
+        else:
+            return self._call_google(prompt, prompt_hash, command, is_command, protocol)
+
+    def _call_google(
+        self, prompt, prompt_hash, command=None, is_command=True, protocol="ssh"
+    ):
         headers = {"Content-Type": "application/json"}
         data = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -256,53 +311,182 @@ class LLMInterface:
         try:
             timeout_val = config.get("llm", "timeout") or 60
             resp = requests.post(url, headers=headers, json=data, timeout=timeout_val)
-            if resp.status_code != 200:
-                print(f"[!] LLM API Error {resp.status_code}: {resp.text}")
-                return '{"output": "INTERNAL_ERROR", "new_cwd": null}'
-
-            resp_json = resp.json()
-            try:
-                # Gemini Pro structure
-                text = resp_json["candidates"][0]["content"]["parts"][0]["text"]
-                text = text.strip()
-                # Strip Markdown
-                text = re.sub(r"^```[a-zA-Z0-9+-]*\s*", "", text)
-                text = re.sub(r"\s*```$", "", text)
-                final_text = text.strip()
-
-                # Perform Risk Analysis if it's a command response
-                risk_score = 0
-                attack_stage = "Unknown"
-                explanation = None
-
-                if is_command and command:
-                    try:
-                        analysis = self.analyze_command(command)
-                        risk_score = analysis.get("risk", 0)
-                        attack_stage = f"{analysis.get('type', 'Unknown')} ({analysis.get('stage', 'Unknown')})"
-                        explanation = analysis.get("explanation")
-                    except Exception as e:
-                        log.warning(f"[LLM] Risk analysis failed: {e}")
-
-                # 2. Save to Universal Cache
-                universal_cache.set(
-                    service="llm",
-                    key=prompt_hash,
-                    input_text=prompt,
-                    output_text=final_text,
-                    risk_score=risk_score,
-                    attack_stage=attack_stage,
-                    explanation=explanation,
-                    ttl_days=30,
-                )
-                return final_text
-            except (KeyError, IndexError) as e:
-                print(f"[!] LLM Response Parsing Error: {e} | Resp: {resp.text[:100]}")
-                return '{"output": "Error: Parsing Failure.", "new_cwd": null}'
-
+            return self._handle_provider_response(
+                resp,
+                prompt,
+                prompt_hash,
+                command,
+                is_command,
+                provider="google",
+                protocol=protocol,
+            )
         except Exception as e:
-            print(f"[!] LLM Request Exception: {e}")
-            return '{"output": "Error: Network Failure.", "new_cwd": null}'
+            return self._handle_provider_exception(e, "google_request")
+
+    def _call_openai(
+        self, prompt, prompt_hash, command=None, is_command=True, protocol="ssh"
+    ):
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        data = {
+            "model": config.get("llm", "model_name") or "gpt-3.5-turbo",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 1.0,
+        }
+        url = "https://api.openai.com/v1/chat/completions"
+        try:
+            timeout_val = config.get("llm", "timeout") or 60
+            resp = requests.post(url, headers=headers, json=data, timeout=timeout_val)
+            return self._handle_provider_response(
+                resp,
+                prompt,
+                prompt_hash,
+                command,
+                is_command,
+                provider="openai",
+                protocol=protocol,
+            )
+        except Exception as e:
+            return self._handle_provider_exception(e, "openai_request")
+
+    def _call_ollama(
+        self, prompt, prompt_hash, command=None, is_command=True, protocol="ssh"
+    ):
+        url = config.get("llm", "ollama_url") or "http://localhost:11434/api/generate"
+        data = {
+            "model": config.get("llm", "model_name") or "llama3",
+            "prompt": prompt,
+            "stream": False,
+        }
+        try:
+            timeout_val = config.get("llm", "timeout") or 60
+            resp = requests.post(url, json=data, timeout=timeout_val)
+            return self._handle_provider_response(
+                resp,
+                prompt,
+                prompt_hash,
+                command,
+                is_command,
+                provider="ollama",
+                protocol=protocol,
+            )
+        except Exception as e:
+            return self._handle_provider_exception(e, "ollama_request")
+
+    def _handle_provider_response(
+        self,
+        resp,
+        prompt,
+        prompt_hash,
+        command,
+        is_command,
+        provider="google",
+        protocol="ssh",
+    ):
+        if resp.status_code != 200:
+            err_msg = f"[!] LLM API Error ({provider}) {resp.status_code}: {resp.text}"
+            log.error(err_msg)
+
+        # One-line status log for API calls (as requested)
+        summary = "Generic"
+        if command:
+            if is_command:
+                summary = f"CMD: {command}"
+            elif "cybersecurity" in prompt.lower() or "risk" in prompt.lower():
+                summary = f"Risk: {command}"
+            elif "Threat Intelligence Analyst" in prompt:
+                summary = f"Sess: {command}"
+            elif "persona_summary" in prompt:  # Heuristic for generate_content
+                summary = f"Page: {command}"
+            else:
+                summary = f"Query: {command}"
+        elif "Reply with exactly" in prompt:
+            summary = "API Verify"
+
+        if len(summary) > 40:
+            summary = summary[:37] + "..."
+
+        log.info(
+            f"[LLM] {provider.capitalize()} API ({protocol.upper()}): {summary} -> {resp.status_code} ({len(resp.content)} bytes)"
+        )
+
+        if resp.status_code != 200:
+
+            # Save error info for debug
+            try:
+                debug_dir = "/tmp/llm_debug"
+                if os.path.exists(debug_dir):
+                    err_file = os.path.join(
+                        debug_dir, f"error_{provider}_{int(time.time()*1000)}.txt"
+                    )
+                    with open(err_file, "w") as f:
+                        f.write(
+                            f"Status: {resp.status_code}\nResponse: {resp.text}\nPrompt Hash: {prompt_hash}"
+                        )
+            except:
+                pass
+            return '{"output": "INTERNAL_ERROR", "new_cwd": null}'
+
+        resp_json = resp.json()
+        try:
+            if provider == "google":
+                text = resp_json["candidates"][0]["content"]["parts"][0]["text"]
+            elif provider == "openai":
+                text = resp_json["choices"][0]["message"]["content"]
+            elif provider == "ollama":
+                text = resp_json["response"]
+
+            text = text.strip()
+            # Strip Markdown
+            text = re.sub(r"^```[a-zA-Z0-9+-]*\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+            final_text = text.strip()
+
+            # Perform Risk Analysis if it's a command response
+            risk_score = 0
+            attack_stage = "Unknown"
+            explanation = None
+
+            if is_command and command:
+                try:
+                    analysis = self.analyze_command(command)
+                    risk_score = analysis.get("risk", 0)
+                    attack_stage = f"{analysis.get('type', 'Unknown')} ({analysis.get('stage', 'Unknown')})"
+                    explanation = analysis.get("explanation")
+                except Exception as e:
+                    log.warning(f"[LLM] Risk analysis failed: {e}")
+
+            # 2. Save to Universal Cache
+            universal_cache.set(
+                service="llm",
+                key=prompt_hash,
+                input_text=prompt,
+                output_text=final_text,
+                risk_score=risk_score,
+                attack_stage=attack_stage,
+                explanation=explanation,
+                ttl_days=30,
+            )
+            return final_text
+        except Exception as e:
+            log.error(f"[!] LLM Response Parsing Error ({provider}): {e}")
+            return '{"output": "Error: Parsing Failure.", "new_cwd": null}'
+
+    def _handle_provider_exception(self, e, tag):
+        log.error(f"[!] LLM Request Exception ({tag}): {e}")
+        try:
+            debug_dir = "/tmp/llm_debug"
+            if os.path.exists(debug_dir):
+                err_file = os.path.join(
+                    debug_dir, f"exception_{tag}_{int(time.time()*1000)}.txt"
+                )
+                with open(err_file, "w") as f:
+                    f.write(f"Exception: {e}\n")
+        except:
+            pass
+        return '{"output": "Error: Network Failure.", "new_cwd": null}'
 
     def verify_api(self):
         """Simple check to see if API Key works."""
@@ -342,7 +526,9 @@ class LLMInterface:
 
         prompt = template.replace("{command}", command)
 
-        raw_json = self._call_api(prompt, is_command=False)
+        raw_json = self._call_api(
+            prompt, command=command, is_command=False, protocol="analytics"
+        )
         try:
             data = json.loads(raw_json)
             return {
@@ -371,7 +557,9 @@ class LLMInterface:
             return {}
 
         # Prepare Input JSON
-        input_list = [{"hash": h, "text": t} for h, t in commands]
+        # Deduplicate commands by hash to save tokens
+        unique_map = {h: t for h, t in commands}
+        input_list = [{"hash": h, "text": t} for h, t in unique_map.items()]
         input_json = json.dumps(input_list, indent=2)
 
         try:
@@ -388,7 +576,66 @@ class LLMInterface:
              """
 
         prompt = template.replace("{commands_json}", input_json)
-        raw_json = self._call_api(prompt, is_command=False)
+
+        # --- DEBUG LOGGING START ---
+        try:
+            debug_dir = "/tmp/llm_debug"
+            if not os.path.exists(debug_dir):
+                os.makedirs(debug_dir)
+
+            # Simple rotation logic: check files, find max ID or timestamp
+            # Actually easier: use timestamp-based names, list all, sort, delete old
+            timestamp = int(time.time() * 1000)
+            prompt_file = os.path.join(debug_dir, f"prompt_{timestamp}.txt")
+            with open(prompt_file, "w") as f:
+                f.write(prompt)
+
+            # Cleanup older files (Keep last 20 prompts)
+            all_files = sorted(
+                [
+                    os.path.join(debug_dir, f)
+                    for f in os.listdir(debug_dir)
+                    if f.startswith("prompt_")
+                ]
+            )
+            if len(all_files) > 20:
+                for f in all_files[:-20]:
+                    try:
+                        os.remove(f)
+                    except:
+                        pass
+        except Exception as e:
+            log.warning(f"[LLM] Debug logging failed (prompt): {e}")
+        # --- DEBUG LOGGING END ---
+
+        raw_json = self._call_api(
+            prompt, command="BATCH", is_command=False, protocol="analytics"
+        )
+
+        # --- DEBUG LOGGING START (RESPONSE) ---
+        try:
+            resp_file = os.path.join(debug_dir, f"response_{timestamp}.txt")
+            with open(resp_file, "w") as f:
+                f.write(raw_json)
+
+            # Cleanup older files (Keep last 20 responses)
+            all_files = sorted(
+                [
+                    os.path.join(debug_dir, f)
+                    for f in os.listdir(debug_dir)
+                    if f.startswith("response_")
+                ]
+            )
+            if len(all_files) > 20:
+                for f in all_files[:-20]:
+                    try:
+                        os.remove(f)
+                    except:
+                        pass
+        except Exception as e:
+            log.warning(f"[LLM] Debug logging failed (response): {e}")
+        # --- DEBUG LOGGING END ---
+
         results = {}
 
         try:
@@ -457,7 +704,9 @@ class LLMInterface:
         }}
         """
 
-        raw_json = self._call_api(prompt, is_command=False)
+        raw_json = self._call_api(
+            prompt, command="SESSION", is_command=False, protocol="analytics"
+        )
         try:
             return json.loads(raw_json)
         except Exception as e:

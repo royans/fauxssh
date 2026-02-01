@@ -426,7 +426,7 @@ def handle_telnet_session(client_sock, addr, db, llm):
                             "llm_call_count": llm_call_count,
                             "file_list": [
                                 os.path.basename(x.get("path", ""))
-                                for x in db.list_user_dir(ip, user, cwd or "/")
+                                for x in (db.list_user_dir(ip, user, cwd or "/") or [])
                                 if x and x.get("path")
                             ],
                             "known_paths": list(vfs.keys()) if vfs else ["/"],
@@ -502,13 +502,15 @@ def handle_telnet_session(client_sock, addr, db, llm):
 
                     # Updates Prompt dynamic
                     is_cisco = False
-                    if "cisco" in config.get_persona_by_name("cisco_ios").get(
-                        "system", {}
-                    ).get("handler_type", "") or (
-                        persona_config
-                        and "cisco"
-                        in persona_config.get("system", {}).get("handler_type", "")
+                    cisco_persona = config.get_persona_by_name("cisco_ios")
+                    if cisco_persona and "cisco" in cisco_persona.get("system", {}).get(
+                        "handler_type", ""
                     ):
+                        is_cisco = True
+                    elif persona_config and "cisco" in persona_config.get(
+                        "system", {}
+                    ).get("handler_type", ""):
+                        is_cisco = True
                         is_cisco = True
 
                     if is_cisco:

@@ -41,13 +41,30 @@ class EventLogger:
         logger = logging.getLogger(LOGGER_NAME)
         logger.setLevel(logging.INFO)
 
-        if not logger.handlers:
+        # Check if we already have a file handler for this path to avoid duplicates
+        has_file_handler = False
+        if logger.handlers:
+            for h in logger.handlers:
+                if isinstance(h, logging.FileHandler):
+                    # Check if paths match (handling absolute/relative)
+                    try:
+                        if os.path.abspath(h.baseFilename) == os.path.abspath(
+                            configured_path
+                        ):
+                            has_file_handler = True
+                            break
+                    except Exception:
+                        pass
+
+        if not has_file_handler:
             handler = logging.FileHandler(configured_path)
             formatter = logging.Formatter("%(message)s")
             handler.setFormatter(formatter)
             logger.addHandler(handler)
             # Do not propagate to root logger to avoid console spam
             logger.propagate = False
+        else:
+            pass  # FileHandler already exists
 
         self._logger = logger
 

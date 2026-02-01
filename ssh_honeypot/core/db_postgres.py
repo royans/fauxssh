@@ -1509,6 +1509,8 @@ class PostgresBackend(DatabaseBackend):
                 WHERE ca.command_hash IS NULL
                 AND i.request_md5 IS NOT NULL
                 AND i.command != ''
+                AND i.command NOT LIKE 'CONNECT %%'
+                AND i.command NOT LIKE 'GET %%'
                 {protocol_filter}
                 ORDER BY i.id DESC
                 LIMIT %s
@@ -1558,6 +1560,7 @@ class PostgresBackend(DatabaseBackend):
             prev_time_filter = f"NOW() - INTERVAL '{hours*2} hours'"
 
             # IP Exclusion Filter
+            log.debug("[Postgres] Stats: Starting IP Filter setup")
             ip_filter = ""
             params = []
             if ignore_ips:
@@ -1869,8 +1872,8 @@ class PostgresBackend(DatabaseBackend):
             # Manual vs Bot
             query = f"""
                 SELECT 
-                    SUM(CASE WHEN command_count > 10 OR summary ILIKE '%manual%' THEN 1 ELSE 0 END) as manual_count,
-                    SUM(CASE WHEN command_count <= 10 AND (summary IS NULL OR summary NOT ILIKE '%manual%') THEN 1 ELSE 0 END) as bot_count
+                    SUM(CASE WHEN command_count > 10 OR summary ILIKE %s THEN 1 ELSE 0 END) as manual_count,
+                    SUM(CASE WHEN command_count <= 10 AND (summary IS NULL OR summary NOT ILIKE %s) THEN 1 ELSE 0 END) as bot_count
                 FROM (
                     SELECT s.session_id, s.summary, COUNT(i.id) as command_count
                     FROM sessions s
@@ -1879,7 +1882,8 @@ class PostgresBackend(DatabaseBackend):
                     GROUP BY s.session_id, s.summary
                 ) t
             """
-            cursor.execute(query, params)
+            # Copy params + manual filters safely
+            cursor.execute(query, params + ["%manual%", "%manual%"])
             row = cursor.fetchone()
             if row and len(row) >= 2:
                 stats["manual_vs_bot"] = {
@@ -1901,10 +1905,92 @@ class PostgresBackend(DatabaseBackend):
             ]
 
         except Exception as e:
-            log.error(f"[Postgres] Error fetching infographic stats: {e}")
+            log.error(f"[Postgres] Error fetching infographic stats (Global): {e}")
+            import traceback
+
+            log.error(traceback.format_exc())
         finally:
             conn.close()
         return stats
+
+    def get_recent_payloads(self, limit=10):
+        """Fetches recent malicious payloads with analysis context."""
+        conn = self._get_conn()
+        results = []
+        try:
+            c = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            c.execute(
+                """
+                SELECT p.id, p.timestamp, p.url, p.payload_md5, p.status, 
+                       p.virustotal_result, s.protocol, p.snippet, p.session_id
+                FROM malicious_payloads p
+                LEFT JOIN sessions s ON p.session_id = s.session_id
+                ORDER BY p.timestamp DESC LIMIT %s
+                """,
+                (limit,),
+            )
+
+            for row in c.fetchall():
+                pid = row["id"]
+                ts = row["timestamp"]
+                url = row["url"]
+                md5 = row["payload_md5"]
+                status = row["status"]
+                vt_res = row["virustotal_result"]
+                protocol = row["protocol"]
+                snippet = row["snippet"]
+                sid = row["session_id"]
+
+                # Parse Analysis
+                risk_score = 0
+                explanation = "Pending Analysis"
+
+                if vt_res and vt_res.startswith("{"):
+                    try:
+                        vt_data = json.loads(vt_res)
+                        stats = vt_data.get("stats", {})
+                        malicious = stats.get("malicious", 0)
+                        if malicious > 0:
+                            risk_score = min(malicious * 10, 100)
+                            explanation = f"Flagged by {malicious} engines"
+                        elif "error" in vt_data:
+                            explanation = "Analysis Error"
+                        elif "status" in vt_data and vt_data["status"] == "queued":
+                            explanation = "Queued for Analysis"
+                        else:
+                            explanation = "Clean / Unknown"
+                    except:
+                        pass
+
+                # Format Timestamp
+                if hasattr(ts, "isoformat"):
+                    ts = ts.isoformat()
+                else:
+                    ts = str(ts)
+
+                results.append(
+                    {
+                        "id": pid,
+                        "timestamp": ts,
+                        "url": url,
+                        "md5": md5,
+                        "status": status,
+                        "protocol": protocol,
+                        "risk_score": risk_score,
+                        "explanation": explanation,
+                        "snippet": snippet if snippet else "",
+                        "session_id": sid,
+                    }
+                )
+
+            return results
+        except Exception as e:
+            from ssh_honeypot.core.logging_setup import log
+
+            log.error(f"[Postgres] Error fetching recent payloads: {e}")
+            return []
+        finally:
+            conn.close()
 
     def get_daily_session_counts(self, days=7):
         """Returns session counts for each of the last X days."""

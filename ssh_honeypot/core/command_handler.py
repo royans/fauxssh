@@ -696,6 +696,23 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
         log.debug(f"[CMD_TRACE] Processing cmd: '{cmd}'")
 
+        # --- Real-Time Payload Extraction ---
+        try:
+            # We must use self.payload_manager initialized in __init__
+            # Extract from RAW command before any sanitization
+            urls = self.payload_manager.extract_urls(cmd)
+            if urls:
+                log.info(f"[PayloadManager] Found {len(urls)} URLs in command: {urls}")
+                for url in urls:
+                    self.payload_manager.queue_payload(
+                        url,
+                        context.get("session_id", "unknown"),
+                        client_ip,
+                        datetime.datetime.now(),
+                    )
+        except Exception as e:
+            log.error(f"[PayloadManager] Extraction error: {e}")
+
         # 0. Sanitization (Redirection stripping)
         # Strip non-printable characters but KEEP format control (LF, CR, Tab)
         # Keep only basic ASCII printable characters (32-126) + \n (10), \r (13), \t (9)
@@ -777,7 +794,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             not jailbroken
             and persona
             and (
-                persona.get("system", {}).get("handler_type") == "cisco_ios"
+                (persona.get("system") or {}).get("handler_type") == "cisco_ios"
                 or persona.get("handler_type") == "cisco_ios"
             )
         ):
@@ -1553,10 +1570,9 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
         # 1. Access Control
         # Bypass allowlist for Cisco Persona (let specific handlers or LLM decide)
-        persona = context.get("persona_config", {})
-        is_cisco = (
-            persona and persona.get("system", {}).get("handler_type") == "cisco_ios"
-        )
+        persona = context.get("persona_config") or {}
+        system_cfg = persona.get("system") or {}
+        is_cisco = system_cfg.get("handler_type") == "cisco_ios"
 
         # Bypass Cisco check if forced (Busybox)
         if context.get("force_unix_handlers"):
@@ -1581,11 +1597,10 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
         # 4. Dispatch to Specific Handlers (or generic LLM)
         # SKIP Unix Handlers if Cisco Persona
-        persona = context.get("persona_config", {})
-        if (
-            persona
-            and persona.get("system", {}).get("handler_type") == "cisco_ios"
-            and not context.get("force_unix_handlers")
+        persona = context.get("persona_config") or {}
+        system_cfg = persona.get("system") or {}
+        if system_cfg.get("handler_type") == "cisco_ios" and not context.get(
+            "force_unix_handlers"
         ):
             handler_name = None  # Force fallback to generic (LLM) which will simulate Cisco behavior
         else:
@@ -1649,10 +1664,10 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
             # Skip fallback too if Cisco
             use_fallback = True
-            if (
-                persona
-                and persona.get("system", {}).get("handler_type") == "cisco_ios"
-                and not context.get("force_unix_handlers")
+            persona = context.get("persona_config") or {}
+            system_cfg = persona.get("system") or {}
+            if system_cfg.get("handler_type") == "cisco_ios" and not context.get(
+                "force_unix_handlers"
             ):
                 use_fallback = False
 
@@ -1871,7 +1886,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         )
 
         # Sync Analysis Save
-        if up.get("analysis"):
+        if up and up.get("analysis"):
             try:
                 cmd_hash = hashlib.md5(cmd.encode("utf-8")).hexdigest()
                 self.db.save_analysis(cmd_hash, cmd, up["analysis"])

@@ -151,6 +151,7 @@ class HoneyMySQLHandler(MysqlServer):
                 honey_db, llm_interface, self.mysql_cfg
             ),
             identity_provider=HoneyMySQLIdentityProvider(honey_db, self.mysql_cfg),
+            server_version="5.5.5-10.6.12-MariaDB",
         )
 
     async def _client_connected_cb(self, reader, writer):
@@ -163,7 +164,14 @@ class HoneyMySQLHandler(MysqlServer):
             log.warning(f"[MySQL] Error extracting IP in _client_connected_cb: {e}")
 
         # Continue with standard mysql-mimic logic
-        await super()._client_connected_cb(reader, writer)
+        try:
+            await super()._client_connected_cb(reader, writer)
+        except Exception as e:
+            # Common for port scanners or early disconnects
+            if "unpack requires a buffer of 4 bytes" in str(e):
+                log.info(f"[MySQL] Client disconnected during handshake.")
+            else:
+                log.error(f"[MySQL] Error in client session: {e}")
 
     async def start_server(self, **kwargs):
         """Override to handle pre-bound socks safely"""

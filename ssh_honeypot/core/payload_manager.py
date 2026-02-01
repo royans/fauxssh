@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 from ssh_honeypot.core.database import HoneyDB
 from ssh_honeypot.core.config import config, get_data_dir
-from ssh_honeypot.core.utils import sanitize_path
+from ssh_honeypot.core.utils import sanitize_path, extract_snippet
 from ssh_honeypot.core.universal_cache import universal_cache
 
 try:
@@ -163,9 +163,6 @@ class PayloadManager:
                     f"[PayloadManager] Saved uploaded payload to {sanitize_path(file_path)}"
                 )
 
-            # Generate smart snippet
-            from ssh_honeypot.core.utils import extract_snippet
-
             snippet = extract_snippet(content_bytes)
 
             # Add to DB as 'completed' (ready for analysis)
@@ -257,11 +254,7 @@ class PayloadManager:
                     )
 
                 # Capture snippet (first 500 chars)
-                snippet = None
-                try:
-                    snippet = content[:500].decode("utf-8", "ignore")
-                except:
-                    snippet = str(content[:500])
+                snippet = extract_snippet(content)
 
                 self.db.update_payload_status(
                     payload_id,
@@ -535,11 +528,7 @@ class PayloadManager:
                         f.write(content)
 
                 # Capture snippet (first 500 chars)
-                snippet = None
-                try:
-                    snippet = content[:500].decode("utf-8", "ignore")
-                except:
-                    snippet = str(content[:500])
+                snippet = extract_snippet(content)
 
                 # Add to DB
                 self.db.add_malicious_payload(

@@ -68,6 +68,16 @@ class TestLoggingMetrics(unittest.TestCase):
         # Log an interaction via clogger (which now handles JSON logging)
         from ssh_honeypot.core.clogging import clogger
 
+        # Ensure clogger logs locally and immediately
+        clogger.log_mode = "local"
+        clogger.batch_size = 1
+        # Explicitly set slogger DB just in case (though we want local json mostly)
+        # clogger uses slogger for DB, but EventLogger for JSON.
+        # Ensure slogger points to our mock DB
+        from ssh_honeypot.core.slogging import slogger
+
+        slogger._db = self.db
+
         interaction_data = {
             "input": "ls -la",
             "response": "total 0",

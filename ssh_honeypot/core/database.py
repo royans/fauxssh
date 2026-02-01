@@ -2949,6 +2949,88 @@ class SQLiteBackend(DatabaseBackend):
         finally:
             conn.close()
 
+    def get_recent_payloads(self, limit=10):
+        """Fetches recent malicious payloads with analysis context."""
+        conn = self._get_conn()
+        results = []
+        try:
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT p.id, p.timestamp, p.url, p.payload_md5, p.status, 
+                       p.virustotal_result, s.protocol, p.snippet, p.session_id
+                FROM malicious_payloads p
+                LEFT JOIN sessions s ON p.session_id = s.session_id
+                ORDER BY p.timestamp DESC LIMIT ?
+                """,
+                (limit,),
+            )
+
+            for row in c.fetchall():
+                pid, ts, url, md5, status, vt_res, protocol, snippet, sid = row
+
+                # Parse Analysis
+                risk_score = 0
+                explanation = "Pending Analysis"
+
+                if vt_res and vt_res.startswith("{"):
+                    try:
+                        import json
+
+                        vt_data = json.loads(vt_res)
+                        # Try to extract risk if we stored it there, or default
+                        # If we have a 'classification' or 'stats', we can infer risk
+                        stats = vt_data.get("stats", {})
+                        malicious = stats.get("malicious", 0)
+                        if malicious > 0:
+                            risk_score = min(malicious * 10, 100)
+                            explanation = f"Flagged by {malicious} engines"
+                        elif "error" in vt_data:
+                            explanation = "Analysis Error"
+                        elif "status" in vt_data and vt_data["status"] == "queued":
+                            explanation = "Queued for Analysis"
+                        else:
+                            explanation = "Clean / Unknown"
+                    except:
+                        pass
+
+                # Check Universal Cache for richer AI analysis if available
+                # (We cache by file hash in payload manager)
+                if md5:
+                    from ssh_honeypot.core.universal_cache import universal_cache
+
+                    # Try 'payload_analysis' service cache
+                    cached = universal_cache.get("payload_analysis", md5)
+                    if cached:
+                        # If we have a cached analysis, it might be the JSON report
+                        # Ideally we'd store a high level summary too.
+                        # For now, let's trust the DB record or improve this logic later.
+                        pass
+
+                results.append(
+                    {
+                        "id": pid,
+                        "timestamp": ts,
+                        "url": url,
+                        "md5": md5,
+                        "status": status,
+                        "protocol": protocol,  # Can be None if derived from interactions/upload
+                        "risk_score": risk_score,  # Integer 0-100
+                        "explanation": explanation,
+                        "snippet": snippet if snippet else "",
+                        "session_id": sid,
+                    }
+                )
+
+            return results
+        except Exception as e:
+            from ssh_honeypot.core.logging_setup import log
+
+            log.error(f"[DB] Error fetching recent payloads: {e}")
+            return []
+        finally:
+            conn.close()
+
     def get_recent_high_risk_events(self, limit=10):
         """Fetches latest risky sessions and payloads for the ticker."""
         conn = self._get_conn()

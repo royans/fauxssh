@@ -54,7 +54,11 @@ DEFAULT_CONFIG_DICT = {
         "upload_files": True,
         "min_file_size": 500,
     },
-    "analytics": {"ignore_ips": [], "show_empty_sessions": False},
+    "analytics": {
+        "ignore_ips": [],
+        "show_empty_sessions": False,
+        "enabled_services": ["ssh", "telnet", "mysql", "redis", "llm-api", "mcp"],
+    },
     "alerting": {
         "webhook_url": "",
         "notify_threshold": 60,

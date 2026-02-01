@@ -218,6 +218,7 @@ db0:keys=52,expires=0,avg_ttl=0
                 [],
                 client_ip=client_ip,
                 override_prompt=prompt,
+                protocol="redis",
             )
 
             text_resp = resp.strip()

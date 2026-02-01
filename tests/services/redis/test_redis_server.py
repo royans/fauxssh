@@ -23,6 +23,9 @@ def is_port_open(port):
 class TestRedisServer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        from ssh_honeypot.core.universal_cache import universal_cache
+
+        universal_cache.clear_service("redis")
         cls.db = MagicMock()
         cls.db.get_cached_response.return_value = None
         cls.llm = MagicMock()
@@ -43,7 +46,6 @@ class TestRedisServer(unittest.TestCase):
             time.sleep(0.1)
 
     def test_ping(self):
-        self.llm.generate_response.reset_mock(return_value=True, side_effect=True)
         self.llm.generate_response.return_value = "PONG"
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect(("127.0.0.1", TEST_PORT))

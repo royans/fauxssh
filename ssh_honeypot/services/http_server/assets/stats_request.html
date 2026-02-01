@@ -741,6 +741,27 @@
                 </div>
             </div>
 
+            <!-- Recent Payloads (Full Width) -->
+            <div class="chart-box" id="box-payloads" style="display:none; border-color: var(--risk-high);">
+                <div class="chart-title">
+                    <h2 style="color: var(--risk-high);">Recent Malicious Payloads</h2>
+                </div>
+                <div class="table-wrap">
+                    <table class="table-fixed" id="table-payloads">
+                        <thead>
+                            <tr>
+                                <th style="width: 140px;">Timestamp</th>
+                                <th style="width: 80px;">Source</th>
+                                <th>URL / File</th>
+                                <th style="width: 80px;">MD5</th>
+                                <th>AI Analysis / Risk</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+
             <div style="margin-bottom: 25px;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 12px;">
                     <span style="font-size:0.9rem; font-weight:600; color:var(--text-main)">Protocol Filters</span>
@@ -1077,15 +1098,12 @@
         let cachedData = null;
 
         // Theme Management
-        function setTheme(theme) {
-            document.documentElement.setAttribute('data-theme', theme);
-            document.cookie = `theme=${theme}; path=/; max-age=31536000`; // 1 year
-            updateThemeIcon();
-        }
-
         function toggleTheme() {
             const current = document.documentElement.getAttribute('data-theme');
-            setTheme(current === 'dark' ? 'light' : 'dark');
+            const target = current === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', target);
+            setCookie("dashboard_theme", target, 365);
+            updateThemeIcon();
         }
 
         function updateThemeIcon() {
@@ -1097,14 +1115,6 @@
                 icon.innerHTML = '<path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>';
             }
         }
-
-        // Initialize Theme from Cookie
-        const getCookie = (name) => {
-            const value = `; ${document.cookie}`;
-            const parts = value.split(`; ${name}=`);
-            if (parts.length === 2) return parts.pop().split(';').shift();
-        };
-        setTheme(getCookie('theme') || 'dark');
 
         // Navigation
         function setView(view) {
@@ -1119,6 +1129,7 @@
         function setWindow(w) {
             currentWindow = w;
             document.querySelectorAll('.range-btn').forEach(btn => btn.classList.toggle('active', btn.innerText === w));
+            setCookie("dashboard_granularity", w, 30);
             if (cachedData) renderDashboard();
         }
 
@@ -1130,17 +1141,6 @@
 
         const esc = s => s ? String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": "&#39;" }[m])) : '';
 
-        function loadSettings() {
-            const raw = getCookie('dashboard_settings');
-            if (raw) {
-                try {
-                    const parsed = JSON.parse(raw);
-                    settings = { ...settings, ...parsed };
-                } catch (e) { }
-            }
-            document.getElementById('toggle-hide-empty').checked = settings.hideEmpty;
-            updateFilterUI();
-        }
 
         function updateSettings() {
             settings.hideEmpty = document.getElementById('toggle-hide-empty').checked;
@@ -1258,6 +1258,7 @@
             ).join('');
 
             renderKillChain(data.kill_chain);
+            renderPayloads(data.recent_payloads);
             renderChart();
         }
 
@@ -1302,6 +1303,20 @@
                 leg.innerHTML = `<span style="color:${color}; font-size: 1rem; vertical-align: middle">●</span> ${stage}`;
                 legend.appendChild(leg);
             });
+        }
+
+        function renderPayloads(payloads) {
+            const box = document.getElementById('box-payloads');
+            const tbody = document.querySelector('#table-payloads tbody');
+            if (!payloads || payloads.length === 0) { box.style.display = 'none'; return; }
+            box.style.display = 'block';
+            tbody.innerHTML = payloads.slice(0, 10).map(p =>
+                `<tr onclick="openReplay('${p.session_id}')" style="cursor:pointer">
+                    <td class="col-main"><code>${esc(p.url)}</code></td>
+                    <td class="col-m1">${esc(p.method)}</td>
+                    <td class="col-m2" style="color:var(--text-dim)">${esc(p.ip)}</td>
+                </tr>`
+            ).join('');
         }
 
         async function openReplay(sessionId, cmd = null) {
@@ -1528,9 +1543,50 @@
             }
         });
 
+        // --- Persistence Helpers ---
+        function setCookie(name, value, days) {
+            let expires = "";
+            if (days) {
+                const date = new Date();
+                date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
+                expires = "; expires=" + date.toUTCString();
+            }
+            document.cookie = name + "=" + (value || "") + expires + "; path=/; SameSite=Strict";
+        }
+
+        function getCookie(name) {
+            const nameEQ = name + "=";
+            const ca = document.cookie.split(';');
+            for (let i = 0; i < ca.length; i++) {
+                let c = ca[i];
+                while (c.charAt(0) == ' ') c = c.substring(1, c.length);
+                if (c.indexOf(nameEQ) == 0) return c.substring(nameEQ.length, c.length);
+            }
+            return null;
+        }
+
+        function loadSettings() {
+            // Restore Window Granularity
+            const savedWindow = getCookie("dashboard_granularity");
+            if (savedWindow && ['1H', '1D', '1W'].includes(savedWindow)) {
+                currentWindow = savedWindow;
+                document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+                const btn = document.getElementById('btn-' + currentWindow);
+                if (btn) btn.classList.add('active');
+            }
+
+            // Restore Theme
+            const savedTheme = getCookie("dashboard_theme");
+            if (savedTheme) {
+                document.documentElement.setAttribute('data-theme', savedTheme);
+                updateThemeIcon();
+            }
+        }
+        // Initialize
         loadSettings();
-        refreshData();
-        setInterval(refreshData, 60000);
+        updateThemeIcon();
+        refreshData(); // Changed 'fetchData' to 'refreshData'
+        setInterval(refreshData, 10000); // Live update
     </script>
 </body>
 

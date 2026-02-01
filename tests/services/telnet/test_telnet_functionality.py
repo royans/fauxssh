@@ -33,7 +33,8 @@ class MockDB:
 
 
 class MockLLM:
-    pass
+    def generate_response(self, *args, **kwargs):
+        return "Mock Response"
 
 
 @pytest.fixture(scope="module")

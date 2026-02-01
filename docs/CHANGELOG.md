@@ -10,6 +10,12 @@
 - **Persona Engine Robustness**: Handlers for `last` and `who` now gracefully handle persona user data whether it's stored as a string, list, or dictionary.
 - **Production Config Priority**: Refactored `.env` loading to ensure parent-directory configurations (production) correctly override local defaults.
 
+### Reliability & Fixes
+- **Payload Extraction Robustness**: Patched critical issue where obfuscated commands (e.g., `echo ... ; !u curl ...`) bypassed URL detection. Added real-time extraction hook in `CommandHandler`.
+- **Snippet Noise Reduction**: Filtered out short binary strings (<10 chars) from dashboard payload previews to remove "garbage" lines like `UPX!`.
+- **Telnet Stability**: Fixed `NoneType` crash in Telnet service caused by null persona keys (`system: null`), preventing service restarts.
+- **Logging Tests**: Resolved `JSONDecodeError` and empty log file issues in test environment by robustly handling handler collisions.
+
 
 ## Weekly Changelog: Jan 25th 2026
 

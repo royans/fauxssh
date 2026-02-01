@@ -123,6 +123,19 @@ class UniversalCache:
         return True
 
     @staticmethod
+    def clear_service(service):
+        """Removes all items for a specific service."""
+        db = get_db_backend()
+        # This is a bit heavy but safe.
+        # Future: implement db.delete_service_cache(service)
+        try:
+            keys = db.get_cache_keys(service)
+            for item in keys:
+                UniversalCache.delete(service, item["cache_key"])
+        except Exception as e:
+            log.warning(f"[UniversalCache] Failed to clear service {service}: {e}")
+
+    @staticmethod
     def set(
         service,
         key,

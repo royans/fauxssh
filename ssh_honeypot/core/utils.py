@@ -227,7 +227,8 @@ def extract_snippet(content, max_len=500):
     import re
 
     # Bytes regex for printable strings
-    pattern = re.compile(b"[ -~\\t\\r\\n]{4,}")
+    # Increased minimum length to 10 to reduce noise (like "UPX!", ";NX", etc)
+    pattern = re.compile(b"[ -~\\t\\r\\n]{10,}")
 
     found = pattern.findall(content_bytes)
     if not found:

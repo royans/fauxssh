@@ -211,6 +211,66 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                     self.end_headers()
                     return
 
+                except Exception as e:
+                    log.error(f"[HTTP] Error in session_details api: {e}")
+                    self.send_response(500)
+                    self.end_headers()
+                    return
+
+        # 0.5 Local CONNECT Handler (Bypass LLM)
+        if method == "CONNECT":
+            try:
+                # Send 200 Connection Established (Fake)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(b"")
+
+                # Log Interaction
+                seed = f"{client_ip}_{int(time.time() / 3600)}"
+                session_id = hashlib.md5(seed.encode()).hexdigest()[:16]
+
+                # Register session if needed
+                try:
+                    session_data = {
+                        "username": "www-data",
+                        "password": "none",
+                        "client_version": self.headers.get("User-Agent", "Unknown"),
+                        "fingerprint": "http",
+                    }
+                    clogger.log_event(
+                        "session_start",
+                        session_data,
+                        session_id=session_id,
+                        ip=client_ip,
+                        protocol="http",
+                    )
+                except:
+                    pass
+
+                interaction_data = {
+                    "cwd": "HTTP_ROOT",
+                    "input": f"{method} {self.path}",
+                    "response": "[Local Handler: CONNECT]",
+                    "source": "handler",
+                    "request_md5": hashlib.md5(
+                        f"HTTP CONNECT {self.path}".encode()
+                    ).hexdigest(),
+                    "user_agent": self.headers.get("User-Agent", "-"),
+                }
+                clogger.log_event(
+                    "interaction",
+                    interaction_data,
+                    session_id=session_id,
+                    ip=client_ip,
+                    protocol="http",
+                )
+                return
+            except Exception as e:
+                log.error(f"[HTTP] CONNECT Handler Error: {e}")
+                return
+
         # 1. DoS Protection (Honeypot requests only)
         if not dos_protector.is_allowed(client_ip, "HTTP"):
             try:
@@ -401,6 +461,7 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                     analyze_risk=True,
                     request_md5=request_md5,
                     db=db,
+                    protocol="http",
                 )
 
                 # Strip markdown just in case the LLM ignored instructions

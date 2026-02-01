@@ -23,6 +23,7 @@ class LLMConfig(BaseModel):
     max_tokens: int = 2048
     temperature: float = 1.0
     timeout: int = 60
+    force_ipv4: bool = False
 
 
 class LoggingConfig(BaseModel):
@@ -144,7 +145,7 @@ class AnalyticsConfig(BaseModel):
     ignore_ips: List[str] = Field(default_factory=list)
     show_empty_sessions: bool = False
     enabled_services: List[str] = Field(
-        default_factory=lambda: ["ssh", "telnet", "mysql"]
+        default_factory=lambda: ["ssh", "telnet", "mysql", "redis", "llm-api", "mcp"]
     )
 
 

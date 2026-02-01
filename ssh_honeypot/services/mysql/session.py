@@ -356,7 +356,7 @@ class HoneyMySQLSession(MysqlSession):
         """
 
         try:
-            resp = self.llm_interface.query(prompt)
+            resp = self.llm_interface.query(prompt, protocol="mysql")
             # Clean and parse JSON
             import json
             import re

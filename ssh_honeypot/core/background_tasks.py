@@ -167,6 +167,7 @@ def run_stats_generation_job(db_instance):
                 "daily_21d": db_instance.get_daily_session_counts(days=21),
             },
             "recent_high_risk": db_instance.get_recent_high_risk_events(limit=15),
+            "recent_payloads": db_instance.get_recent_payloads(limit=15),
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -277,6 +278,10 @@ def run_payload_recovery_job(db_instance):
                 sid = row["session_id"]
                 ip = row["remote_ip"]
 
+                # Skip HTTP CONNECT/GET for payload analysis
+                if cmd_text.startswith("CONNECT ") or cmd_text.startswith("GET "):
+                    continue
+
                 # Update cursor
                 if cmd_id > _payload_recovery_cursor:
                     _payload_recovery_cursor = cmd_id
@@ -375,11 +380,10 @@ def start_background_tasks(db_instance, llm_instance):
             "cleanup", lambda: run_cleanup_job(db_instance), interval_seconds=3600
         )
 
-        # 2. Command Analysis (Every 10 seconds)
         scheduler.register_job(
             "llm_analysis",
             lambda: run_analysis_batch(db_instance, llm_instance, alert_manager),
-            interval_seconds=10,
+            interval_seconds=30,
         )
 
         # 2.5. Session Analysis (Every 30 seconds)

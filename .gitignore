@@ -230,4 +230,5 @@ data/personas/*
 
 # Test Data
 .testmondata*
+test_metrics.sqlite*
 

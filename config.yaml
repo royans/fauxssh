@@ -48,11 +48,16 @@ analytics:
   ignore_ips: [] # ENV: ANALYTICS_IGNORE_IPS (comma-separated)
   show_empty_sessions: false
   batch_size: 10
+  # Which services should have their commands/requests analyzed by LLM (Risk detection)
+  # Default: ssh, telnet, mysql. HTTP is disabled by default to reduce token usage and noise.
   enabled_services:
     - "ssh"
     - "telnet"
     - "mysql"
-    # - "http" # HTTP disabled by default for risk analysis to save tokens
+    - "redis"
+    - "llm-api"
+    - "mcp"
+    # - "http"
 
 alerting:
   webhook_url: "" # ENV: ALERTING_WEBHOOK_URL
@@ -88,8 +93,10 @@ mcp:
   throttle_delay: 2.0
 
 llm:
+  provider: "google" # Options: [google, openai, ollama]
   model_name: "gemma-3-27b-it"
   api_key: "" # ENV: LLM_API_KEY
+  force_ipv4: true
 
 llm_api:
   ollama:

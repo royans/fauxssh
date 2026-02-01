@@ -59,6 +59,7 @@ llm:
   model_name: "gemma-3-27b-it"  # Google Gemini model
   max_tokens: 2048
   temperature: 1.0
+  force_ipv4: false             # Force IPv4 for API calls (useful if IPv6 geolocation fails)
 
 upload:
   max_file_size: 1048576        # 1MB limit for SFTP/SCP
