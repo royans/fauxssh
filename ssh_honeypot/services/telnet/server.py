@@ -445,20 +445,47 @@ def handle_telnet_session(client_sock, addr, db, llm):
                         # Resilient Unpacking
                         try:
                             res_obj = handler.process_command(cmd, context)
-                            if isinstance(res_obj, (list, tuple)) and len(res_obj) == 3:
-                                resp_text, updates, metadata = res_obj
-                            elif (
-                                isinstance(res_obj, (list, tuple)) and len(res_obj) == 2
-                            ):
-                                resp_text, updates = res_obj
-                                metadata = {"source": "legacy", "cached": False}
+                            if isinstance(res_obj, (list, tuple)) and len(res_obj) >= 2:
+                                resp_text = res_obj[0]
+                                updates = res_obj[1] or {}
+                                metadata = (
+                                    res_obj[2]
+                                    if len(res_obj) > 2
+                                    else {"source": "handler", "cached": False}
+                                )
                             else:
-                                raise ValueError(f"Invalid handler return: {res_obj}")
+                                # Fallback for unexpected return types
+                                resp_text = str(res_obj) if res_obj is not None else ""
+                                updates = {}
+                                metadata = {"source": "handler", "cached": False}
+
+                            if resp_text:
+                                client_sock.sendall(
+                                    resp_text.replace("\n", "\r\n").encode()
+                                )
+
+                            if updates:
+                                if updates.get("new_cwd"):
+                                    new_dir = updates.get("new_cwd")
+                                    if new_dir:
+                                        cwd = new_dir
+                                        prompt = f"{user}@{hostname}:{cwd}$ "
+                                if updates.get("env") and isinstance(
+                                    updates.get("env"), dict
+                                ):
+                                    # Merge env updates
+                                    env.update(updates.get("env"))
+
                         except Exception as e:
                             log.error(f"[Telnet] Command Execution Error: {e}")
-                            resp_text = f"% Error processing command: {e}\r\n"
-                            updates = {}
-                            metadata = {"source": "error", "cached": False}
+                            # Suppress raw traceback in standard logs unless DEBUG is set
+                            # We can still log the fact that an error occurred.
+                            if os.getenv("SSHPOT_DEBUG", "false").lower() == "true":
+                                import traceback
+
+                                traceback.print_exc()
+
+                            client_sock.sendall(b"Internal error executing command\r\n")
                         duration = time.time() - start_time
 
                         llm_call_count += 1
@@ -466,10 +493,14 @@ def handle_telnet_session(client_sock, addr, db, llm):
                         # Apply Updates
                         if updates:
                             if updates.get("new_cwd"):
-                                cwd = updates.get("new_cwd")
-                                if cwd not in vfs:
-                                    vfs[cwd] = []
-                            if updates.get("env"):
+                                new_dir = updates.get("new_cwd")
+                                if new_dir:
+                                    cwd = new_dir
+                                    if cwd not in vfs:
+                                        vfs[cwd] = []
+                            if updates.get("env") and isinstance(
+                                updates.get("env"), dict
+                            ):
                                 env.update(updates["env"])
 
                         # Send Output

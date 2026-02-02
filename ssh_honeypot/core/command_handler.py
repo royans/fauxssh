@@ -672,14 +672,18 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
         return [p for p in parts if p]
 
-    def process_command(self, cmd, context):
+    def process_command(self, cmd, context=None):
         """
         Input: cmd (str), context (dict)
         Output: (response_text_for_user, updates_dict, metadata)
         updates_dict = {'new_cwd': str, 'file_modifications': list}
         metadata = {'source': 'llm'|'llm-cache'|'handler'|'handler-cache'|'chain', 'cached': bool}
         """
-        cwd = context.setdefault("cwd", "/")
+        if context is None:
+            context = {}
+
+        cwd = context.get("cwd") or "/"
+        context["cwd"] = cwd
         vfs = context.get("vfs", {})
         history = context.get("history", [])
         client_ip = context.get("client_ip", "Unknown")
@@ -690,8 +694,8 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             self.llm
         )  # Ensure LLM is available (critical for dynamic handlers)
 
-        # Initialize env if not present
-        if "env" not in context:
+        # Initialize env if not present or None
+        if context.get("env") is None:
             context["env"] = {}
 
         log.debug(f"[CMD_TRACE] Processing cmd: '{cmd}'")
@@ -707,8 +711,9 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     self.payload_manager.queue_payload(
                         url,
                         context.get("session_id", "unknown"),
-                        client_ip,
+                        context.get("ip", "unknown"),
                         datetime.datetime.now(),
+                        command_text=cmd,
                     )
         except Exception as e:
             log.error(f"[PayloadManager] Extraction error: {e}")
@@ -787,7 +792,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             return self.nohup_handler.handle(cmd, context, self.process_command)
 
         # --- PERSONA DISPATCH ---
-        persona = context.get("persona_config", {})
+        persona = context.get("persona_config") or {}
         jailbroken = context.get("env", {}).get("cisco_jailbreak", False)
 
         if (
@@ -968,7 +973,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 "",
                 {
                     "env": new_env,
-                    "file_modifications": updates.get("file_modifications", []),
+                    "file_modifications": (updates or {}).get("file_modifications", []),
                 },
                 {"source": "handler", "cached": False},
             )
@@ -1029,7 +1034,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                                 if v:
                                     final_updates["file_modifications"].extend(v)
 
-                num_cached = sum(1 for m in sub_metas if m.get("cached"))
+                num_cached = sum(1 for m in sub_metas if m and m.get("cached"))
                 source = "chain"
                 if num_cached == len(parts) and len(parts) > 0:
                     source = "chain-cache"
@@ -1083,7 +1088,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                                 if v:
                                     final_updates["file_modifications"].extend(v)
 
-                num_cached = sum(1 for m in sub_metas if m.get("cached"))
+                num_cached = sum(1 for m in sub_metas if m and m.get("cached"))
                 executed_parts = len(sub_metas)
                 source = "chain"
                 if num_cached == executed_parts and executed_parts > 0:
@@ -1652,10 +1657,13 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     log.debug(f"[Cache] Handler store error: {e}")
 
             # Allow handlers to return custom metadata (esp. for hybrid handlers like cat)
-            if len(res) == 3:
-                return res[0], res[1], res[2]
+            if res and len(res) == 3:
+                return res[0], (res[1] or {}), (res[2] or {})
+            elif res and len(res) == 2:
+                return res[0], (res[1] or {}), {"source": "handler", "cached": False}
             else:
-                return res[0], res[1], {"source": "handler", "cached": False}
+                log.warning(f"Handler {handler_name} returned invalid format: {res}")
+                return "", {}, {"source": "error", "cached": False}
         else:
             # Fallback: Try basename (e.g. /bin/ls -> ls, /bin/./uname -> uname)
             normalized_base = os.path.basename(base_cmd)
@@ -1676,10 +1684,15 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     random_response_delay(0.5, 1.5)
                 # We pass the ORIGINAL cmd to the handler, it must handle parsing if needed.
                 res = getattr(self, handler_name_norm)(cmd, context)
-                if len(res) == 3:
-                    return res[0], res[1], res[2]
-                return res[0], res[1], {"source": "handler", "cached": False}
-                return res[0], res[1], {"source": "handler", "cached": False}
+                if res and len(res) == 3:
+                    return res[0], (res[1] or {}), (res[2] or {})
+                elif res and len(res) == 2:
+                    return (
+                        res[0],
+                        (res[1] or {}),
+                        {"source": "handler", "cached": False},
+                    )
+                return "", {}, {"source": "handler", "cached": False}
 
             return self.handle_generic(cmd, context)
 

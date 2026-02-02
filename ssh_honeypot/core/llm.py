@@ -215,7 +215,7 @@ class LLMInterface:
             log.error(f"[!] Prompt Formatting Error: {e}")
             return '{"output": "Error: Internal System Error", "new_cwd": null}'
 
-        res = self._call_api(prompt, protocol=protocol)
+        res = self._call_api(prompt, command=command, protocol=protocol)
         if "INTERNAL_ERROR" in res:
             return self._get_bash_fallback(command, protocol=protocol)
         return res

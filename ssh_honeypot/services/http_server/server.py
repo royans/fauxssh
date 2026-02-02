@@ -127,9 +127,10 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
         client_ip = self.get_client_ip()
 
         # 0. Management & Stats (Bypass logging and DoS)
-        is_mgmt = self.path in MANAGEMENT_PATHS or self.path.startswith("/api/")
+        clean_path = self.path.split("?")[0]
+        is_mgmt = clean_path in MANAGEMENT_PATHS or clean_path.startswith("/api/")
         if config.get("http", "showstats") and is_mgmt:
-            if self.path in [
+            if clean_path in [
                 "/stats_request.html",
                 "/stats_request",
                 "/status_request.html",
@@ -153,7 +154,7 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                 except Exception as e:
                     log.error(f"[HTTP] Error serving stats dashboard: {e}")
 
-            if self.path == "/status_data.json":
+            if clean_path == "/status_data.json":
                 try:
                     from ssh_honeypot.core.utils import PROJECT_ROOT
 
@@ -184,7 +185,113 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                 except Exception as e:
                     log.error(f"[HTTP] Error serving stats data: {e}")
 
-            if self.path.startswith("/api/session_details"):
+            if clean_path.startswith("/api/payloads"):
+                try:
+                    from urllib.parse import parse_qs, urlparse
+
+                    # Check Cache
+                    cache_key = hashlib.md5(self.path.encode()).hexdigest()
+                    cached = universal_cache.get("api_cache", cache_key)
+                    if cached:
+                        resp = cached["output_text"].encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(resp)))
+                        self.send_header("X-Cache", "HIT")
+                        self.end_headers()
+                        self.wfile.write(resp)
+                        return
+
+                    query = parse_qs(urlparse(self.path).query)
+                    hours = int(query.get("hours", [24])[0])
+                    data = self.server.honey_db.get_payload_summary(hours=hours)
+
+                    from ssh_honeypot.core.utils import obfuscate_ip
+
+                    for p in data:
+                        if "ip" in p:
+                            p["ip"] = obfuscate_ip(p["ip"])
+                        if "sample_url" in p:
+                            p["sample_url"] = "Hidden"
+
+                    json_data = json.dumps(data, default=str)
+                    universal_cache.set(
+                        "api_cache", cache_key, json_data, ttl_days=0.02
+                    )
+
+                    resp = json_data.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(resp)))
+                    self.send_header("X-Cache", "MISS")
+                    self.end_headers()
+                    self.wfile.write(resp)
+                    return
+                except Exception as e:
+                    log.error(f"[HTTP] Error in payloads api: {e}")
+                    self.send_response(500)
+                    self.end_headers()
+                    return
+
+            if clean_path.startswith("/api/payload_details"):
+                try:
+                    from urllib.parse import parse_qs, urlparse
+
+                    # Check Cache
+                    cache_key = hashlib.md5(self.path.encode()).hexdigest()
+                    cached = universal_cache.get("api_cache", cache_key)
+                    if cached:
+                        resp = cached["output_text"].encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(resp)))
+                        self.send_header("X-Cache", "HIT")
+                        self.end_headers()
+                        self.wfile.write(resp)
+                        return
+
+                    query = parse_qs(urlparse(self.path).query)
+                    md5 = query.get("md5", [None])[0]
+                    if md5:
+                        data = self.server.honey_db.get_payload_details(md5)
+                        if data:
+                            # Hide sensitive info
+                            from ssh_honeypot.core.utils import obfuscate_ip
+
+                            data["url"] = "Hidden"
+                            if "ip" in data:
+                                data["ip"] = obfuscate_ip(data["ip"])
+
+                            if "occurrences" in data:
+                                for occ in data["occurrences"]:
+                                    if "ip" in occ:
+                                        occ["ip"] = obfuscate_ip(occ["ip"])
+
+                            json_data = json.dumps(data, default=str)
+                            # Cache for 30 mins
+                            universal_cache.set(
+                                "api_cache", cache_key, json_data, ttl_days=0.02
+                            )
+
+                            resp = json_data.encode("utf-8")
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json")
+                            self.send_header("Content-Length", str(len(resp)))
+                            self.send_header("X-Cache", "MISS")
+                            self.end_headers()
+                            self.wfile.write(resp)
+                            return
+
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                except Exception as e:
+                    log.error(f"[HTTP] Error in payload_details api: {e}")
+                    self.send_response(500)
+                    self.end_headers()
+                    return
+
+            if clean_path.startswith("/api/session_details"):
                 try:
                     from urllib.parse import parse_qs, urlparse
 

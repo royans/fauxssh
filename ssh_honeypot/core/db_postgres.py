@@ -75,9 +75,9 @@ class PostgresBackend(DatabaseBackend):
 
     def _init_pool(self):
         try:
-            log.info("[Postgres] Initializing Connection Pool (min=1, max=20)...")
+            log.info("[Postgres] Initializing Connection Pool (min=1, max=100)...")
             self._pool = psycopg2.pool.ThreadedConnectionPool(
-                minconn=1, maxconn=20, **self.conn_params
+                minconn=1, maxconn=100, **self.conn_params
             )
         except Exception as e:
             log.error(f"[Postgres] Failed to initialize connection pool: {e}")
@@ -141,6 +141,16 @@ class PostgresBackend(DatabaseBackend):
             return 0
         finally:
             conn.close()
+
+    def _clean_str(self, val):
+        """
+        Removes NUL characters and ensures value is a string or None.
+        """
+        if val is None:
+            return None
+        if not isinstance(val, str):
+            val = str(val)
+        return val.replace("\x00", "")
 
     def _init_db(self):
         """
@@ -316,36 +326,36 @@ class PostgresBackend(DatabaseBackend):
                 """,
                     (
                         session_id,
-                        cwd,
-                        command,
-                        response,
+                        self._clean_str(cwd),
+                        self._clean_str(command),
+                        self._clean_str(response),
                         source,
                         request_md5,
                         response_md5,
-                        response_head,
+                        self._clean_str(response_head),
                         response_size,
                         created_at,
                     ),
                 )
             else:
-                # Ensure session exists (handle race condition where session record isn't committed yet)
+                # Ensure session exists (handle race condition)
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT 1 FROM sessions WHERE session_id = %s", (session_id,)
                 )
                 if not cursor.fetchone():
-                    # Session not found? We might want to create a dummy session or retry
-                    # For now, let's retry once if it's likely a commit lag
-                    time.sleep(0.1)
-                    cursor.execute(
-                        "SELECT 1 FROM sessions WHERE session_id = %s", (session_id,)
-                    )
-                    if not cursor.fetchone():
-                        # Still not found? Log as debug and skip to avoid FK violation crash
-                        log.debug(
-                            f"[Postgres] Warning: Session {session_id} not found for interaction. Skipping interaction log."
+                    # Instead of skipping, insert a stub session to satisfy FK
+                    try:
+                        cursor.execute(
+                            "INSERT INTO sessions (session_id, remote_ip, timestamp) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                            (session_id, "unknown", datetime.datetime.now()),
                         )
-                        return
+                        conn.commit()
+                        cursor = conn.cursor()  # Refresh cursor after commit
+                    except Exception as ex:
+                        log.debug(f"[Postgres] Stub session creation failed: {ex}")
+                        conn.rollback()
+                        cursor = conn.cursor()
 
                 query = """
                     INSERT INTO interactions (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size, duration_ms, timestamp)
@@ -355,13 +365,13 @@ class PostgresBackend(DatabaseBackend):
                     query,
                     (
                         session_id,
-                        cwd,
-                        command,
-                        response,
+                        self._clean_str(cwd),
+                        self._clean_str(command),
+                        self._clean_str(response),
                         source,
                         request_md5,
                         response_md5,
-                        response_head,
+                        self._clean_str(response_head),
                         response_size,
                         duration_ms,
                         created_at if created_at else datetime.datetime.now(),
@@ -492,23 +502,50 @@ class PostgresBackend(DatabaseBackend):
             conn.close()
 
     def log_url_request(
-        self, session_id, url, method="GET", user_agent=None, command_text=None
+        self,
+        session_id,
+        url,
+        method="GET",
+        user_agent=None,
+        command_text=None,
+        created_at=None,
     ):
+        """
+        Consolidated URL logging.
+        Now redirects to add_malicious_payload to maintain a single source of truth.
+        """
+        import hashlib
+
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+
+        # Try to resolve IP from session
+        client_ip = "Unknown"
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
             cursor.execute(
-                """
-                INSERT INTO requested_urls (session_id, url, method, user_agent, command_text)
-                VALUES (%s, %s, %s, %s, %s)
-            """,
-                (session_id, url, method, user_agent, command_text),
+                "SELECT ip FROM sessions WHERE session_id = %s", (session_id,)
             )
-            conn.commit()
-        except Exception as e:
-            log.error(f"[Postgres] Error logging URL request: {e}")
+            row = cursor.fetchone()
+            if row:
+                client_ip = row[0]
+        except:
+            pass
         finally:
             conn.close()
+
+        self.add_malicious_payload(
+            url=url,
+            url_hash=url_hash,
+            session_id=session_id,
+            ip=client_ip,
+            timestamp=created_at,
+            method=method,
+            user_agent=user_agent,
+            command_text=command_text,
+            status="discovered",
+            analysis_stage="Pending",
+        )
 
     def log_auth_event(
         self,
@@ -555,17 +592,17 @@ class PostgresBackend(DatabaseBackend):
                 """,
                     (
                         client_ip,
-                        username,
-                        auth_method,
+                        self._clean_str(username),
+                        self._clean_str(auth_method),
                         (
-                            json.dumps(auth_data)
+                            self._clean_str(json.dumps(auth_data))
                             if isinstance(auth_data, dict)
-                            else auth_data
+                            else self._clean_str(auth_data)
                         ),
                         success,
-                        client_version,
-                        fp_json,
-                        protocol,
+                        self._clean_str(client_version),
+                        self._clean_str(fp_json),
+                        self._clean_str(protocol),
                     ),
                 )
             conn.commit()
@@ -952,12 +989,9 @@ class PostgresBackend(DatabaseBackend):
     def cleanup_http_cache(self, web_root="/var/www/html"):
         conn = self._get_conn()
         try:
-            cursor = conn.cursor()
-            cursor.execute(
-                "DELETE FROM command_cache WHERE command LIKE 'wget%%' OR command LIKE 'curl%%'"
-            )
-            conn.commit()
-            log.info(f"[Postgres] HTTP Cache cleared for {web_root}")
+            # Note: HTTP Cache is now handled by UniversalCache.delete_service("http_cache")
+            # This method is kept for API compatibility but the legacy table is gone.
+            log.info(f"[Postgres] HTTP Cache legacy cleanup skipped (Table gone)")
         except Exception as e:
             log.error(f"[Postgres] Error clearing HTTP cache: {e}")
         finally:
@@ -1918,12 +1952,14 @@ class PostgresBackend(DatabaseBackend):
         conn = self._get_conn()
         results = []
         try:
-            c = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            c = conn.cursor()
             c.execute(
                 """
                 SELECT p.id, p.timestamp, p.url, p.payload_md5, p.status, 
-                       p.virustotal_result, s.protocol, p.snippet, p.session_id
+                       a.virustotal_result, s.protocol, p.snippet, p.session_id,
+                       a.risk_score, a.analysis_summary
                 FROM malicious_payloads p
+                LEFT JOIN payload_analysis a ON p.payload_md5 = a.payload_md5
                 LEFT JOIN sessions s ON p.session_id = s.session_id
                 ORDER BY p.timestamp DESC LIMIT %s
                 """,
@@ -1931,27 +1967,33 @@ class PostgresBackend(DatabaseBackend):
             )
 
             for row in c.fetchall():
-                pid = row["id"]
-                ts = row["timestamp"]
-                url = row["url"]
-                md5 = row["payload_md5"]
-                status = row["status"]
-                vt_res = row["virustotal_result"]
-                protocol = row["protocol"]
-                snippet = row["snippet"]
-                sid = row["session_id"]
+                (
+                    pid,
+                    ts,
+                    url,
+                    md5,
+                    status,
+                    vt_res,
+                    protocol,
+                    snippet,
+                    sid,
+                    risk_score,
+                    analysis_summary,
+                ) = row
 
                 # Parse Analysis
-                risk_score = 0
-                explanation = "Pending Analysis"
+                final_risk_score = risk_score or 0
+                explanation = analysis_summary or "Pending Analysis"
 
-                if vt_res and vt_res.startswith("{"):
+                if vt_res and vt_res.startswith("{") and not final_risk_score:
                     try:
+                        import json
+
                         vt_data = json.loads(vt_res)
                         stats = vt_data.get("stats", {})
                         malicious = stats.get("malicious", 0)
                         if malicious > 0:
-                            risk_score = min(malicious * 10, 100)
+                            final_risk_score = min(malicious * 10, 100)
                             explanation = f"Flagged by {malicious} engines"
                         elif "error" in vt_data:
                             explanation = "Analysis Error"
@@ -1962,21 +2004,17 @@ class PostgresBackend(DatabaseBackend):
                     except:
                         pass
 
-                # Format Timestamp
-                if hasattr(ts, "isoformat"):
-                    ts = ts.isoformat()
-                else:
-                    ts = str(ts)
-
                 results.append(
                     {
                         "id": pid,
-                        "timestamp": ts,
+                        "timestamp": (
+                            ts.isoformat() if ts else None
+                        ),  # Ensure timestamp is ISO formatted
                         "url": url,
                         "md5": md5,
                         "status": status,
                         "protocol": protocol,
-                        "risk_score": risk_score,
+                        "risk_score": final_risk_score,
                         "explanation": explanation,
                         "snippet": snippet if snippet else "",
                         "session_id": sid,
@@ -2141,6 +2179,26 @@ class PostgresBackend(DatabaseBackend):
         finally:
             conn.close()
 
+    def get_malicious_payload_by_hash(self, url_hash):
+        """Fetches a payload record by its URL hash."""
+        conn = self._get_conn()
+        try:
+            from psycopg2.extras import RealDictCursor
+
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(
+                "SELECT * FROM malicious_payloads WHERE url_hash = %s", (url_hash,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching payload by hash: {e}")
+            return None
+        finally:
+            conn.close()
+
     def add_malicious_payload(
         self,
         url,
@@ -2149,34 +2207,43 @@ class PostgresBackend(DatabaseBackend):
         ip,
         timestamp=None,
         status="pending",
+        analysis_stage="Downloading",
         payload_md5=None,
         payload_size=None,
         file_path=None,
         snippet=None,
-        **kwargs,  # Catch-all for future safety
+        content=None,
+        is_binary=False,
+        method=None,
+        user_agent=None,
+        command_text=None,
+        **kwargs,
     ):
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
             # 1. Insert/Get Payload ID
-            # Upsert logic - if it exists, simple ignore. But if we have new metadata (md5/size),
-            # we might want to update it. For now, matching the original logic (DO NOTHING).
-            # But the caller might expect metadata to be saved.
-            # Let's insert what we can.
-
             cursor.execute(
                 """
                 INSERT INTO malicious_payloads (
-                    url, url_hash, session_id, ip, timestamp, status, 
-                    payload_md5, payload_size, file_path, snippet
+                    url, url_hash, session_id, ip, timestamp, status, analysis_stage,
+                    payload_md5, payload_size, file_path, snippet, content, is_binary,
+                    method, user_agent, command_text
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (url_hash) DO UPDATE SET
-                    payload_md5 = EXCLUDED.payload_md5,
-                    payload_size = EXCLUDED.payload_size,
-                    file_path = EXCLUDED.file_path,
-                    snippet = EXCLUDED.snippet,
-                    status = EXCLUDED.status
+                    payload_md5 = COALESCE(EXCLUDED.payload_md5, malicious_payloads.payload_md5),
+                    payload_size = COALESCE(EXCLUDED.payload_size, malicious_payloads.payload_size),
+                    file_path = COALESCE(EXCLUDED.file_path, malicious_payloads.file_path),
+                    snippet = COALESCE(EXCLUDED.snippet, malicious_payloads.snippet),
+                    content = COALESCE(EXCLUDED.content, malicious_payloads.content),
+                    is_binary = COALESCE(EXCLUDED.is_binary, malicious_payloads.is_binary),
+                    status = EXCLUDED.status,
+                    analysis_stage = EXCLUDED.analysis_stage,
+                    timestamp = EXCLUDED.timestamp,
+                    method = COALESCE(EXCLUDED.method, malicious_payloads.method),
+                    user_agent = COALESCE(EXCLUDED.user_agent, malicious_payloads.user_agent),
+                    command_text = COALESCE(EXCLUDED.command_text, malicious_payloads.command_text)
                 RETURNING id
             """,
                 (
@@ -2186,10 +2253,16 @@ class PostgresBackend(DatabaseBackend):
                     ip,
                     timestamp or datetime.datetime.now(),
                     status,
+                    analysis_stage,
                     payload_md5,
                     payload_size,
                     file_path,
                     snippet,
+                    content,
+                    is_binary,
+                    method,
+                    user_agent,
+                    command_text,
                 ),
             )
             row = cursor.fetchone()
@@ -2215,9 +2288,82 @@ class PostgresBackend(DatabaseBackend):
                 )
 
             conn.commit()
+            return payload_id
         except Exception as e:
             log.error(f"[Postgres] Error adding malicious payload: {e}")
-            conn.rollback()
+            return None
+        finally:
+            conn.close()
+
+    def update_payload_analysis(
+        self,
+        payload_md5,
+        virustotal_result=None,
+        risk_score=None,
+        analysis_summary=None,
+        vt_last_scanned=None,
+        payload_size=None,
+        file_path=None,
+    ):
+        """Updates or inserts deduplicated payload analysis data."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO payload_analysis (
+                    payload_md5, virustotal_result, risk_score, analysis_summary,
+                    vt_last_scanned, payload_size, file_path, analyzed_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (payload_md5) DO UPDATE SET
+                    virustotal_result = COALESCE(EXCLUDED.virustotal_result, payload_analysis.virustotal_result),
+                    risk_score = COALESCE(EXCLUDED.risk_score, payload_analysis.risk_score),
+                    analysis_summary = COALESCE(EXCLUDED.analysis_summary, payload_analysis.analysis_summary),
+                    vt_last_scanned = COALESCE(EXCLUDED.vt_last_scanned, payload_analysis.vt_last_scanned),
+                    payload_size = COALESCE(EXCLUDED.payload_size, payload_analysis.payload_size),
+                    file_path = COALESCE(EXCLUDED.file_path, payload_analysis.file_path),
+                    analyzed_at = CURRENT_TIMESTAMP
+            """,
+                (
+                    payload_md5,
+                    virustotal_result,
+                    risk_score,
+                    analysis_summary,
+                    vt_last_scanned,
+                    payload_size,
+                    file_path,
+                ),
+            )
+            conn.commit()
+            return True
+        except Exception as e:
+            log.error(f"[Postgres] Error updating payload analysis: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def get_payload_analysis(self, payload_md5):
+        """Fetches deduplicated analysis data for a given file hash."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM payload_analysis WHERE payload_md5 = %s", (payload_md5,)
+            )
+            row = cursor.fetchone()
+            if row:
+                # Convert to dict
+                from psycopg2.extras import RealDictCursor
+
+                # Re-fetch with RealDictCursor for easier conversion if needed
+                # OR just manually map
+                columns = [column[0] for column in cursor.description]
+                return dict(zip(columns, row))
+            return None
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching payload analysis: {e}")
+            return None
         finally:
             conn.close()
 
@@ -2339,8 +2485,15 @@ class PostgresBackend(DatabaseBackend):
         conn = self._get_conn()
         try:
             cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            # Include 'pending' OR stuck 'downloading' (> 1 hour old)
             cursor.execute(
-                "SELECT * FROM malicious_payloads WHERE status = 'pending' ORDER BY retry_count ASC, timestamp ASC LIMIT %s",
+                """
+                SELECT * FROM malicious_payloads 
+                WHERE status IN ('pending', 'discovered') 
+                   OR (status = 'downloading' AND timestamp < NOW() - INTERVAL '1 hour')
+                ORDER BY timestamp ASC 
+                LIMIT %s
+                """,
                 (limit,),
             )
             return [dict(r) for r in cursor.fetchall()]
@@ -2350,52 +2503,7 @@ class PostgresBackend(DatabaseBackend):
         finally:
             conn.close()
 
-    def update_payload_status(
-        self,
-        payload_id,
-        status,
-        file_path=None,
-        error_message=None,
-        payload_md5=None,
-        payload_size=None,
-        snippet=None,
-        **kwargs,
-    ):
-        conn = self._get_conn()
-        try:
-            cursor = conn.cursor()
-            sql = "UPDATE malicious_payloads SET status = %s"
-            params = [status]
-
-            if file_path:
-                sql += ", file_path = %s"
-                params.append(sanitize_path(file_path))
-            if error_message:
-                sql += ", error_message = %s"
-                params.append(error_message)
-            if payload_md5:
-                sql += ", payload_md5 = %s"
-                params.append(payload_md5)
-            if payload_size is not None:
-                sql += ", payload_size = %s"
-                params.append(payload_size)
-            if snippet:
-                sql += ", snippet = %s"
-                params.append(snippet)
-
-            # Increment retry count if failed
-            if status == "failed":
-                sql += ", retry_count = retry_count + 1"
-
-            sql += " WHERE id = %s"
-            params.append(payload_id)
-
-            cursor.execute(sql, tuple(params))
-            conn.commit()
-        except Exception as e:
-            log.error(f"[Postgres] Error updating payload {payload_id}: {e}")
-        finally:
-            conn.close()
+    # Legacy update_payload_status removed in favor of comprehensive version below
 
     def is_payload_host_rate_limited(self, hostname):
         conn = self._get_conn()
@@ -2459,6 +2567,25 @@ class PostgresBackend(DatabaseBackend):
     def clear_cache(self):
         self.sanitize_artifacts()
 
+    def delete_cache_by_pattern(self, pattern):
+        """Removes items from universal_cache where output_text matches pattern. Returns list of (key, service)."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            # Postgres supports DELETE RETURNING
+            cursor.execute(
+                "DELETE FROM universal_cache WHERE output_text LIKE %s RETURNING cache_key, service",
+                (f"%{pattern}%",),
+            )
+            rows = cursor.fetchall()
+            conn.commit()
+            return [(r[0], r[1]) for r in rows]
+        except Exception as e:
+            log.error(f"[Postgres] Failed to delete cache by pattern: {e}")
+            return []
+        finally:
+            conn.close()
+
     def get_session(self, session_id):
         conn = self._get_conn()
         try:
@@ -2488,12 +2615,40 @@ class PostgresBackend(DatabaseBackend):
         finally:
             conn.close()
 
+    def get_pending_analysis_payloads(self, limit=5):
+        """Fetches payloads that have been downloaded but not yet analyzed by VT."""
+        conn = self._get_conn()
+        try:
+            from psycopg2.extras import RealDictCursor
+
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            # We join with payload_analysis and find items where analysis is missing
+            cursor.execute(
+                """
+                SELECT p.* FROM malicious_payloads p
+                LEFT JOIN payload_analysis a ON p.payload_md5 = a.payload_md5
+                WHERE p.status = 'completed' 
+                AND p.payload_md5 IS NOT NULL
+                AND a.payload_md5 IS NULL
+                AND (p.vt_last_scanned IS NULL OR p.vt_last_scanned < NOW() - INTERVAL '15 minutes')
+                ORDER BY p.timestamp DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [dict(r) for r in cursor.fetchall()]
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching pending analysis payloads: {e}")
+            return []
+        finally:
+            conn.close()
+
     def get_next_payload_for_analysis(self):
         conn = self._get_conn()
         try:
             cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cursor.execute(
-                "SELECT * FROM malicious_payloads WHERE vt_scan_id IS NULL AND status = 'downloaded' LIMIT 1"
+                "SELECT * FROM malicious_payloads WHERE vt_scan_id IS NULL AND status = 'completed' LIMIT 1"
             )
             row = cursor.fetchone()
             return dict(row) if row else None
@@ -2503,17 +2658,189 @@ class PostgresBackend(DatabaseBackend):
         finally:
             conn.close()
 
+    def update_payload_file_path(self, payload_id, file_path):
+        """Updates the file_path for a payload (used by self-healing)."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE malicious_payloads SET file_path = %s WHERE id = %s",
+                (file_path, payload_id),
+            )
+            conn.commit()
+            return True
+        except Exception as e:
+            log.error(f"[Postgres] Error updating payload file path: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def update_payload_status(
+        self,
+        payload_id,
+        status,
+        analysis_stage=None,
+        payload_md5=None,
+        payload_size=None,
+        file_path=None,
+        error=None,
+        snippet=None,
+        content=None,
+        is_binary=None,
+        vt_scan_id=None,
+        vt_last_scanned=None,
+        **kwargs,
+    ):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            sql = "UPDATE malicious_payloads SET status = %s"
+            params = [status]
+
+            if analysis_stage:
+                sql += ", analysis_stage = %s"
+                params.append(analysis_stage)
+            if payload_md5:
+                sql += ", payload_md5 = %s"
+                params.append(payload_md5)
+            if payload_size is not None:
+                sql += ", payload_size = %s"
+                params.append(payload_size)
+            if file_path:
+                sql += ", file_path = %s"
+                params.append(file_path)
+            if snippet:
+                sql += ", snippet = %s"
+                params.append(snippet)
+            if content:
+                sql += ", content = %s"
+                params.append(content)
+            if is_binary is not None:
+                sql += ", is_binary = %s"
+                params.append(is_binary)
+            if error:
+                sql += ", error_message = %s"
+                params.append(error)
+            if vt_scan_id:
+                sql += ", vt_scan_id = %s"
+                params.append(vt_scan_id)
+            if vt_last_scanned:
+                sql += ", vt_last_scanned = %s"
+                params.append(vt_last_scanned)
+
+            sql += " WHERE id = %s"
+            params.append(payload_id)
+
+            cursor.execute(sql, tuple(params))
+            conn.commit()
+        except Exception as e:
+            log.error(f"[Postgres] Error updating payload status: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+
     def update_payload_vt_status(self, payload_id, result, scan_id=None):
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE malicious_payloads SET vt_result = %s, vt_scan_id = %s WHERE id = %s",
+                "UPDATE malicious_payloads SET virustotal_result = %s, vt_scan_id = %s, vt_last_scanned = NOW() WHERE id = %s",
                 (result, scan_id, payload_id),
             )
             conn.commit()
         except Exception as e:
             log.error(f"[Postgres] Error updating payload VT status: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+
+    def get_payload_summary(self, hours=24):
+        """Returns unique payloads by MD5 with server and attacker counts."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(
+                f"""
+                SELECT p.payload_md5, MAX(p.timestamp) as last_seen, 
+                       COUNT(DISTINCT p.id) as server_count,
+                       COUNT(DISTINCT pr.ip) as attacker_count,
+                       MAX(p.status) as status, MAX(p.analysis_stage) as analysis_stage,
+                       MAX(p.virustotal_result) as vt_res,
+                       MAX(p.payload_size) as size,
+                       MAX(p.url) as sample_url
+                FROM malicious_payloads p
+                LEFT JOIN payload_requests pr ON p.id = pr.payload_id
+                WHERE p.payload_md5 IS NOT NULL AND p.timestamp > NOW() - INTERVAL '{hours} hours'
+                GROUP BY p.payload_md5
+                ORDER BY last_seen DESC
+            """
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching payload summary: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_payload_details(self, md5):
+        """Returns detailed info for a specific MD5, including content and occurrences."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            # Get the core payload info (from the oldest entry for this MD5)
+            cursor.execute(
+                "SELECT * FROM malicious_payloads WHERE payload_md5 = %s ORDER BY timestamp ASC LIMIT 1",
+                (md5,),
+            )
+            base = cursor.fetchone()
+            if not base:
+                return None
+
+            base_dict = dict(base)
+
+            # If content is missing, try to read it from disk
+            if (not base_dict.get("content")) and base_dict.get("file_path"):
+                try:
+                    fpath = base_dict["file_path"]
+                    from ssh_honeypot.core.utils import (
+                        get_data_dir,
+                        PROJECT_ROOT,
+                        get_storable_content,
+                    )
+
+                    actual_path = fpath.replace("<DATA_DIR>", get_data_dir()).replace(
+                        "<ROOT>", PROJECT_ROOT
+                    )
+
+                    if os.path.exists(actual_path):
+                        with open(actual_path, "rb") as f:
+                            raw_content = f.read(1024 * 1024)  # 1MB limit
+                            db_content, _ = get_storable_content(raw_content)
+                            base_dict["content"] = db_content
+                except Exception as e:
+                    log.warning(
+                        f"[Postgres] Failed to read payload file for details: {e}"
+                    )
+
+            # Get all occurrences/requests
+            cursor.execute(
+                """
+                SELECT pr.timestamp, pr.ip, pr.session_id, s.protocol
+                FROM payload_requests pr
+                LEFT JOIN malicious_payloads p ON pr.payload_id = p.id
+                LEFT JOIN sessions s ON pr.session_id = s.session_id
+                WHERE p.payload_md5 = %s
+                ORDER BY pr.timestamp DESC
+            """,
+                (md5,),
+            )
+            occurrences = [dict(row) for row in cursor.fetchall()]
+            base_dict["occurrences"] = occurrences
+
+            return base_dict
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching payload details: {e}")
+            return None
         finally:
             conn.close()
 
@@ -2538,10 +2865,7 @@ class PostgresBackend(DatabaseBackend):
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
-            query_cc = (
-                "DELETE FROM command_cache WHERE response LIKE %s OR response LIKE %s"
-            )
-            cursor.execute(query_cc, ("%Internal Logic Offline%", "%INTERNAL_ERROR%"))
+            # Purge internal error markers from active tables
 
             query_int = (
                 "DELETE FROM interactions WHERE response LIKE %s OR response LIKE %s"

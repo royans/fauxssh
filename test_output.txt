@@ -1,0 +1,106 @@
+============================= test session starts ==============================
+platform linux -- Python 3.11.2, pytest-8.0.0, pluggy-1.6.0
+rootdir: /home/royans/c/sshpot
+configfile: pyproject.toml
+plugins: anyio-4.11.0
+[*] Loading Persona: dynamic_ff1b1c86
+[!] Warning: Persona 'dynamic_ff1b1c86' not found. Falling back to CentOS7_Legacy_Compute.
+collected 3 items
+
+tests/core/test_payload_optimization.py ..
+DEBUG: real_path=/home/royans/c/data/payloads/test_resolve_f1625660dade7a87055c5ca44d4e2204.txt
+DEBUG: calls=[call('/home/royans/c/data')]
+F
+
+=================================== FAILURES ===================================
+______________ TestPayloadDeduplication.test_path_resolution_fix _______________
+
+self = <test_payload_optimization.TestPayloadDeduplication testMethod=test_path_resolution_fix>
+
+    def test_path_resolution_fix(self):
+        # This test verifies that PayloadManager can resolve <DATA_DIR> in file_path
+        from ssh_honeypot.core.utils import get_data_dir
+    
+        data_dir = get_data_dir()
+        # Content must be >= 500 bytes to pass the VT size check
+        content = b"fake malware content 12345" * 20
+        md5 = hashlib.md5(content).hexdigest()
+    
+        # Create a real file in the real data dir (PAYLOAD_DIR)
+        payload_dir = os.path.join(data_dir, "payloads")
+        os.makedirs(payload_dir, exist_ok=True)
+        real_path = os.path.join(payload_dir, f"test_resolve_{md5}.txt")
+        with open(real_path, "wb") as f:
+            f.write(content)
+    
+        # Store it in DB with placeholder
+        placeholder_path = f"<DATA_DIR>/payloads/test_resolve_{md5}.txt"
+        self.db.add_malicious_payload(
+            url="http://example.com/resolve",
+            url_hash="somehash",
+            session_id="s1",
+            ip="1.1.1.1",
+            status="completed",
+            payload_md5=md5,
+            payload_size=len(content),
+            file_path=placeholder_path
+        )
+    
+        # Fetch the item
+        item = self.db.get_malicious_payload_by_hash("somehash")
+    
+        # Mock VT Analyzer report check
+        mock_report = MagicMock()
+        mock_report.last_analysis_stats = {"malicious": 0}
+        self.pm.vt_analyzer.check_hash.return_value = mock_report
+    
+        # Call analyze_payload - it should NOT fail with "file_not_found"
+        # Patching os.path.exists specifically in the context of payload_manager
+        with patch("ssh_honeypot.core.payload_manager.os.path.exists") as mock_exists:
+            mock_exists.return_value = True
+            print(f"\nDEBUG: real_path={real_path}")
+            self.pm.analyze_payload(item)
+    
+            print(f"DEBUG: calls={mock_exists.call_args_list}")
+            # Check if exists was called with real_path
+>           mock_exists.assert_any_call(real_path)
+
+tests/core/test_payload_optimization.py:116: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <MagicMock name='exists' id='140672935066640'>
+args = ('/home/royans/c/data/payloads/test_resolve_f1625660dade7a87055c5ca44d4e2204.txt',)
+kwargs = {}
+expected = call('/home/royans/c/data/payloads/test_resolve_f1625660dade7a87055c5ca44d4e2204.txt')
+cause = None, actual = [call('/home/royans/c/data')]
+expected_string = "exists('/home/royans/c/data/payloads/test_resolve_f1625660dade7a87055c5ca44d4e2204.txt')"
+
+    def assert_any_call(self, /, *args, **kwargs):
+        """assert the mock has been called with the specified arguments.
+    
+        The assert passes if the mock has *ever* been called, unlike
+        `assert_called_with` and `assert_called_once_with` that only pass if
+        the call is the most recent one."""
+        expected = self._call_matcher(_Call((args, kwargs), two=True))
+        cause = expected if isinstance(expected, Exception) else None
+        actual = [self._call_matcher(c) for c in self.call_args_list]
+        if cause or expected not in _AnyComparer(actual):
+            expected_string = self._format_mock_call_signature(args, kwargs)
+>           raise AssertionError(
+                '%s call not found' % expected_string
+            ) from cause
+E           AssertionError: exists('/home/royans/c/data/payloads/test_resolve_f1625660dade7a87055c5ca44d4e2204.txt') call not found
+
+/usr/lib/python3.11/unittest/mock.py:1004: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    ssh_honeypot.core.payload_manager:payload_manager.py:470 [PayloadManager] Parsing Error: Object of type MagicMock is not JSON serializable
+=============================== warnings summary ===============================
+../../.local/lib/python3.11/site-packages/_pytest/config/__init__.py:1394
+  /home/royans/.local/lib/python3.11/site-packages/_pytest/config/__init__.py:1394: PytestConfigWarning: Unknown config option: timeout
+  
+    self._warn_or_fail_if_strict(f"Unknown config option: {key}\n")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/core/test_payload_optimization.py::TestPayloadDeduplication::test_path_resolution_fix
+==================== 1 failed, 2 passed, 1 warning in 0.71s ====================

@@ -156,7 +156,14 @@ class UniversalCache:
         if output_text is None:
             return False
 
-        # 1. Calculate Hashes and Encoding
+        # 1. Guard: Do not cache internal resource errors
+        if output_text and "Error: System resources exhausted" in str(output_text):
+            log.warning(
+                f"[UniversalCache] Preventing cache of resource exhaustion error for key {key}"
+            )
+            return False
+
+        # 2. Calculate Hashes and Encoding
         input_hash = (
             hashlib.md5(input_text.encode("utf-8")).hexdigest() if input_text else None
         )

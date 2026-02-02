@@ -12,7 +12,12 @@ from datetime import datetime, timedelta
 
 from ssh_honeypot.core.database import HoneyDB
 from ssh_honeypot.core.config import config, get_data_dir
-from ssh_honeypot.core.utils import sanitize_path, extract_snippet
+from ssh_honeypot.core.utils import (
+    sanitize_path,
+    extract_snippet,
+    get_storable_content,
+    resolve_sanitized_path,
+)
 from ssh_honeypot.core.universal_cache import universal_cache
 
 try:
@@ -37,10 +42,13 @@ class PayloadManager:
                 self.vt_analyzer = VirusTotalAnalyzer()
                 if not self.vt_analyzer.verify_auth_at_startup():
                     logger.error("[PayloadManager] VirusTotal Disabled: Auth Failed.")
+                    self.vt_analyzer.close()
                     self.vt_analyzer = None
                 else:
                     logger.info("[PayloadManager] VirusTotal Analyzer Enabled.")
             except Exception as e:
+                if self.vt_analyzer:
+                    self.vt_analyzer.close()
                 logger.error(f"[PayloadManager] Failed to init VirusTotal: {e}")
 
     def _ensure_payload_dir(self):
@@ -88,7 +96,16 @@ class PayloadManager:
 
         return list(urls)
 
-    def queue_payload(self, url, session_id, ip, timestamp=None):
+    def queue_payload(
+        self,
+        url,
+        session_id,
+        ip,
+        timestamp=None,
+        method="GET",
+        user_agent=None,
+        command_text=None,
+    ):
         """
         Adds a URL to the download queue if permitted.
         Enforces 1 request per host per day logic.
@@ -97,30 +114,61 @@ class PayloadManager:
             # 1. Deduplicate by exact URL
             url_hash = hashlib.md5(url.encode()).hexdigest()
 
-            cached = universal_cache.get("payload_download", url_hash)
-            if cached:
-                logger.info(f"[PayloadManager] URL already in cache: {url}")
-                return True
-
             # 2. Host Rate Limiting (1 per day)
             parsed = urlparse(url)
             hostname = parsed.hostname
             if not hostname:
-                return  # Invalid URL
+                return False  # Invalid URL
 
             if self.db.is_payload_host_rate_limited(hostname):
-                logger.info(
-                    f"Skipping URL {url} - Host {hostname} rate limited (1/day)"
-                )
-                return
+                logger.debug(f"Skipping URL {url} - Host {hostname} rate limited")
+                return False
 
-            # 3. Queue it
+            # 3. Smart Deduplication & Backoff
+            existing = self.db.get_malicious_payload_by_hash(url_hash)
+            if existing:
+                status = existing.get("status")
+                last_attempt = existing.get("timestamp")
+
+                # Case A: Already pending/downloading
+                if status in ["pending", "downloading", "discovered"]:
+                    logger.debug(
+                        f"Skipping URL {url} - Already in queue (status: {status})"
+                    )
+                    return False
+
+                # Case B: Recently failed (Backoff 48h)
+                if status == "failed" and last_attempt:
+                    # Parse timestamp if it's a string (Postgres might return string)
+                    if isinstance(last_attempt, str):
+                        try:
+                            last_attempt = datetime.fromisoformat(
+                                last_attempt.split(".")[0]
+                            )
+                        except:
+                            last_attempt = datetime.now()
+
+                    backoff_limit = datetime.now() - timedelta(hours=48)
+                    if last_attempt > backoff_limit:
+                        logger.debug(
+                            f"Skipping URL {url} - Recently failed (Backoff until {last_attempt + timedelta(hours=48)})"
+                        )
+                        return False
+
+                # Case C: Completed/Analyzed - We might still want to log the "hit" for stats
+                # but we don't necessarily need to re-download.
+                # add_malicious_payload handles hitting the DB anyway.
+
+            # 4. Queue it
             added = self.db.add_malicious_payload(
                 url=url,
                 url_hash=url_hash,
                 session_id=session_id,
                 ip=ip,
                 timestamp=timestamp,
+                method=method,
+                user_agent=user_agent,
+                command_text=command_text,
             )
             if added:
                 logger.info(f"[PayloadManager] Queued suspicious URL: {url}")
@@ -164,6 +212,7 @@ class PayloadManager:
                 )
 
             snippet = extract_snippet(content_bytes)
+            db_content, is_binary = get_storable_content(content_bytes)
 
             # Add to DB as 'completed' (ready for analysis)
             added = self.db.add_malicious_payload(
@@ -173,32 +222,29 @@ class PayloadManager:
                 ip=ip,
                 timestamp=timestamp or datetime.now(),
                 status="completed",
+                analysis_stage="Analyzed",  # Already have content
                 file_path=file_path,
                 payload_md5=md5,
                 payload_size=size,
                 snippet=snippet,
+                content=db_content,
+                is_binary=is_binary,
             )
 
             if added:
-                # We need the ID to update status with file path/md5/snippet (logic simplified above to add directly)
-                # But to maintain compatibility if add_malicious_payload doesn't accept all args yet:
-                # Check db schema first or just use update if needed.
-                # Re-reading add_malicious_payload signature is safer.
-                # Assuming add_malicious_payload takes **kwargs or we update it separately.
-                # Let's check DB signature first or assume update pattern.
-                pass
-
-                # ACTUALLY: The original code utilized update_payload_status AFTER adding.
-                # Let's keep that pattern but include snippet.
+                # Update status if already exists (deduplication case)
                 payload = self.db.get_payload_by_hash(url_hash)
                 if payload:
                     self.db.update_payload_status(
                         payload["id"],
                         "completed",
+                        analysis_stage="Analyzed",
                         payload_md5=md5,
                         payload_size=size,
                         file_path=file_path,
                         snippet=snippet,
+                        content=db_content,
+                        is_binary=is_binary,
                     )
                 logger.info(
                     f"[PayloadManager] Queued uploaded file for analysis: {filename}"
@@ -210,11 +256,13 @@ class PayloadManager:
             logger.error(f"Error queuing upload {filename}: {e}")
             return False
 
-    def process_queue(self):
+    def process_queue(self, limit=5):
         """
         Main worker function. fetches pending items and downloads them.
+        Returns list of processed items summary.
         """
-        pending = self.db.get_pending_payloads(limit=5)
+        pending = self.db.get_pending_payloads(limit=limit)
+        results = []
 
         for item in pending:
             payload_id = item["id"]
@@ -253,44 +301,100 @@ class PayloadManager:
                         f"[PayloadManager] Saved new payload to {sanitize_path(file_path)}"
                     )
 
-                # Capture snippet (first 500 chars)
+                # Capture snippet and full content (up to 1MB)
                 snippet = extract_snippet(content)
+                db_content, is_binary = get_storable_content(content)
 
                 self.db.update_payload_status(
                     payload_id,
                     "completed",
+                    analysis_stage="Downloaded",
                     payload_md5=md5,
                     payload_size=size,
                     file_path=file_path,
                     snippet=snippet,
+                    content=db_content,
+                    is_binary=is_binary,
+                )
+
+                results.append(
+                    {"id": payload_id, "url": url, "status": "Downloaded", "size": size}
                 )
 
             except Exception as e:
                 logger.error(f"Failed to download payload {url}: {e}")
                 self.db.update_payload_status(payload_id, "failed", error=str(e))
+                results.append(
+                    {"id": payload_id, "url": url, "status": "Failed", "error": str(e)}
+                )
 
-    def process_analysis_queue(self):
+        return results
+
+    def process_analysis_queue(self, limit=1, force=False):
         """
         Background job to analyze downloaded payloads with VT.
         Rate Limit is enforced by the Analyzer class.
+        Returns list of processed items.
         """
+        if not force and not config.get("virustotal", "enabled"):
+            return []
+
         if not self.vt_analyzer:
-            return
+            # Try to init if forced or just available
+            if VirusTotalAnalyzer:
+                try:
+                    self.vt_analyzer = VirusTotalAnalyzer()
+                except:
+                    pass
+
+            if not self.vt_analyzer:
+                return []
+
+        # Check rate limit before fetching items to avoid log spam if we are already blocked
+        if not force and not self.vt_analyzer._check_rate_limit():
+            return []
 
         # Fetch Unanalyzed, Completed Payloads
-        # We need to implement get_unanalyzed_payloads in DB or query manually
-        # For now, let's assume we can add a method to DB or do raw query
-        # But to keep it clean, let's use a simpler approach:
-        # We can implement a method in DB to fetch one pending analysis
-        item = self.db.get_next_payload_for_analysis()
+        items = self.db.get_pending_analysis_payloads(limit=limit)
+        results = []
 
-        if not item:
-            return
+        for item in items:
+            try:
+                self.analyze_payload(item, force=force)
+                results.append(
+                    {"id": item["id"], "md5": item["payload_md5"], "status": "Analyzed"}
+                )
+            except Exception as e:
+                results.append(
+                    {
+                        "id": item["id"],
+                        "md5": item.get("payload_md5", "?"),
+                        "status": "Failed",
+                        "error": str(e),
+                    }
+                )
 
+        return results
+
+    def analyze_payload(self, item, force=False):
         payload_id = item["id"]
-        file_path = item["file_path"]
+        file_path = resolve_sanitized_path(item.get("file_path"))
         file_hash = item["payload_md5"]
         file_size = item["payload_size"] or 0
+
+        # Self-Healing: If file_path is missing or invalid, try to recover from MD5
+        if not file_path or not os.path.exists(file_path):
+            if file_hash:
+                potential_path = os.path.join(PAYLOAD_DIR, f"dangerous_{file_hash}.txt")
+                if os.path.exists(potential_path):
+                    logger.warning(
+                        f"[PayloadManager] Path Recovery: Found missing payload {payload_id} at {potential_path}"
+                    )
+                    file_path = potential_path
+                    # Update DB for future
+                    self.db.update_payload_file_path(
+                        payload_id, file_path
+                    )  # Need to implement this or just rely on runtime fix
 
         logger.info(f"[PayloadManager] Analyzing Payload {payload_id} ({file_hash})...")
 
@@ -335,6 +439,7 @@ class PayloadManager:
                         code_insights = ai_results[0].get("analysis")
 
                     range_classification = {}
+                    classification = None
                     ptc = getattr(report, "popular_threat_classification", None)
                     if ptc:
                         classification = {
@@ -402,26 +507,62 @@ class PayloadManager:
             else:
                 result_json = json.dumps({"status": "unknown_hash_no_upload"})
 
-            self.db.update_payload_vt_status(payload_id, result_json, scan_id)
-
-            # Save to Universal Cache
+            # Determine Stage
+            analysis_stage = "Analyzed"
             if result_json:
-                universal_cache.set(
-                    service="payload_analysis",
-                    key=file_hash,
-                    output_text=result_json,
-                    ttl_days=30,
+                try:
+                    data = json.loads(result_json)
+                    stats = data.get("stats", {})
+                    if stats.get("malicious", 0) > 0:
+                        analysis_stage = "hasRiskDecision"
+                    elif data.get("status") == "queued":
+                        analysis_stage = "QueueForAnalysis"
+                except:
+                    pass
+
+            self.db.update_payload_status(
+                payload_id,
+                status="completed",
+                analysis_stage=analysis_stage,
+                vt_last_scanned=datetime.now().isoformat(),
+                **({"vt_scan_id": scan_id} if scan_id else {}),
+            )
+
+            # Save to Deduped Analysis Table
+            if result_json:
+                # Extract risk score if we can for the DB index
+                risk_score = 0
+                explanation = ""
+                try:
+                    data = json.loads(result_json)
+                    stats = data.get("stats", {})
+                    malicious = stats.get("malicious", 0)
+                    if malicious > 0:
+                        risk_score = min(malicious * 10, 100)
+                        explanation = f"Flagged by {malicious} engines"
+                    elif "error" in data:
+                        explanation = "Analysis Error"
+                except:
+                    pass
+
+                self.db.update_payload_analysis(
+                    payload_md5=file_hash,
+                    virustotal_result=result_json,
+                    risk_score=risk_score,
+                    analysis_summary=explanation,
+                    vt_last_scanned=datetime.now().isoformat(),
+                    payload_size=file_size,
+                    file_path=file_path,
                 )
 
         except Exception as e:
             logger.error(f"[PayloadManager] Analysis Error: {e}")
             error_json = json.dumps({"error": str(e)})
-            self.db.update_payload_vt_status(payload_id, result=error_json)
-            universal_cache.set(
-                service="payload_analysis",
-                key=file_hash,
-                output_text=error_json,
-                ttl_days=30,
+            self.db.update_payload_status(payload_id, status="failed", error=str(e))
+            self.db.update_payload_analysis(
+                payload_md5=file_hash,
+                virustotal_result=error_json,
+                analysis_summary="Analysis Failed",
             )
 
     def _is_safe_url(self, url):

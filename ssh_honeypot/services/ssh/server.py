@@ -906,8 +906,11 @@ def start_ssh_server(port, db_instance, llm_instance):
             client, addr = sock.accept()
             import sys
 
-            sys.stderr.write(f"DEBUG: Server accepted connection from {addr}\n")
-            sys.stderr.flush()
+            # try:
+            #     sys.stderr.write(f"DEBUG: Server accepted connection from {addr}\n")
+            # except:
+            #     pass
+            # sys.stderr.flush() # This line was removed as it was associated with the debug print.
             # Launch thread handling connection, passing db and llm explicitly (globals to allow mocking)
             t = threading.Thread(target=handle_connection, args=(client, addr, db, llm))
             t.daemon = True

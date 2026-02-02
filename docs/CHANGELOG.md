@@ -3,14 +3,18 @@
 ## Weekly Changelog: Feb 1st 2026
 
 ### New Features
+- **Self-Healing Payload Analysis**: Implemented automatic path recovery using file MD5 hashes to resolve "file_not_found" errors when analyzing downloaded payloads.
 - **Dashboard Protocol Filters**: Added multi-select chips to the "About" page, allowing users to toggle visibility for SSH, Telnet, HTTP, MySQL, and Redis in real-time.
 - **Dynamic Dashboard Masonry**: The dashboard now automatically hides cards for protocols that are either unselected or have no active telemetry, significantly reducing UI clutter.
 
 ### Enhancements
+- **Smart Payload Deduplication**: Added logic to skip redundant downloads and enforce a 48-hour backoff period for previously failed URLs.
+- **Cache Integrity**: Implemented preventative guards in `UniversalCache` to block the caching of "System resources exhausted" errors.
 - **Persona Engine Robustness**: Handlers for `last` and `who` now gracefully handle persona user data whether it's stored as a string, list, or dictionary.
 - **Production Config Priority**: Refactored `.env` loading to ensure parent-directory configurations (production) correctly override local defaults.
 
 ### Reliability & Fixes
+- **Sanitization Fix**: Removed aggressive path sanitization from database storage to prevent broken file references (fixed `file_not_found`).
 - **Payload Extraction Robustness**: Patched critical issue where obfuscated commands (e.g., `echo ... ; !u curl ...`) bypassed URL detection. Added real-time extraction hook in `CommandHandler`.
 - **Snippet Noise Reduction**: Filtered out short binary strings (<10 chars) from dashboard payload previews to remove "garbage" lines like `UPX!`.
 - **Telnet Stability**: Fixed `NoneType` crash in Telnet service caused by null persona keys (`system: null`), preventing service restarts.

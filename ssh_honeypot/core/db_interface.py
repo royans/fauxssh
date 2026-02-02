@@ -326,7 +326,7 @@ class DatabaseBackend(ABC):
         pass
 
     @abstractmethod
-    def get_next_payload_for_analysis(self):
+    def get_pending_analysis_payloads(self, limit=5):
         pass
 
     @abstractmethod

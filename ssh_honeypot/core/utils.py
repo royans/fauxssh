@@ -96,6 +96,23 @@ def get_ignored_ips():
     return expanded_ips
 
 
+def obfuscate_ip(ip):
+    """
+    Obfuscates the last octet of an IP address (e.g., 1.2.3.4 -> 1.2.3.X).
+    """
+    if not ip or not isinstance(ip, str):
+        return ip
+    if "." in ip:
+        parts = ip.split(".")
+        if len(parts) == 4:
+            return f"{parts[0]}.{parts[1]}.{parts[2]}.X"
+    if ":" in ip:
+        parts = ip.split(":")
+        if len(parts) > 1:
+            return ":".join(parts[:-1]) + ":XXXX"
+    return ip
+
+
 def random_response_delay(min_seconds=0.1, max_seconds=0.5):
     """
     Introduces a random delay to simulate network latency or processing time.
@@ -132,6 +149,26 @@ def sanitize_path(text):
     home_dir = os.path.expanduser("~")
     if home_dir and len(home_dir) > 5 and home_dir in text:
         text = text.replace(home_dir, "<HOME>")
+
+    return text
+
+
+def resolve_sanitized_path(text):
+    """
+    Inverses sanitize_path by replacing placeholders with real absolute paths.
+    """
+    if not text or not isinstance(text, str):
+        return text
+
+    data_dir = get_data_dir()
+    home_dir = os.path.expanduser("~")
+
+    if "<DATA_DIR>" in text:
+        text = text.replace("<DATA_DIR>", data_dir)
+    if "<ROOT>" in text:
+        text = text.replace("<ROOT>", PROJECT_ROOT)
+    if "<HOME>" in text:
+        text = text.replace("<HOME>", home_dir)
 
     return text
 
@@ -201,7 +238,7 @@ def find_available_port(start=20000, end=30000):
 def extract_snippet(content, max_len=500):
     """
     Extracts a text snippet from content (bytes or str).
-    If binary, extracts printable strings of length >= 4.
+    If binary, extracts printable strings of length >= 10.
     """
     if not content:
         return ""
@@ -215,7 +252,7 @@ def extract_snippet(content, max_len=500):
     # 1. Try UTF-8 first (fast path for text files)
     try:
         text = content_bytes.decode("utf-8")
-        # Check for null bytes to detect binary masqerading as text
+        # Check for null bytes to detect binary masquerading as text
         if "\x00" in text:
             raise UnicodeDecodeError("null bytes", b"", 0, 1, "null bytes")
         return text[:max_len]
@@ -223,11 +260,9 @@ def extract_snippet(content, max_len=500):
         pass
 
     # 2. Binary: Extract Strings
-    # Logic: Printable chars (32-126) + tab/newline, min length 4
     import re
 
-    # Bytes regex for printable strings
-    # Increased minimum length to 10 to reduce noise (like "UPX!", ";NX", etc)
+    # Min length 10 as requested
     pattern = re.compile(b"[ -~\\t\\r\\n]{10,}")
 
     found = pattern.findall(content_bytes)
@@ -239,3 +274,38 @@ def extract_snippet(content, max_len=500):
     if len(text) > max_len:
         return text[:max_len] + "..."
     return text
+
+
+def get_storable_content(content, max_len=1024 * 1024):
+    """
+    Prepares payload content for DB storage (up to 1MB).
+    If text, returns text. If binary, returns extracted strings.
+    Returns (content_str, is_binary)
+    """
+    if not content:
+        return "", False
+
+    if isinstance(content, str):
+        content_bytes = content.encode("utf-8", errors="ignore")
+    else:
+        content_bytes = content
+
+    # 1. Try Text
+    try:
+        text = content_bytes.decode("utf-8")
+        if "\x00" not in text:
+            return text[:max_len], False
+    except UnicodeDecodeError:
+        pass
+
+    # 2. Binary -> Strings
+    import re
+
+    pattern = re.compile(b"[ -~\\t\\r\\n]{10,}")
+    found = pattern.findall(content_bytes)
+
+    if not found:
+        return "<Binary Data - No Strings Found>", True
+
+    text = b"\n".join(found).decode("utf-8", errors="ignore")
+    return text[:max_len], True

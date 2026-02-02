@@ -70,6 +70,31 @@ class TestVirusTotalAnalyzer(unittest.TestCase):
         elapsed = time.time() - start
         self.assertTrue(elapsed >= 0.45, f"Should wait approx 0.5s, waited {elapsed}s")
 
+    @patch("ssh_honeypot.core.database.get_db_backend")
+    def test_default_rpm_and_cleanup(self, mock_db_getter):
+        mock_db = MagicMock()
+        mock_db.check_api_rate_limit.return_value = (True, "")
+        mock_db_getter.return_value = mock_db
+
+        analyzer = VirusTotalAnalyzer()
+        # Verify default is 15.0 (4 RPM)
+        self.assertEqual(analyzer.min_delay, 15.0)
+
+        # Verify verify_auth_at_startup updates last_request_time
+        mock_file_obj = MagicMock()
+        mock_file_obj.last_analysis_stats = {"malicious": 0, "harmless": 0}
+        self.mock_client.get_object.return_value = mock_file_obj
+
+        initial_time = analyzer.last_request_time
+        analyzer.verify_auth_at_startup()
+        self.assertNotEqual(analyzer.last_request_time, initial_time)
+        self.assertAlmostEqual(analyzer.last_request_time, time.time(), delta=1.0)
+
+        # Verify close()
+        self.assertIsNotNone(analyzer.client)
+        analyzer.close()
+        self.assertIsNone(analyzer.client)
+
 
 if __name__ == "__main__":
     unittest.main()

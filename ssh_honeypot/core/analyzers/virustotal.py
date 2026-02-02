@@ -27,15 +27,16 @@ class VirusTotalAnalyzer:
 
             db = get_db_backend()
 
-            l_rpm = config.get("throttling", "global", "virustotal", "rpm") or 1
-            l_rph = config.get("throttling", "global", "virustotal", "rph") or 30
-            l_rpd = config.get("throttling", "global", "virustotal", "rpd") or 125
+            # Default to 4 RPM (Standard Free Tier) instead of 1
+            l_rpm = config.get("throttling", "global", "virustotal", "rpm") or 4
+            l_rph = config.get("throttling", "global", "virustotal", "rph") or 240
+            l_rpd = config.get("throttling", "global", "virustotal", "rpd") or 500
 
             allowed, reason = db.check_api_rate_limit(
                 "virustotal", "GLOBAL", l_rpm, l_rph, l_rpd
             )
             if not allowed:
-                logger.warning(f"[VirusTotal] Global Rate Limit Block: {reason}")
+                logger.debug(f"[VirusTotal] Global Rate Limit Block: {reason}")
                 return False
             return True
         except Exception as e:
@@ -53,7 +54,10 @@ class VirusTotalAnalyzer:
 
     def close(self):
         if self.client:
+            # vt-py client close is async usually? NO, it's a wrapper around aiohttp but exposes sync methods?
+            # vt-py sync client has .close() which runs loop.run_until_complete(self._session.close())
             self.client.close()
+            self.client = None
 
     def verify_auth_at_startup(self):
         """
@@ -86,6 +90,9 @@ class VirusTotalAnalyzer:
             logger.info(f"[VirusTotal] EICAR Check - Total:     {sum(stats.values())}")
 
             self._increment_usage()
+            # Update last_request_time so subsequent calls wait if needed
+            self.last_request_time = time.time()
+
             logger.info("[VirusTotal] Startup Check Passed.")
             return True
 
@@ -106,7 +113,7 @@ class VirusTotalAnalyzer:
         now = time.time()
         elapsed = now - self.last_request_time
         if elapsed < self.min_delay:
-            wait_time = self.min_delay - elapsed
+            wait_time = self.min_delay - elapsed + 0.1  # Add buffer
             logger.debug(f"[VirusTotal] Rate limit sleep: {wait_time:.2f}s")
             time.sleep(wait_time)
         self.last_request_time = time.time()

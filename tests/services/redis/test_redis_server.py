@@ -6,8 +6,6 @@ import os
 from unittest.mock import MagicMock
 from ssh_honeypot.services.redis.server import start_redis_server
 
-TEST_PORT = 6380
-
 
 def is_port_open(port):
     try:
@@ -31,9 +29,15 @@ class TestRedisServer(unittest.TestCase):
         cls.llm = MagicMock()
         cls.llm.generate_response.return_value = "OK"
 
+        # Find a free port
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("", 0))
+        cls.test_port = s.getsockname()[1]
+        s.close()
+
         # Start server in thread
         cls.server_thread = threading.Thread(
-            target=start_redis_server, args=(TEST_PORT, cls.db, cls.llm)
+            target=start_redis_server, args=(cls.test_port, cls.db, cls.llm)
         )
         cls.server_thread.daemon = True
         cls.server_thread.start()
@@ -41,14 +45,22 @@ class TestRedisServer(unittest.TestCase):
         # Wait for startup
         start = time.time()
         while time.time() - start < 5:
-            if is_port_open(TEST_PORT):
+            if is_port_open(cls.test_port):
                 break
             time.sleep(0.1)
+
+    def setUp(self):
+        from ssh_honeypot.core.universal_cache import universal_cache
+
+        universal_cache.clear_service("redis")
+        self.llm.generate_response.return_value = "OK"
+        self.db.start_session.reset_mock()
+        self.db.log_interaction.reset_mock()
 
     def test_ping(self):
         self.llm.generate_response.return_value = "PONG"
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect(("127.0.0.1", TEST_PORT))
+        s.connect(("127.0.0.1", self.test_port))
         s.send(b"PING\r\n")
         resp = s.recv(1024)
         s.close()
@@ -57,7 +69,7 @@ class TestRedisServer(unittest.TestCase):
     def test_command(self):
         self.llm.generate_response.return_value = "OK"
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect(("127.0.0.1", TEST_PORT))
+        s.connect(("127.0.0.1", self.test_port))
         s.send(b"COMMAND\r\n")
         resp = s.recv(1024)
         s.close()
@@ -66,7 +78,7 @@ class TestRedisServer(unittest.TestCase):
     def test_unknown(self):
         self.llm.generate_response.return_value = "ERR unknown command"
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect(("127.0.0.1", TEST_PORT))
+        s.connect(("127.0.0.1", self.test_port))
         s.send(b"BLAH\r\n")
         resp = s.recv(1024)
         s.close()
@@ -76,13 +88,22 @@ class TestRedisServer(unittest.TestCase):
         self.db.start_session.reset_mock()
         self.db.log_interaction.reset_mock()
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect(("127.0.0.1", TEST_PORT))
+        s.connect(("127.0.0.1", self.test_port))
         s.send(b"PING\r\n")
         time.sleep(1.0)
         s.close()
-        time.sleep(0.5)
-        self.assertTrue(self.db.start_session.called)
-        self.assertTrue(self.db.log_interaction.called)
+
+        # Wait up to 5 seconds for logging to occur (background thread)
+        start = time.time()
+        while time.time() - start < 5:
+            if self.db.start_session.called and self.db.log_interaction.called:
+                break
+            time.sleep(0.1)
+
+        self.assertTrue(self.db.start_session.called, "db.start_session was not called")
+        self.assertTrue(
+            self.db.log_interaction.called, "db.log_interaction was not called"
+        )
 
 
 if __name__ == "__main__":

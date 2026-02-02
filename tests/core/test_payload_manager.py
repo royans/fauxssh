@@ -110,16 +110,18 @@ def test_process_queue_success(payload_manager, mock_db):
 
     # Check DB Status
     conn = mock_db._get_conn()
-    c = conn.cursor()
-    c.execute("SELECT * FROM malicious_payloads WHERE url = ?", (url,))
-    row = c.fetchone()
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM malicious_payloads WHERE url = ?", (url,)
+    ).fetchone()
     conn.close()
 
     assert row is not None
-    assert row[6] == "completed"  # Status
-    assert row[7] == expected_md5  # MD5
-    assert row[8] == len(mock_content)  # Size
-    assert f"dangerous_{expected_md5}.txt" in row[9]  # File path
+    assert row["status"] == "completed"  # Status
+    assert row["analysis_stage"] == "Downloaded"  # analysis_stage
+    assert row["payload_md5"] == expected_md5  # MD5
+    assert row["payload_size"] == len(mock_content)  # Size
+    assert f"dangerous_{expected_md5}.txt" in row["file_path"]  # File path
 
 
 def test_process_queue_failure_404(payload_manager, mock_db):
@@ -137,13 +139,17 @@ def test_process_queue_failure_404(payload_manager, mock_db):
         payload_manager.process_queue()
 
     conn = mock_db._get_conn()
+    conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT * FROM malicious_payloads WHERE url = ?", (url,)
     ).fetchone()
     conn.close()
 
-    assert row[6] == "failed"
-    assert "404" in row[11]  # Error message
+    assert row is not None
+    assert row["status"] == "failed"
+    msg = row["error_message"]
+    assert msg is not None
+    assert "404" in str(msg)
 
 
 def test_duplicate_file_content_handling(payload_manager, mock_db):
@@ -172,6 +178,7 @@ def test_duplicate_file_content_handling(payload_manager, mock_db):
 
     # Check DB
     conn = mock_db._get_conn()
+    conn.row_factory = sqlite3.Row
     rows = conn.execute("SELECT * FROM malicious_payloads").fetchall()
     conn.close()
 
@@ -179,10 +186,8 @@ def test_duplicate_file_content_handling(payload_manager, mock_db):
     r1 = rows[0]
     r2 = rows[1]
 
-    assert r1[6] == "completed"
-    assert r2[6] == "completed"
+    assert r1["status"] == "completed"
+    assert r2["status"] == "completed"
 
-    # Should point to SAME file path? Or just verify file exists?
-    # Implementation: checks if os.path.exists(file_path). If yes, logs duplicate and uses it.
-    # So both should have same file_path
-    assert r1[9] == r2[9]
+    # Should point to SAME file path
+    assert r1["file_path"] == r2["file_path"]

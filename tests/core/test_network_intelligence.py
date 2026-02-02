@@ -41,7 +41,7 @@ class TestNetworkIntelligence(unittest.TestCase):
         conn = sqlite3.connect(self.test_db_path)
         c = conn.cursor()
         c.execute(
-            "SELECT url, method, user_agent FROM requested_urls WHERE session_id = ?",
+            "SELECT url, method, user_agent FROM malicious_payloads WHERE session_id = ?",
             (self.context["session_id"],),
         )
         row = c.fetchone()
@@ -81,7 +81,7 @@ class TestNetworkIntelligence(unittest.TestCase):
         # Verify DB Log shows HEAD
         conn = sqlite3.connect(self.test_db_path)
         c = conn.cursor()
-        c.execute("SELECT method FROM requested_urls WHERE url = ?", (url,))
+        c.execute("SELECT method FROM malicious_payloads WHERE url = ?", (url,))
         row = c.fetchone()
         conn.close()
 

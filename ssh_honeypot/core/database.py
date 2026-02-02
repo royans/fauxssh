@@ -99,29 +99,40 @@ class SQLiteBackend(DatabaseBackend):
         command_text=None,
         created_at=None,
     ):
+        """
+        Consolidated URL logging.
+        Now redirects to add_malicious_payload to maintain a single source of truth.
+        """
+        import hashlib
+
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+
+        # Try to resolve IP from session if not provided
+        client_ip = "Unknown"
         conn = self._get_conn()
         try:
-            if created_at:
-                conn.execute(
-                    """
-                    INSERT INTO requested_urls (timestamp, session_id, url, method, user_agent, command_text)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                    (created_at, session_id, url, method, user_agent, command_text),
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO requested_urls (session_id, url, method, user_agent, command_text)
-                    VALUES (?, ?, ?, ?, ?)
-                """,
-                    (session_id, url, method, user_agent, command_text),
-                )
-            conn.commit()
-        except Exception as e:
-            log.error(f"[DB] Error logging URL request: {e}")
+            row = conn.execute(
+                "SELECT ip FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            if row:
+                client_ip = row[0]
+        except:
+            pass
         finally:
             conn.close()
+
+        self.add_malicious_payload(
+            url=url,
+            url_hash=url_hash,
+            session_id=session_id,
+            ip=client_ip,
+            timestamp=created_at,
+            method=method,
+            user_agent=user_agent,
+            command_text=command_text,
+            status="discovered",
+            analysis_stage="Pending",
+        )
 
     def log_auth_event(
         self,
@@ -423,6 +434,9 @@ class SQLiteBackend(DatabaseBackend):
 
         except Exception as e:
             log.error(f"[DB] Error in Payload Pipeline: {e}")
+            import traceback
+
+            traceback.print_exc()
 
     # Removed get_cached_response (Deprecated in favor of UniversalCache)
 
@@ -2280,7 +2294,25 @@ class SQLiteBackend(DatabaseBackend):
 
         return "\n".join(report)
 
-    # --- Malicious Payload Methods (Jan 10) ---
+    def get_malicious_payload_by_hash(self, url_hash):
+        """Fetches a payload record by its URL hash."""
+        conn = self._get_conn()
+        try:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM malicious_payloads WHERE url_hash = ?", (url_hash,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+        except Exception as e:
+            log.error(f"[SQLite] Error fetching payload by hash: {e}")
+            return None
+        finally:
+            conn.close()
+
     def add_malicious_payload(
         self,
         url,
@@ -2289,10 +2321,16 @@ class SQLiteBackend(DatabaseBackend):
         ip,
         timestamp=None,
         status="pending",
+        analysis_stage="Downloading",
         payload_md5=None,
         payload_size=None,
         file_path=None,
         snippet=None,
+        content=None,
+        is_binary=False,
+        method=None,
+        user_agent=None,
+        command_text=None,
         **kwargs,
     ):
         conn = self._get_conn()
@@ -2307,16 +2345,24 @@ class SQLiteBackend(DatabaseBackend):
             cursor.execute(
                 """
                 INSERT INTO malicious_payloads (
-                    url, url_hash, session_id, ip, timestamp, status,
-                    payload_md5, payload_size, file_path, snippet
+                    url, url_hash, session_id, ip, timestamp, status, analysis_stage,
+                    payload_md5, payload_size, file_path, snippet, content, is_binary,
+                    method, user_agent, command_text
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (url_hash) DO UPDATE SET
-                    payload_md5 = excluded.payload_md5,
-                    payload_size = excluded.payload_size,
-                    file_path = excluded.file_path,
-                    snippet = excluded.snippet,
-                    status = excluded.status
+                    payload_md5 = COALESCE(excluded.payload_md5, malicious_payloads.payload_md5),
+                    payload_size = COALESCE(excluded.payload_size, malicious_payloads.payload_size),
+                    file_path = COALESCE(excluded.file_path, malicious_payloads.file_path),
+                    snippet = COALESCE(excluded.snippet, malicious_payloads.snippet),
+                    content = COALESCE(excluded.content, malicious_payloads.content),
+                    is_binary = COALESCE(excluded.is_binary, malicious_payloads.is_binary),
+                    status = excluded.status,
+                    analysis_stage = excluded.analysis_stage,
+                    timestamp = excluded.timestamp,
+                    method = COALESCE(excluded.method, malicious_payloads.method),
+                    user_agent = COALESCE(excluded.user_agent, malicious_payloads.user_agent),
+                    command_text = COALESCE(excluded.command_text, malicious_payloads.command_text)
             """,
                 (
                     url,
@@ -2325,10 +2371,16 @@ class SQLiteBackend(DatabaseBackend):
                     ip,
                     ts,
                     status,
+                    analysis_stage,
                     payload_md5,
                     payload_size,
                     file_path,
                     snippet,
+                    content,
+                    1 if is_binary else 0,
+                    method,
+                    user_agent,
+                    command_text,
                 ),
             )
 
@@ -2339,7 +2391,7 @@ class SQLiteBackend(DatabaseBackend):
             row = cursor.fetchone()
             payload_id = row[0] if row else None
 
-            # 2. Track Request (Always)
+            # 2. Add to payload_requests (Hit Log)
             if payload_id:
                 cursor.execute(
                     """
@@ -2350,10 +2402,78 @@ class SQLiteBackend(DatabaseBackend):
                 )
 
             conn.commit()
+            return payload_id
+        except Exception as e:
+            log.error(f"[DB] Error adding malicious payload: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def update_payload_analysis(
+        self,
+        payload_md5,
+        virustotal_result=None,
+        risk_score=None,
+        analysis_summary=None,
+        vt_last_scanned=None,
+        payload_size=None,
+        file_path=None,
+    ):
+        """Updates or inserts deduplicated payload analysis data."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO payload_analysis (
+                    payload_md5, virustotal_result, risk_score, analysis_summary,
+                    vt_last_scanned, payload_size, file_path, analyzed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT (payload_md5) DO UPDATE SET
+                    virustotal_result = COALESCE(excluded.virustotal_result, payload_analysis.virustotal_result),
+                    risk_score = COALESCE(excluded.risk_score, payload_analysis.risk_score),
+                    analysis_summary = COALESCE(excluded.analysis_summary, payload_analysis.analysis_summary),
+                    vt_last_scanned = COALESCE(excluded.vt_last_scanned, payload_analysis.vt_last_scanned),
+                    payload_size = COALESCE(excluded.payload_size, payload_analysis.payload_size),
+                    file_path = COALESCE(excluded.file_path, payload_analysis.file_path),
+                    analyzed_at = CURRENT_TIMESTAMP
+            """,
+                (
+                    payload_md5,
+                    virustotal_result,
+                    risk_score,
+                    analysis_summary,
+                    vt_last_scanned,
+                    payload_size,
+                    file_path,
+                ),
+            )
+            conn.commit()
             return True
         except Exception as e:
-            log.error(f"[DB] Error adding payload: {e}")
+            log.error(f"[DB] Error updating payload analysis: {e}")
             return False
+        finally:
+            conn.close()
+
+    def get_payload_analysis(self, payload_md5):
+        """Fetches deduplicated analysis data for a given file hash."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM payload_analysis WHERE payload_md5 = ?", (payload_md5,)
+            )
+            row = cursor.fetchone()
+            if row:
+                # Convert to dict
+                columns = [column[0] for column in cursor.description]
+                return dict(zip(columns, row))
+            return None
+        except Exception as e:
+            log.error(f"[DB] Error fetching payload analysis: {e}")
+            return None
         finally:
             conn.close()
 
@@ -2482,13 +2602,39 @@ class SQLiteBackend(DatabaseBackend):
         try:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-            # Prioritize oldest pending
+            # Prioritize oldest pending or stuck
             cur.execute(
-                "SELECT * FROM malicious_payloads WHERE status = 'pending' ORDER BY timestamp ASC LIMIT ?",
+                """
+                SELECT * FROM malicious_payloads 
+                WHERE status IN ('pending', 'discovered') 
+                   OR (status = 'downloading' AND timestamp < datetime('now', '-1 hour'))
+                ORDER BY timestamp ASC 
+                LIMIT ?
+                """,
                 (limit,),
             )
             # Convert to dicts
             return [dict(row) for row in cur.fetchall()]
+        except Exception as e:
+            log.error(f"[SQLite] Error fetching pending payloads: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def update_payload_file_path(self, payload_id, file_path):
+        """Updates the file_path for a payload (used by self-healing)."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE malicious_payloads SET file_path = ? WHERE id = ?",
+                (file_path, payload_id),
+            )
+            conn.commit()
+            return True
+        except Exception as e:
+            log.error(f"[SQLite] Error updating payload file path: {e}")
+            return False
         finally:
             conn.close()
 
@@ -2496,11 +2642,16 @@ class SQLiteBackend(DatabaseBackend):
         self,
         payload_id,
         status,
+        analysis_stage=None,
         payload_md5=None,
         payload_size=None,
         file_path=None,
         error=None,
         snippet=None,
+        content=None,
+        is_binary=None,
+        vt_scan_id=None,
+        vt_last_scanned=None,
         **kwargs,
     ):
         conn = self._get_conn()
@@ -2508,6 +2659,9 @@ class SQLiteBackend(DatabaseBackend):
             sql = "UPDATE malicious_payloads SET status = ?"
             params = [status]
 
+            if analysis_stage:
+                sql += ", analysis_stage = ?"
+                params.append(analysis_stage)
             if payload_md5:
                 sql += ", payload_md5 = ?"
                 params.append(payload_md5)
@@ -2516,13 +2670,25 @@ class SQLiteBackend(DatabaseBackend):
                 params.append(payload_size)
             if file_path:
                 sql += ", file_path = ?"
-                params.append(sanitize_path(file_path))
+                params.append(file_path)
             if snippet:
                 sql += ", snippet = ?"
                 params.append(snippet)
+            if content:
+                sql += ", content = ?"
+                params.append(content)
+            if is_binary is not None:
+                sql += ", is_binary = ?"
+                params.append(1 if is_binary else 0)
             if error:
                 sql += ", error_message = ?"
                 params.append(error)
+            if vt_scan_id:
+                sql += ", vt_scan_id = ?"
+                params.append(vt_scan_id)
+            if vt_last_scanned:
+                sql += ", vt_last_scanned = ?"
+                params.append(vt_last_scanned)
 
             sql += " WHERE id = ?"
             params.append(payload_id)
@@ -2531,6 +2697,100 @@ class SQLiteBackend(DatabaseBackend):
             conn.commit()
         except Exception as e:
             log.error(f"[DB] Error updating payload status: {e}")
+        finally:
+            conn.close()
+
+    def get_payload_summary(self, hours=24):
+        """Returns unique payloads by MD5 with server and attacker counts."""
+        conn = self._get_conn()
+        try:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            time_filter = f"datetime('now', '-{hours} hours')"
+            c.execute(
+                f"""
+                SELECT p.payload_md5, MAX(p.timestamp) as last_seen, 
+                       COUNT(DISTINCT p.id) as server_count,
+                       COUNT(DISTINCT pr.ip) as attacker_count,
+                       MAX(p.status) as status, MAX(p.analysis_stage) as analysis_stage,
+                       MAX(p.virustotal_result) as vt_res,
+                       MAX(p.payload_size) as size,
+                       MAX(p.url) as sample_url
+                FROM malicious_payloads p
+                LEFT JOIN payload_requests pr ON p.id = pr.payload_id
+                WHERE p.payload_md5 IS NOT NULL AND p.timestamp > {time_filter}
+                GROUP BY p.payload_md5
+                ORDER BY last_seen DESC
+            """
+            )
+            return [dict(row) for row in c.fetchall()]
+        except Exception as e:
+            log.error(f"[DB] Error fetching payload summary: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_payload_details(self, md5):
+        """Returns detailed info for a specific MD5, including content and occurrences."""
+        conn = self._get_conn()
+        try:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            # Get the core payload info (from the oldest entry for this MD5)
+            c.execute(
+                "SELECT * FROM malicious_payloads WHERE payload_md5 = ? ORDER BY timestamp ASC LIMIT 1",
+                (md5,),
+            )
+            base = c.fetchone()
+            if not base:
+                return None
+
+            base_dict = dict(base)
+
+            # If content is missing, try to read it from disk
+            if (not base_dict.get("content")) and base_dict.get("file_path"):
+                try:
+                    fpath = base_dict["file_path"]
+                    from ssh_honeypot.core.utils import (
+                        get_data_dir,
+                        PROJECT_ROOT,
+                        get_storable_content,
+                    )
+
+                    actual_path = fpath.replace("<DATA_DIR>", get_data_dir()).replace(
+                        "<ROOT>", PROJECT_ROOT
+                    )
+
+                    if os.path.exists(actual_path):
+                        with open(actual_path, "rb") as f:
+                            raw_content = f.read(1024 * 1024)  # 1MB limit
+                            db_content, _ = get_storable_content(raw_content)
+                            base_dict["content"] = db_content
+                except Exception as e:
+                    # We can't use log here if not imported, but database.py usually has it
+                    pass
+
+            base_dict["occurrences"] = []
+
+            # Get all occurrences/requests
+            c.execute(
+                """
+                SELECT pr.timestamp, pr.ip, pr.session_id, s.protocol
+                FROM payload_requests pr
+                LEFT JOIN malicious_payloads p ON pr.payload_id = p.id
+                LEFT JOIN sessions s ON pr.session_id = s.session_id
+                WHERE p.payload_md5 = ?
+                ORDER BY pr.timestamp DESC
+            """,
+                (md5,),
+            )
+            occurrences = [dict(row) for row in c.fetchall()]
+            base_dict["occurrences"] = occurrences
+
+            return base_dict
+        except Exception as e:
+            log.error(f"[DB] Error fetching payload details: {e}")
+            return None
         finally:
             conn.close()
 
@@ -2668,6 +2928,33 @@ class SQLiteBackend(DatabaseBackend):
         finally:
             conn.close()
 
+    def get_pending_analysis_payloads(self, limit=5):
+        """Fetches payloads that have been downloaded but not yet analyzed by VT."""
+        conn = self._get_conn()
+        try:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            # We join with payload_analysis and find items where analysis is missing
+            cursor.execute(
+                """
+                SELECT p.* FROM malicious_payloads p
+                LEFT JOIN payload_analysis a ON p.payload_md5 = a.payload_md5
+                WHERE p.status = 'completed' 
+                AND p.payload_md5 IS NOT NULL
+                AND a.payload_md5 IS NULL
+                AND (p.vt_last_scanned IS NULL OR p.vt_last_scanned < datetime('now', '-15 minutes'))
+                ORDER BY p.timestamp DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            return [dict(r) for r in cursor.fetchall()]
+        except Exception as e:
+            log.error(f"[SQLite] Error fetching pending analysis payloads: {e}")
+            return []
+        finally:
+            conn.close()
+
     def get_next_payload_for_analysis(self):
         """Fetch one payload that hasn't been scanned by VT yet."""
         conn = self._get_conn()
@@ -2699,13 +2986,13 @@ class SQLiteBackend(DatabaseBackend):
             timestamp = datetime.datetime.now().isoformat()
             if scan_id:
                 conn.execute(
-                    "UPDATE malicious_payloads SET virustotal_result = ?, vt_last_scanned = ?, vt_scan_id = ? WHERE id = ?",
-                    (result, timestamp, scan_id, payload_id),
+                    "UPDATE malicious_payloads SET vt_last_scanned = ?, vt_scan_id = ? WHERE id = ?",
+                    (timestamp, scan_id, payload_id),
                 )
             else:
                 conn.execute(
-                    "UPDATE malicious_payloads SET virustotal_result = ?, vt_last_scanned = ? WHERE id = ?",
-                    (result, timestamp, payload_id),
+                    "UPDATE malicious_payloads SET vt_last_scanned = ? WHERE id = ?",
+                    (timestamp, payload_id),
                 )
             conn.commit()
         except Exception as e:
@@ -2738,11 +3025,8 @@ class SQLiteBackend(DatabaseBackend):
         """Purges cached responses containing Internal Logic error messages."""
         conn = self._get_conn()
         try:
-            # Purge legacy and new internal error markers
+            # Purge internal error markers from active tables
             c = conn.cursor()
-            c.execute(
-                "DELETE FROM command_cache WHERE response LIKE '%Internal Logic Offline%' OR response LIKE '%INTERNAL_ERROR%'"
-            )
             c.execute(
                 "DELETE FROM interactions WHERE response LIKE '%Internal Logic Offline%' OR response LIKE '%INTERNAL_ERROR%'"
             )
@@ -2894,6 +3178,33 @@ class SQLiteBackend(DatabaseBackend):
         finally:
             conn.close()
 
+    def delete_cache_by_pattern(self, pattern):
+        """Removes items from universal_cache where output_text matches pattern. Returns list of (key, service)."""
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            # 1. Get Keys first
+            c.execute(
+                "SELECT cache_key, service FROM universal_cache WHERE output_text LIKE ?",
+                (f"%{pattern}%",),
+            )
+            rows = c.fetchall()
+            keys = [(r[0], r[1]) for r in rows]
+
+            if keys:
+                # 2. Delete
+                c.execute(
+                    "DELETE FROM universal_cache WHERE output_text LIKE ?",
+                    (f"%{pattern}%",),
+                )
+                conn.commit()
+            return keys
+        except Exception as e:
+            log.error(f"[SQLite] Failed to delete cache by pattern: {e}")
+            return []
+        finally:
+            conn.close()
+
     def get_llm_response(self, prompt_hash):
         """Legacy wrapper - redirected to get_cache_item."""
         item = self.get_cache_item(prompt_hash)
@@ -2958,8 +3269,10 @@ class SQLiteBackend(DatabaseBackend):
             c.execute(
                 """
                 SELECT p.id, p.timestamp, p.url, p.payload_md5, p.status, 
-                       p.virustotal_result, s.protocol, p.snippet, p.session_id
+                       a.virustotal_result, s.protocol, p.snippet, p.session_id,
+                       a.risk_score, a.analysis_summary
                 FROM malicious_payloads p
+                LEFT JOIN payload_analysis a ON p.payload_md5 = a.payload_md5
                 LEFT JOIN sessions s ON p.session_id = s.session_id
                 ORDER BY p.timestamp DESC LIMIT ?
                 """,
@@ -2967,23 +3280,33 @@ class SQLiteBackend(DatabaseBackend):
             )
 
             for row in c.fetchall():
-                pid, ts, url, md5, status, vt_res, protocol, snippet, sid = row
+                (
+                    pid,
+                    ts,
+                    url,
+                    md5,
+                    status,
+                    vt_res,
+                    protocol,
+                    snippet,
+                    sid,
+                    risk_score,
+                    analysis_summary,
+                ) = row
 
                 # Parse Analysis
-                risk_score = 0
-                explanation = "Pending Analysis"
+                final_risk_score = risk_score or 0
+                explanation = analysis_summary or "Pending Analysis"
 
-                if vt_res and vt_res.startswith("{"):
+                if vt_res and vt_res.startswith("{") and not final_risk_score:
                     try:
                         import json
 
                         vt_data = json.loads(vt_res)
-                        # Try to extract risk if we stored it there, or default
-                        # If we have a 'classification' or 'stats', we can infer risk
                         stats = vt_data.get("stats", {})
                         malicious = stats.get("malicious", 0)
                         if malicious > 0:
-                            risk_score = min(malicious * 10, 100)
+                            final_risk_score = min(malicious * 10, 100)
                             explanation = f"Flagged by {malicious} engines"
                         elif "error" in vt_data:
                             explanation = "Analysis Error"
@@ -3014,8 +3337,8 @@ class SQLiteBackend(DatabaseBackend):
                         "url": url,
                         "md5": md5,
                         "status": status,
-                        "protocol": protocol,  # Can be None if derived from interactions/upload
-                        "risk_score": risk_score,  # Integer 0-100
+                        "protocol": protocol,
+                        "risk_score": final_risk_score,
                         "explanation": explanation,
                         "snippet": snippet if snippet else "",
                         "session_id": sid,

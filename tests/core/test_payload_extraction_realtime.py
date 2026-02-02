@@ -28,14 +28,21 @@ class TestPayloadExtractionRealTime(unittest.TestCase):
 
         context = {
             "session_id": "sess_123",
+            "ip": "1.2.3.4",
             "client_ip": "1.2.3.4",
             "vfs": {},
             "cwd": "/root",
         }
 
-        # Configure PayloadManager mock to return the URL when extract_urls is called
+        # Configure PayloadManager mock to return the URL ONLY for the raw command
         expected_url = "http://147.182.224.216/kias"
-        self.mock_pm.extract_urls.return_value = [expected_url]
+
+        def extract_side_effect(text):
+            if text == cmd:
+                return [expected_url]
+            return []
+
+        self.mock_pm.extract_urls.side_effect = extract_side_effect
 
         # Execute
         self.handler.process_command(cmd, context)
@@ -43,9 +50,13 @@ class TestPayloadExtractionRealTime(unittest.TestCase):
         # Verify extract_urls was called with the raw command
         self.mock_pm.extract_urls.assert_any_call(cmd)
 
-        # Verify queue_payload was called
-        self.mock_pm.queue_payload.assert_called_with(
-            expected_url, "sess_123", "1.2.3.4", ANY  # usage of datetime.datetime.now()
+        # Verify queue_payload was called for the TOP-LEVEL command
+        self.mock_pm.queue_payload.assert_any_call(
+            expected_url,
+            "sess_123",
+            "1.2.3.4",
+            ANY,  # usage of datetime.datetime.now()
+            command_text=cmd,
         )
 
 

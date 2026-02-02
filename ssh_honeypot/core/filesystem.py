@@ -8,6 +8,11 @@ def resolve_path(cwd, path):
     Resolves a path relative to the current working directory.
     Handles ~, ., ..
     """
+    if path is None:
+        path = "."
+    if cwd is None:
+        cwd = "/"
+
     if path.startswith("~"):
         # Expand ~ manually based on simple heuristics since we don't have user context here easily
         # But we can try to guess or just return unmodified if we can't.

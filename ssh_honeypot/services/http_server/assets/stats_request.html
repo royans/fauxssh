@@ -685,6 +685,120 @@
             border-color: var(--accent);
             color: var(--accent);
         }
+
+        /* --- Payloads CSS --- */
+        .stage-track {
+            display: flex;
+            justify-content: space-between;
+            margin: 20px 0;
+            position: relative;
+            padding-bottom: 25px;
+        }
+
+        .stage-track::before {
+            content: "";
+            position: absolute;
+            top: 15px;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: var(--border);
+            z-index: 1;
+        }
+
+        .stage-item {
+            position: relative;
+            z-index: 2;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            width: 20%;
+        }
+
+        .stage-dot {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: var(--bg-card);
+            border: 2px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.8rem;
+            font-weight: bold;
+            color: var(--text-dim);
+            transition: all 0.3s;
+        }
+
+        .stage-item.complete .stage-dot {
+            background: var(--risk-low);
+            border-color: var(--risk-low);
+            color: white;
+        }
+
+        .stage-item.active .stage-dot {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: white;
+            box-shadow: 0 0 10px var(--accent);
+        }
+
+        .stage-label {
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            text-align: center;
+            position: absolute;
+            top: 40px;
+            white-space: nowrap;
+        }
+
+        .stage-item.active .stage-label {
+            color: var(--text-main);
+            font-weight: 600;
+        }
+
+        .payload-meta-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+
+        .meta-item {
+            background: var(--bg-page);
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+
+        .meta-label {
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+
+        .meta-value {
+            font-weight: 600;
+            font-family: 'JetBrains Mono', monospace;
+            word-break: break-all;
+        }
+
+        .ip-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .ip-tag {
+            background: var(--border);
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+        }
     </style>
 </head>
 
@@ -705,6 +819,7 @@
                     <button class="range-btn" id="btn-1W" onclick="setWindow('1W')">1W</button>
                 </div>
                 <a class="nav-link active" id="link-dashboard" onclick="setView('dashboard')">Dashboard</a>
+                <a class="nav-link" id="link-payloads" onclick="setView('payloads')">Payloads</a>
                 <a class="nav-link" id="link-about" onclick="setView('about')">About</a>
                 <button class="theme-toggle" onclick="toggleTheme()" title="Toggle Dark/Light Mode">
                     <svg id="theme-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1063,6 +1178,115 @@
                 </div>
             </div>
         </div>
+
+        <!-- Payloads View -->
+        <div id="view-payloads" class="view">
+            <header class="page-header">
+                <h1>Malicious Payloads</h1>
+                <p>Track malware distribution and file-based threats captured by the honeypot.</p>
+            </header>
+
+            <div class="chart-box">
+                <div class="chart-title">
+                    <h2>Captured Payloads (Unique by MD5)</h2>
+                </div>
+                <div class="table-wrap">
+                    <table class="table-fixed" id="table-payload-summary">
+                        <thead>
+                            <tr>
+                                <th>Last Seen</th>
+                                <th>MD5 Hash</th>
+                                <th>Size</th>
+                                <th>Servers</th>
+                                <th>Attackers</th>
+                                <th>Status / Stage</th>
+                                <th>Risk</th>
+                            </tr>
+                        </thead>
+                        <tbody id="payload-summary-body">
+                            <!-- Populated by JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="tooltip">Click for session details</div>
+
+    <!-- Payload Details Modal -->
+    <div class="modal-overlay" id="payload-modal" onclick="closePayloadModal(event)">
+        <div class="modal" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h2 id="payload-modal-title">Payload Analysis</h2>
+                <button class="modal-close" onclick="closePayloadModal(event)">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- Analysis Stages -->
+                <div class="stage-track" id="payload-stages">
+                    <div class="stage-item" id="stage-down-ing">
+                        <div class="stage-dot">1</div>
+                        <div class="stage-label">Queued</div>
+                    </div>
+                    <div class="stage-item" id="stage-down-ed">
+                        <div class="stage-dot">2</div>
+                        <div class="stage-label">Downloaded</div>
+                    </div>
+                    <div class="stage-item" id="stage-queue">
+                        <div class="stage-dot">3</div>
+                        <div class="stage-label">Queued VT</div>
+                    </div>
+                    <div class="stage-item" id="stage-analyzed">
+                        <div class="stage-dot">4</div>
+                        <div class="stage-label">Analyzed</div>
+                    </div>
+                    <div class="stage-item" id="stage-decision">
+                        <div class="stage-dot">5</div>
+                        <div class="stage-label">Risk Decision</div>
+                    </div>
+                </div>
+
+                <div class="payload-meta-grid">
+                    <div class="meta-item">
+                        <div class="meta-label">MD5 Hash</div>
+                        <div class="meta-value" id="p-meta-md5">-</div>
+                    </div>
+                    <div class="meta-item">
+                        <div class="meta-label">File Size</div>
+                        <div class="meta-value" id="p-meta-size">-</div>
+                    </div>
+                    <div class="meta-item">
+                        <div class="meta-label">First Seen</div>
+                        <div class="meta-value" id="p-meta-first">-</div>
+                    </div>
+                </div>
+
+                <div class="copy-section">
+                    <div class="copy-header">
+                        <strong>Unique Attackers (Obfuscated)</strong>
+                    </div>
+                    <div class="ip-list" id="p-attacker-list">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+
+                <div class="copy-section">
+                    <div class="copy-header">
+                        <strong>Captured Content / Strings</strong>
+                        <button class="btn-copy" onclick="copyText('p-content')">Copy</button>
+                    </div>
+                    <pre id="p-content" style="max-height: 400px; overflow-y: auto; font-size: 0.85rem;"></pre>
+                </div>
+
+                <div class="copy-section" id="p-vt-section" style="display:none">
+                    <div class="copy-header">
+                        <strong>VirusTotal Intelligence</strong>
+                    </div>
+                    <pre id="p-vt-report" style="font-size: 0.75rem; color: var(--risk-low);"></pre>
+                </div>
+            </div>
+        </div>
+    </div>
     </div>
 
     <div id="tooltip">Click for session details</div>
@@ -1117,13 +1341,196 @@
         }
 
         // Navigation
-        function setView(view) {
+        function setView(view, pushState = true) {
             currentView = view;
             document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-            document.getElementById(`view-${view}`).classList.add('active');
+            const v = document.getElementById(`view-${view}`);
+            if (v) v.classList.add('active');
 
             document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
-            document.getElementById(`link-${view}`).classList.add('active');
+            const l = document.getElementById(`link-${view}`);
+            if (l) l.classList.add('active');
+
+            if (pushState) {
+                const url = new URL(window.location);
+                url.searchParams.set('view', view);
+                if (view !== 'payloads') url.searchParams.delete('md5');
+                window.history.pushState({ view: view }, '', url);
+            }
+
+            if (view === 'payloads') {
+                fetchPayloads();
+            }
+        }
+
+        window.addEventListener('popstate', (event) => {
+            const params = new URLSearchParams(window.location.search);
+            const view = params.get('view') || 'dashboard';
+            const md5 = params.get('md5');
+
+            if (currentView !== view) {
+                setView(view, false);
+            }
+
+            if (md5) {
+                openPayloadModal(md5, false);
+            } else {
+                closePayloadModal(null, false);
+            }
+        });
+
+        // Initialize from URL
+        window.addEventListener('load', () => {
+            const params = new URLSearchParams(window.location.search);
+            const view = params.get('view') || 'dashboard';
+            const md5 = params.get('md5');
+
+            setView(view, false);
+            if (md5) {
+                openPayloadModal(md5, false);
+            }
+        });
+
+        async function fetchPayloads() {
+            const container = document.getElementById('payload-summary-body');
+            container.innerHTML = '<tr><td colspan="7" style="text-align:center; padding: 40px;">Fetching threats...</td></tr>';
+
+            try {
+                const hours = currentWindow === '1H' ? 1 : (currentWindow === '1W' ? 168 : 24);
+                const resp = await fetch(`/api/payloads?hours=${hours}`);
+                const data = await resp.json();
+                renderPayloadSummary(data);
+            } catch (e) {
+                container.innerHTML = '<tr><td colspan="7" style="text-align:center; color: var(--risk-high); padding: 40px;">Error Loading Payloads</td></tr>';
+            }
+        }
+
+        function renderPayloadSummary(payloads) {
+            const container = document.getElementById('payload-summary-body');
+            if (payloads.length === 0) {
+                container.innerHTML = '<tr><td colspan="7" style="text-align:center; padding: 40px;">No payloads captured in this window.</td></tr>';
+                return;
+            }
+
+            container.innerHTML = payloads.map(p => {
+                let riskText = 'Pending';
+                let riskColor = 'var(--text-dim)';
+                if (p.vt_res) {
+                    try {
+                        const vt = JSON.parse(p.vt_res);
+                        const mal = vt.stats?.malicious || 0;
+                        riskText = mal > 0 ? `${mal} Engines` : 'Clean / Unknown';
+                        riskColor = mal > 0 ? 'var(--risk-high)' : 'var(--risk-low)';
+                    } catch (e) { riskText = 'Error'; }
+                }
+
+                return `
+                    <tr onclick="openPayloadModal('${p.payload_md5}')" style="cursor:pointer">
+                        <td>${new Date(p.last_seen).toLocaleString()}</td>
+                        <td class="meta-value" style="font-size:0.8rem">${p.payload_md5}</td>
+                        <td>${(p.size / 1024).toFixed(1)} KB</td>
+                        <td>${p.server_count}</td>
+                        <td style="color:var(--accent); font-weight:600">${p.attacker_count}</td>
+                        <td><span class="status-pill" style="padding: 4px 8px; font-size: 0.7rem; border-color:var(--border)">${p.analysis_stage}</span></td>
+                        <td style="color:${riskColor}; font-weight:bold">${riskText}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        async function openPayloadModal(md5, pushState = true) {
+            const modal = document.getElementById('payload-modal');
+            modal.style.display = 'flex';
+
+            if (pushState) {
+                const url = new URL(window.location);
+                url.searchParams.set('md5', md5);
+                url.searchParams.set('view', 'payloads');
+                window.history.pushState({ md5: md5 }, '', url);
+            }
+
+            // Reset modal
+            document.getElementById('p-meta-md5').innerText = md5;
+            document.getElementById('p-content').innerText = 'Loading...';
+            document.getElementById('p-attacker-list').innerHTML = '';
+            document.getElementById('p-vt-section').style.display = 'none';
+            document.querySelectorAll('.stage-item').forEach(s => s.classList.remove('active', 'complete'));
+
+            try {
+                const resp = await fetch(`/api/payload_details?md5=${md5}`);
+                const data = await resp.json();
+
+                document.getElementById('p-meta-size').innerText = (data.payload_size / 1024).toFixed(1) + ' KB';
+                document.getElementById('p-meta-first').innerText = new Date(data.timestamp).toLocaleString();
+                document.getElementById('p-content').innerText = data.content || data.snippet || 'No content captured.';
+
+                // VT Report
+                if (data.virustotal_result) {
+                    document.getElementById('p-vt-section').style.display = 'block';
+                    try {
+                        const vt = JSON.parse(data.virustotal_result);
+                        const mal = vt.stats?.malicious || 0;
+                        const total = (vt.stats?.malicious + vt.stats?.harmless + vt.stats?.undetected) || 0;
+                        const title = mal > 0 ? `<span style="color:var(--risk-high)">DETECTED: ${mal}/${total} Engines</span>` : 'Clean / Unknown';
+
+                        document.getElementById('p-vt-report').innerHTML = `
+                            <div style="margin-bottom:10px; font-weight:bold; font-size:1rem">${title}</div>
+                            <pre style="font-size: 0.75rem; color: var(--risk-low); max-height:200px; overflow:auto">${JSON.stringify(vt, null, 2)}</pre>
+                        `;
+                    } catch (e) {
+                        document.getElementById('p-vt-report').innerText = data.virustotal_result;
+                    }
+                }
+
+                // Attackers (Truncated to 5)
+                if (data.occurrences) {
+                    const uniqueIps = [...new Set(data.occurrences.map(o => o.ip).filter(ip => ip !== 'null' && ip !== null))];
+                    const displayIps = uniqueIps.slice(0, 5);
+                    const remaining = uniqueIps.length - displayIps.length;
+
+                    let html = displayIps.map(ip => `<div class="ip-tag">${ip}</div>`).join('');
+                    if (remaining > 0) {
+                        html += `<div class="ip-tag more" style="background:none; border:1px dashed var(--border)">+${remaining} more</div>`;
+                    }
+                    document.getElementById('p-attacker-list').innerHTML = html;
+                }
+
+                // Stages
+                const stageMap = {
+                    'Downloading': 0,
+                    'Downloaded': 1,
+                    'QueueForAnalysis': 2,
+                    'Analyzed': 3,
+                    'hasRiskDecision': 4
+                };
+                let currentStageIdx = stageMap[data.analysis_stage] !== undefined ? stageMap[data.analysis_stage] : -1;
+
+                // Logic correction: if we have content, we must be at least "Downloaded"
+                if (currentStageIdx < 1 && (data.content || data.snippet)) {
+                    currentStageIdx = 1;
+                }
+                const stages = ['stage-down-ing', 'stage-down-ed', 'stage-queue', 'stage-analyzed', 'stage-decision'];
+
+                stages.forEach((id, idx) => {
+                    const el = document.getElementById(id);
+                    if (idx < currentStageIdx) el.classList.add('complete');
+                    if (idx === currentStageIdx) el.classList.add('active');
+                    // Special case: if hasRiskDecision, Analyzed is also complete
+                    if (currentStageIdx === 4 && idx === 3) el.classList.add('complete');
+                });
+
+            } catch (e) {
+                document.getElementById('p-content').innerText = 'Error loading details.';
+            }
+        }
+
+        function closePayloadModal(e) {
+            document.getElementById('payload-modal').style.display = 'none';
+            // Clear URL params so reload doesn't reopen it
+            const url = new URL(window.location);
+            url.searchParams.delete('view');
+            url.searchParams.delete('md5');
+            window.history.replaceState({}, '', url);
         }
 
         function setWindow(w) {

@@ -23,6 +23,8 @@ class TestPayloadRealtime(unittest.TestCase):
         def config_side_effect(*args, **kwargs):
             if len(args) > 1 and args[1] == "notify_threshold":
                 return 60
+            if len(args) > 1 and args[0] == "persona" and args[1] == "filesystem":
+                return {}
             return "Generic Linux Server"
 
         self.mock_config_get.side_effect = config_side_effect
@@ -31,7 +33,8 @@ class TestPayloadRealtime(unittest.TestCase):
         self.config_patcher.stop()
 
     @patch("ssh_honeypot.core.payload_manager.PayloadManager.download_and_analyze_sync")
-    def test_wget_realtime_download(self, mock_download):
+    @patch("ssh_honeypot.core.universal_cache.UniversalCache.get", return_value=None)
+    def test_wget_realtime_download(self, mock_uc_get, mock_download):
         # Setup mock download to return script content
         script_content = "#!/bin/bash\necho 'Malware Running...'\n"
         mock_download.return_value = script_content.encode()

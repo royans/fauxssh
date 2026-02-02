@@ -18,7 +18,7 @@ class TestPayloadIntegration(unittest.TestCase):
             os.remove(self.db_path)
 
         os.environ["FAUXSSH_DB_PATH"] = self.db_path
-        self.db = HoneyDB()
+        self.db = HoneyDB(self.db_path)
         # Initialize schema if needed (usually auto in __init__)
 
         # Mock LLM

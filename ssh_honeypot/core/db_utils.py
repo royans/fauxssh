@@ -1,4 +1,4 @@
-from .db_schema import TABLE_SCHEMAS, INDEXES
+from .db_schema import TABLE_SCHEMAS, INDEXES, ORPHAN_TABLES
 from .logging_setup import log
 
 
@@ -21,6 +21,21 @@ def sync_db_schema(backend):
 
     try:
         cursor = conn.cursor()
+
+        # Step 0: Cleanup Orphan Tables (Legacy)
+        for table_name in ORPHAN_TABLES:
+            try:
+                cursor.execute(f"DROP TABLE IF EXISTS {table_name} CASCADE")
+                log.info(f"[DB] Dropped legacy orphan table: {table_name}")
+            except Exception as e:
+                # If cascade is not supported (SQLite), try without it
+                try:
+                    cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
+                    log.info(
+                        f"[DB] Dropped legacy orphan table (No CASCADE): {table_name}"
+                    )
+                except Exception as e2:
+                    log.warning(f"[DB] Failed to drop legacy table {table_name}: {e2}")
 
         # Apply SQLite-specific optimizations if needed
         if not is_postgres:

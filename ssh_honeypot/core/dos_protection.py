@@ -24,18 +24,39 @@ class DoSProtector:
     def _load_bans(self):
         try:
             if os.path.exists(self.ban_file):
+                from ssh_honeypot.core.utils import get_ignored_ips
+
+                ignored_ips = get_ignored_ips()
+                should_save = False
+                valid_bans = {}
+
                 with open(self.ban_file, "r") as f:
                     data = json.load(f)
                     now = time.time()
                     count = 0
                     for ip, until in data.items():
+                        if ip in ignored_ips:
+                            log.info(
+                                f"[DoS Protection] Pruning ignored IP {ip} from ban list."
+                            )
+                            should_save = True
+                            continue
+
                         if until > now:
                             self.tracking[ip]["banned_until"] = until
+                            valid_bans[ip] = until
                             count += 1
-                    if count > 0:
-                        log.info(
-                            f"[DoS Protection] Loadded {count} active bans from persistence."
-                        )
+                        else:
+                            should_save = True  # Prune expired
+
+                if count > 0:
+                    log.info(
+                        f"[DoS Protection] Loaded {count} active bans from persistence."
+                    )
+                if should_save:
+                    with open(self.ban_file, "w") as f:
+                        json.dump(valid_bans, f)
+
         except Exception as e:
             log.error(f"[DoS Protection] Failed to load bans: {e}")
 
@@ -67,11 +88,18 @@ class DoSProtector:
         Side Effects: Increments counters, logs ban events.
         """
         now = time.time()
-        record = self.tracking[ip]
 
         # 0. Allow Localhost (Safe for tests/admin)
         if ip in ["127.0.0.1", "::1"]:
             return True
+
+        # 0b. Allow Ignored IPs (ANALYTICS_IGNORE_IPS)
+        from ssh_honeypot.core.utils import get_ignored_ips
+
+        if ip in get_ignored_ips():
+            return True
+
+        record = self.tracking[ip]
 
         # 1. Check if Banned
         if record["banned_until"] > now:

@@ -83,13 +83,14 @@ class BaseHandler:
         # BaseHandler has self.llm.
 
         resp = self.llm.generate_response(
-            cmd_name,
-            cwd,
-            context.get("history"),
-            lookup_files,
-            context.get("known_paths", []),
+            command=cmd_name,
+            cwd=cwd,
+            history_context=context.get("history", []),
+            file_list=lookup_files,
+            known_paths=context.get("known_paths", []),
             client_ip=context.get("client_ip"),
             honeypot_ip=context.get("honeypot_ip"),
+            user=user,
             override_prompt=prompt,
         )
 
