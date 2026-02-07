@@ -418,19 +418,24 @@ class SQLiteBackend(DatabaseBackend):
 
                 if urls:
                     # Fetch IP for session
-                    conn = self._get_conn()
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "SELECT remote_ip FROM sessions WHERE session_id = ?",
-                        (session_id,),
-                    )
-                    row = cursor.fetchone()
-                    conn.close()
+                    conn = None
+                    try:
+                        conn = self._get_conn()
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "SELECT remote_ip FROM sessions WHERE session_id = ?",
+                            (session_id,),
+                        )
+                        row = cursor.fetchone()
+                        remote_ip = row[0] if row else "unknown"
 
-                    remote_ip = row[0] if row else "unknown"
-
-                    for url in urls:
-                        pm.queue_payload(url, session_id, remote_ip)
+                        for url in urls:
+                            pm.queue_payload(url, session_id, remote_ip)
+                    except Exception as pe:
+                        log.error(f"[DB] Payload IP lookup error: {pe}")
+                    finally:
+                        if conn:
+                            conn.close()
 
         except Exception as e:
             log.error(f"[DB] Error in Payload Pipeline: {e}")
@@ -1386,23 +1391,45 @@ class SQLiteBackend(DatabaseBackend):
             stats["total_payloads"] = c.fetchone()[0] or 0
 
             # --- PROTOCOL DISTRIBUTION ---
+            # Enhanced query to get IPs and Networks per protocol for filtering
             query = f"""
-                SELECT s.protocol, COUNT(DISTINCT s.session_id) as sess_count, COUNT(i.id) as cmd_count
+                SELECT 
+                    s.protocol, 
+                    COUNT(DISTINCT s.session_id) as sess_count, 
+                    COUNT(i.id) as cmd_count,
+                    COUNT(DISTINCT s.remote_ip) as ip_count,
+                    COUNT(DISTINCT intel.org) as net_count
                 FROM sessions s
                 LEFT JOIN interactions i ON s.session_id = i.session_id
+                LEFT JOIN ip_intelligence intel ON s.remote_ip = intel.ip
                 WHERE s.start_time > {time_filter} {ip_filter}
                 GROUP BY s.protocol
                 ORDER BY sess_count DESC
             """
             c.execute(query, params)
+            stats["protocol_stats"] = {}
             for r in c.fetchall():
                 proto = r[0]
+                sess_count = r[1]
+                cmd_count = r[2]
+                ip_count = r[3]
+                net_count = r[4]
+
+                # For Legacy Pie Chart
                 stats["service_dist"].append(
-                    {"protocol": proto, "sessions": r[1], "commands": r[2]}
+                    {"name": proto.upper(), "value": sess_count}
                 )
-                stats["protocol_activity"][proto] = r[
-                    2
-                ]  # Use command count for activity sorting
+
+                # For Client-Side Filtering
+                stats["protocol_stats"][proto] = {
+                    "sessions": sess_count,
+                    "interactions": cmd_count,
+                    "ips": ip_count,
+                    "networks": net_count,
+                }
+                stats["protocol_activity"][
+                    proto
+                ] = cmd_count  # Use command count for activity sorting
 
             # --- LLM ANALYTICS (Python-side Processing for robustness) ---
             # Fetch raw commands for 'llm-api'
@@ -3354,23 +3381,32 @@ class SQLiteBackend(DatabaseBackend):
         finally:
             conn.close()
 
-    def get_recent_high_risk_events(self, limit=10):
+    def get_recent_high_risk_events(self, limit=10, protocol=None):
         """Fetches latest risky sessions and payloads for the ticker."""
         conn = self._get_conn()
         events = []
         try:
             c = conn.cursor()
+
+            proto_filter = ""
+            params = []
+            if protocol:
+                proto_filter = "AND s.protocol = ?"
+                params.append(protocol)
+            params.append(limit)
+
             # 1. High Risk Commands
             c.execute(
-                """
+                f"""
                 SELECT i.timestamp, i.command, s.remote_ip, ca.risk_score, ca.explanation
                 FROM interactions i
                 JOIN sessions s ON i.session_id = s.session_id
                 JOIN command_analysis ca ON i.request_md5 = ca.command_hash
                 WHERE ca.risk_score >= 80
+                {proto_filter}
                 ORDER BY i.timestamp DESC LIMIT ?
                 """,
-                (limit,),
+                tuple(params),
             )
             for r in c.fetchall():
                 events.append(
@@ -3385,27 +3421,72 @@ class SQLiteBackend(DatabaseBackend):
                 )
 
             # 2. Latest Payloads
-            c.execute(
-                "SELECT timestamp, url, ip FROM malicious_payloads ORDER BY timestamp DESC LIMIT ?",
-                (limit,),
-            )
-            for r in c.fetchall():
-                events.append(
-                    {
-                        "type": "payload",
-                        "time": r[0],
-                        "url": r[1],
-                        "ip": r[2],
-                        "risk": 100,
-                        "reason": "Malware Download",
-                    }
+            if not protocol or protocol in ("ssh", "http", "telnet"):
+                c.execute(
+                    "SELECT timestamp, url, ip FROM malicious_payloads ORDER BY timestamp DESC LIMIT ?",
+                    (limit,),
                 )
+                for r in c.fetchall():
+                    events.append(
+                        {
+                            "type": "payload",
+                            "time": r[0],
+                            "url": r[1],
+                            "ip": r[2],
+                            "risk": 100,
+                            "reason": "Malware Download",
+                        }
+                    )
 
             # Sort combined
             events.sort(key=lambda x: x["time"], reverse=True)
             return events[:limit]
         except Exception as e:
             log.error(f"[DB] Error fetching ticker events: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_recent_top_commands_by_risk(self, protocol=None, limit=15):
+        """
+        Returns top commands for a protocol, sorted by Risk (DESC) then Frequency (DESC).
+        """
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            params = []
+            proto_filter = ""
+            if protocol:
+                proto_filter = "AND s.protocol = ?"
+                params.append(protocol)
+
+            # We group by command hash/text to aggregate frequency
+            query = f"""
+                SELECT 
+                    i.command, 
+                    MAX(COALESCE(ca.risk_score, 0)) as max_risk, 
+                    COUNT(*) as freq, 
+                    COUNT(DISTINCT s.remote_ip) as unique_ips
+                FROM interactions i
+                JOIN sessions s ON i.session_id = s.session_id
+                LEFT JOIN command_analysis ca ON i.request_md5 = ca.command_hash
+                WHERE 1=1 
+                {proto_filter}
+                GROUP BY i.command
+                ORDER BY max_risk DESC, freq DESC
+                LIMIT ?
+            """
+            params.append(limit)
+
+            c.execute(query, tuple(params))
+            results = []
+            for r in c.fetchall():
+                results.append(
+                    {"command": r[0], "risk": r[1], "count": r[2], "ips": r[3]}
+                )
+            return results
+        except Exception as e:
+            log.error(f"[DB] Error fetching top risk commands for {protocol}: {e}")
             return []
         finally:
             conn.close()

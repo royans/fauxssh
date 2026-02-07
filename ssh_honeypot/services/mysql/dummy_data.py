@@ -9,6 +9,8 @@ SYSTEM_VARIABLES = {
     "@@socket": "/var/run/mysqld/mysqld.sock",
     "CURRENT_USER()": "root@localhost",
     "DATABASE()": "production_db",
+    "SCHEMA()": "production_db",
+    "VERSION()": "8.0.35-0ubuntu0.22.04.1",
 }
 
 # Dummy Database Schema and Data
@@ -68,6 +70,13 @@ DUMMY_DATABASES = {
                 (101, "API Gateway License", 4999.00, 1000, "active"),
                 (102, "Enterprise Support Pack", 15000.00, 50, "active"),
                 (103, "Cloud Storage Add-on", 299.00, 5000, "active"),
+            ],
+        },
+        "orders": {
+            "columns": ["id", "user_id", "product_id", "amount", "status"],
+            "rows": [
+                (1001, 1, 101, 4999.00, "completed"),
+                (1002, 3, 103, 299.00, "pending"),
             ],
         },
     },

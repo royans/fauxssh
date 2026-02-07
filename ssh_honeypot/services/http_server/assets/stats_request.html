@@ -984,7 +984,7 @@
                     </div>
                 </div>
                 <div class="section-card" id="box-telnet">
-                    <h2>Telnet Activity</h2>
+                    <h2>High-Risk Telnet Activity</h2>
                     <div class="table-wrap">
                         <table id="table-telnet" class="table-fixed">
                             <thead>
@@ -1015,7 +1015,7 @@
                 </div>
                 <!-- New Protocol Cards -->
                 <div class="section-card" id="box-mysql" style="display:none">
-                    <h2>MySQL Activity</h2>
+                    <h2>High-Risk MySQL Activity</h2>
                     <div class="table-wrap">
                         <table id="table-mysql" class="table-fixed">
                             <thead>
@@ -1052,6 +1052,21 @@
                                 <tr>
                                     <th class="col-main">Method</th>
                                     <th class="col-m1">Hits</th>
+                                    <th class="col-m2">IPs</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="section-card" id="box-llm-risk" style="display:none">
+                    <h2>High-Risk LLM Activity</h2>
+                    <div class="table-wrap">
+                        <table id="table-llm-risk" class="table-fixed">
+                            <thead>
+                                <tr>
+                                    <th class="col-main">Prompt</th>
+                                    <th class="col-m1">Risk</th>
                                     <th class="col-m2">IPs</th>
                                 </tr>
                             </thead>
@@ -1286,7 +1301,6 @@
                 </div>
             </div>
         </div>
-    </div>
     </div>
 
     <div id="tooltip">Click for session details</div>
@@ -1602,11 +1616,33 @@
             const data = cachedData.windows[currentWindow];
             if (!data) return;
 
+            // Stats Filtering Logic
+            let tIPs = data.total_ips;
+            let tNets = data.total_networks;
+            let tReqs = data.total_requests;
+            let tSess = data.total_sessions;
+
+            if (data.protocol_stats && settings.protocols.length < 7) {
+                tIPs = 0;
+                tNets = 0;
+                tReqs = 0;
+                tSess = 0;
+                settings.protocols.forEach(p => {
+                    const ps = data.protocol_stats[p];
+                    if (ps) {
+                        tIPs += ps.ips;
+                        tNets += ps.networks;
+                        tReqs += ps.interactions;
+                        tSess += ps.sessions;
+                    }
+                });
+            }
+
             // Stats
-            document.getElementById('summary-ips').innerHTML = `${data.total_ips.toLocaleString()}`;
-            document.getElementById('summary-networks').innerText = data.total_networks.toLocaleString();
-            document.getElementById('summary-commands').innerText = data.total_requests.toLocaleString();
-            document.getElementById('summary-sessions').innerText = data.total_sessions.toLocaleString();
+            document.getElementById('summary-ips').innerHTML = `${tIPs.toLocaleString()}`;
+            document.getElementById('summary-networks').innerText = tNets.toLocaleString();
+            document.getElementById('summary-commands').innerText = tReqs.toLocaleString();
+            document.getElementById('summary-sessions').innerText = tSess.toLocaleString();
 
             // Tables
             const row = (c, isRisk = false) => {
@@ -1636,11 +1672,13 @@
             };
 
             updateBox('ssh', data.top_ssh_commands);
-            updateBox('telnet', data.top_telnet_commands);
+            updateBox('telnet', cachedData.top_telnet_risk, true);
             updateBox('http', data.top_http_commands);
-            updateBox('mysql', data.top_mysql_commands);
+            updateBox('mysql', cachedData.top_mysql_risk, true);
             updateBox('redis', data.top_redis_commands);
             updateBox('mcp', data.top_mcp_commands);
+            updateBox('llm-risk', cachedData.top_llm_risk, true);
+            updateBox('llm-risk', cachedData.top_llm_risk, true);
 
             // LLM Boxes - Special mapping cause data keys differ from box IDs slightly
             // We reuse updateBox logic but need to handle the list content structure

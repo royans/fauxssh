@@ -86,10 +86,16 @@ def test_infographic_stats_new_fields(db_backend):
     assert stats["top_ssh_risk"][0]["ips"] == 1
 
     assert "service_dist" in stats
-    # Check if sessions and commands counts are there
-    ssh_dist = next(s for s in stats["service_dist"] if s["protocol"] == "ssh")
-    assert "sessions" in ssh_dist
-    assert "commands" in ssh_dist
+    # Check if sessions and commands counts are there (New Structure: name, value)
+    ssh_dist = next(s for s in stats["service_dist"] if s["name"] == "SSH")
+    assert "value" in ssh_dist
+    assert ssh_dist["value"] > 0
+
+    assert "protocol_stats" in stats
+    assert "ssh" in stats["protocol_stats"]
+    assert stats["protocol_stats"]["ssh"]["sessions"] > 0
+    assert stats["protocol_stats"]["ssh"]["interactions"] > 0
+    assert stats["protocol_stats"]["ssh"]["ips"] > 0
 
 
 def test_daily_trends(db_backend):

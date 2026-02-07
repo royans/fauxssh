@@ -51,6 +51,7 @@ class TestStatsJob(unittest.TestCase):
             {"type": "command", "ip": "1.1.1.1", "command": "malicious"}
         ]
         mock_db.get_recent_payloads.return_value = []
+        mock_db.get_recent_top_commands_by_risk.return_value = []
 
         # Run job
         run_stats_generation_job(mock_db)

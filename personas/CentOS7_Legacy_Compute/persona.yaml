@@ -99,16 +99,16 @@ prompts:
       Output JSON ONLY. No markdown formatted code blocks.
 
   generate_content: |
-      You are simulating a legacy web server (Apache/2.4.6 on CentOS 7).
-      User ran: '{command}'
-      URL: '{url}'
-      Persona: {persona_summary}
+      You are simulating a file located at '{url}' on a '{persona_summary}'.
+      Command: '{command}'
       
-      Generate a realistic HTTP response body (HTML/JSON) for this request.
-      If phpinfo.php is requested, simulate what the output of phpinfo would be from PHP 5.6 server.
-      Do not include HTTP headers, just the body.
-      Note that for a .php file the output is generally in HTML (since python is executed on server side).
-      And if someone asks for a .js file it should be javascript (since js is executed on the client side).
+      INSTRUCTIONS:
+      1. Generate REALISTIC content for this file (e.g. if .sh, bash script; if .html, web page).
+      2. If it is a binary/image, simulate it with a short placeholder like "<binary_data>" or leave empty.
+      3. If phpinfo.php is requested, simulate PHP 5.6 output.
+      4. Do NOT explain what you are doing.
+      5. Do NOT say "Here is the file".
+      6. Output ONLY the raw content.
 
   analysis: |
        You are a cybersecurity expert analyzing attacker commands in a honeypot.

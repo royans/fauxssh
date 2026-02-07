@@ -169,8 +169,10 @@ class HoneyMySQLSession(MysqlSession):
 
         # 3. Handle SHOW commands (commonly used for discovery)
         if results is None and isinstance(expression, exp.Show):
-            # Fallback to LLM for now, but we could handle common ones like 'SHOW TABLES'
-            results = await self._llm_query(sql)
+            results = self._handle_show(expression)
+            if results is None:
+                # Fallback to LLM for now, but we could handle common ones like 'SHOW TABLES'
+                results = await self._llm_query(sql)
 
         # 4. Handle SET commands
         if results is None and isinstance(expression, exp.Set):
@@ -275,7 +277,23 @@ class HoneyMySQLSession(MysqlSession):
             # e.g. @@version -> "@@version"
             # CURRENT_USER() -> "CURRENT_USER()"
 
-            key = expression.sql(dialect="mysql").upper()
+            key = None
+
+            # Handle literals/identifiers
+            if isinstance(expression, (exp.Literal, exp.Column, exp.Identifier)):
+                key = expression.sql(dialect="mysql").upper()
+
+            # Handle Function calls (DATABASE(), VERSION(), etc)
+            elif isinstance(expression, exp.Func):
+                # sqlglot represents DATABASE() as Func(this='DATABASE') ?
+                # Actually typically standard functions are parsed as specific Expression types
+                # but generic ones might be Func.
+                # Let's rely on sql() string output for normalization for these simple no-arg funcs
+                key = expression.sql(dialect="mysql").upper()
+
+            if not key:
+                # Try generic Sql generation
+                key = expression.sql(dialect="mysql").upper()
 
             # Normalize key checks
             val = None
@@ -296,6 +314,81 @@ class HoneyMySQLSession(MysqlSession):
                 return None
 
         return [tuple(row)], columns
+
+    def _handle_show(self, expression):
+        """
+        Handles SHOW commands locally using DUMMY_DATABASES.
+        """
+        target = expression.name.upper()
+
+        # SHOW TABLES / SHOW FULL TABLES
+        if target == "TABLES":
+            db_name = self.current_db
+            # check for FROM/IN clause
+            if expression.args.get("db"):
+                db_name = expression.args.get("db").name
+
+            # Map valid DBs
+            if db_name not in DUMMY_DATABASES:
+                if db_name == "mysql":
+                    return [], [ResultColumn("Tables_in_mysql", ColumnType.VAR_STRING)]
+                return None
+
+            tables = DUMMY_DATABASES[db_name]
+            rows = []
+            for t_name, t_data in tables.items():
+                if t_name == "tables" and db_name == "information_schema":
+                    continue  # Don't show the meta-table itself usually
+
+                # SHOW FULL TABLES returns: Tables_in_db, Table_type
+                if expression.args.get("full"):
+                    rows.append((t_name, "BASE TABLE"))
+                else:
+                    rows.append((t_name,))
+
+            cols = [ResultColumn(f"Tables_in_{db_name}", ColumnType.VAR_STRING)]
+            if expression.args.get("full"):
+                cols.append(ResultColumn("Table_type", ColumnType.VAR_STRING))
+
+            return rows, cols
+
+        # SHOW DATABASES / SHOW SCHEMAS
+        if target in ("DATABASES", "SCHEMAS"):
+            rows = [(db,) for db in DUMMY_DATABASES.keys()]
+            cols = [ResultColumn("Database", ColumnType.VAR_STRING)]
+            return rows, cols
+
+        # SHOW VARIABLES
+        if target == "VARIABLES":
+            rows = []
+            for k, v in SYSTEM_VARIABLES.items():
+                # Strip leading @@ for display if present (though system vars map keys might keep them)
+                # Usually SHOW VARIABLES returns 'Variable_name', 'Value'
+                clean_k = k.replace("@@", "").replace("()", "")
+                rows.append((clean_k, str(v)))
+
+            cols = [
+                ResultColumn("Variable_name", ColumnType.VAR_STRING),
+                ResultColumn("Value", ColumnType.VAR_STRING),
+            ]
+            return rows, cols
+
+        # SHOW STATUS
+        if target == "STATUS":
+            # internal dummy status
+            rows = [
+                ("Uptime", "123456"),
+                ("Threads_connected", "1"),
+                ("Threads_running", "1"),
+                ("Questions", "10"),
+            ]
+            cols = [
+                ResultColumn("Variable_name", ColumnType.VAR_STRING),
+                ResultColumn("Value", ColumnType.VAR_STRING),
+            ]
+            return rows, cols
+
+        return None
 
     async def use(self, database):
         self.current_db = database

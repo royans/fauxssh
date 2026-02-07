@@ -75,9 +75,9 @@ class PostgresBackend(DatabaseBackend):
 
     def _init_pool(self):
         try:
-            log.info("[Postgres] Initializing Connection Pool (min=1, max=100)...")
+            log.info("[Postgres] Initializing Connection Pool (min=5, max=20)...")
             self._pool = psycopg2.pool.ThreadedConnectionPool(
-                minconn=1, maxconn=100, **self.conn_params
+                minconn=5, maxconn=20, **self.conn_params
             )
         except Exception as e:
             log.error(f"[Postgres] Failed to initialize connection pool: {e}")
@@ -191,9 +191,9 @@ class PostgresBackend(DatabaseBackend):
                     (
                         session_id,
                         ip,
-                        username,
-                        password,
-                        client_version,
+                        self._clean_str(username),
+                        self._clean_str(password),
+                        self._clean_str(client_version),
                         fp_json,
                         protocol,
                         start_time,
@@ -209,9 +209,9 @@ class PostgresBackend(DatabaseBackend):
                     (
                         session_id,
                         ip,
-                        username,
-                        password,
-                        client_version,
+                        self._clean_str(username),
+                        self._clean_str(password),
+                        self._clean_str(client_version),
                         fp_json,
                         protocol,
                     ),
@@ -396,19 +396,24 @@ class PostgresBackend(DatabaseBackend):
 
                 if urls:
                     # Fetch IP for session
-                    conn = self._get_conn()
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "SELECT remote_ip FROM sessions WHERE session_id = %s",
-                        (session_id,),
-                    )
-                    row = cursor.fetchone()
-                    conn.close()
+                    conn = None
+                    try:
+                        conn = self._get_conn()
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "SELECT remote_ip FROM sessions WHERE session_id = %s",
+                            (session_id,),
+                        )
+                        row = cursor.fetchone()
+                        remote_ip = row[0] if row else "unknown"
 
-                    remote_ip = row[0] if row else "unknown"
-
-                    for url in urls:
-                        pm.queue_payload(url, session_id, remote_ip)
+                        for url in urls:
+                            pm.queue_payload(url, session_id, remote_ip)
+                    except Exception as pe:
+                        log.error(f"[Postgres] Payload IP lookup error: {pe}")
+                    finally:
+                        if conn:
+                            conn.close()
 
         except Exception as e:
             log.error(f"[Postgres] Error in Payload Pipeline: {e}")
@@ -574,13 +579,17 @@ class PostgresBackend(DatabaseBackend):
                 """,
                     (
                         client_ip,
-                        username,
-                        auth_method,
-                        auth_data,
+                        self._clean_str(username),
+                        self._clean_str(auth_method),
+                        (
+                            self._clean_str(str(auth_data))
+                            if not isinstance(auth_data, dict)
+                            else json.dumps(auth_data)
+                        ),
                         success,
-                        client_version,
+                        self._clean_str(client_version),
                         fp_json,
-                        protocol,
+                        self._clean_str(protocol),
                         created_at,
                     ),
                 )
@@ -1258,7 +1267,7 @@ class PostgresBackend(DatabaseBackend):
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT password FROM sessions WHERE remote_ip = %s AND username = %s AND start_time > NOW() - INTERVAL '1 day'",
-                (ip, username),
+                (ip, self._clean_str(username)),
             )
             passwords = {r[0] for r in cursor.fetchall()}
             if passwords and password not in passwords:
@@ -1370,24 +1379,32 @@ class PostgresBackend(DatabaseBackend):
         finally:
             conn.close()
 
-    def get_recent_high_risk_events(self, limit=10):
+    def get_recent_high_risk_events(self, limit=10, protocol=None):
         """Fetches latest risky sessions and payloads for the ticker."""
         conn = self._get_conn()
         events = []
         try:
             cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
+            proto_filter = ""
+            params = []
+            if protocol:
+                proto_filter = "AND s.protocol = %s"
+                params.append(protocol)
+            params.append(limit)
+
             # 1. High Risk Commands
             cursor.execute(
-                """
+                f"""
                 SELECT i.timestamp, i.command, s.remote_ip, ca.risk_score, ca.explanation
                 FROM interactions i
                 JOIN sessions s ON i.session_id = s.session_id
                 JOIN command_analysis ca ON i.request_md5 = ca.command_hash
                 WHERE ca.risk_score >= 80
+                {proto_filter}
                 ORDER BY i.timestamp DESC LIMIT %s
                 """,
-                (limit,),
+                tuple(params),
             )
             for r in cursor.fetchall():
                 events.append(
@@ -1405,29 +1422,79 @@ class PostgresBackend(DatabaseBackend):
                     }
                 )
 
-            # 2. Latest Payloads
-            cursor.execute(
-                "SELECT timestamp, url, ip FROM malicious_payloads ORDER BY timestamp DESC LIMIT %s",
-                (limit,),
-            )
-            for r in cursor.fetchall():
-                events.append(
-                    {
-                        "type": "payload",
-                        "time": (
-                            r["timestamp"].isoformat()
-                            if hasattr(r["timestamp"], "isoformat")
-                            else str(r["timestamp"])
-                        ),
-                        "url": r["url"],
-                        "ip": r["ip"],
-                        "risk": 100,
-                        "reason": "Malware Download",
-                    }
+            # 2. Latest Payloads (Usually non-protocol specific or just for 'ssh/http')
+            if not protocol or protocol in ("ssh", "http", "telnet"):
+                cursor.execute(
+                    "SELECT timestamp, url, ip FROM malicious_payloads ORDER BY timestamp DESC LIMIT %s",
+                    (limit,),
                 )
+                for r in cursor.fetchall():
+                    events.append(
+                        {
+                            "type": "payload",
+                            "time": (
+                                r["timestamp"].isoformat()
+                                if hasattr(r["timestamp"], "isoformat")
+                                else str(r["timestamp"])
+                            ),
+                            "url": r["url"],
+                            "ip": r["ip"],
+                            "risk": 100,
+                            "reason": "Malware Download",
+                        }
+                    )
 
             events.sort(key=lambda x: x["time"], reverse=True)
             return events[:limit]
+        finally:
+            conn.close()
+
+    def get_recent_top_commands_by_risk(self, protocol=None, limit=15):
+        """
+        Returns top commands for a protocol, sorted by Risk (DESC) then Frequency (DESC).
+        """
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            params = []
+            proto_filter = ""
+            if protocol:
+                proto_filter = "AND s.protocol = %s"
+                params.append(protocol)
+
+            # We group by command hash/text to aggregate frequency
+            query = f"""
+                SELECT 
+                    i.command, 
+                    MAX(COALESCE(ca.risk_score, 0)) as max_risk, 
+                    COUNT(*) as freq, 
+                    COUNT(DISTINCT s.remote_ip) as unique_ips
+                FROM interactions i
+                JOIN sessions s ON i.session_id = s.session_id
+                LEFT JOIN command_analysis ca ON i.request_md5 = ca.command_hash
+                WHERE 1=1 
+                {proto_filter}
+                GROUP BY i.command
+                ORDER BY max_risk DESC, freq DESC
+                LIMIT %s
+            """
+            params.append(limit)
+
+            cursor.execute(query, tuple(params))
+            results = []
+            for r in cursor.fetchall():
+                results.append(
+                    {
+                        "command": r["command"],
+                        "risk": r["max_risk"],
+                        "count": r["freq"],
+                        "ips": r["unique_ips"],
+                    }
+                )
+            return results
+        except Exception as e:
+            log.error(f"[Postgres] Error fetching top commands by risk: {e}")
+            return []
         finally:
             conn.close()
 
@@ -1543,8 +1610,6 @@ class PostgresBackend(DatabaseBackend):
                 WHERE ca.command_hash IS NULL
                 AND i.request_md5 IS NOT NULL
                 AND i.command != ''
-                AND i.command NOT LIKE 'CONNECT %%'
-                AND i.command NOT LIKE 'GET %%'
                 {protocol_filter}
                 ORDER BY i.id DESC
                 LIMIT %s
@@ -3038,3 +3103,67 @@ class PostgresBackend(DatabaseBackend):
             output_text=response,
             ttl_days=30,
         )
+
+    def get_recent_top_commands_by_risk(self, protocol=None, limit=15):
+        """
+        Returns top commands for a protocol, sorted by Risk (DESC) then Frequency (DESC).
+        """
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            params = []
+            proto_filter = ""
+            if protocol:
+                proto_filter = "AND s.protocol = %s"
+                params.append(protocol)
+
+            # We group by command hash/text to aggregate frequency
+            query = f"""
+                SELECT 
+                    i.command, 
+                    MAX(COALESCE(ca.risk_score, 0)) as max_risk, 
+                    COUNT(*) as freq, 
+                    COUNT(DISTINCT s.remote_ip) as unique_ips
+                FROM interactions i
+                JOIN sessions s ON i.session_id = s.session_id
+                LEFT JOIN command_analysis ca ON i.request_md5 = ca.command_hash
+                WHERE 1=1 
+                {proto_filter}
+                GROUP BY i.command
+                ORDER BY max_risk DESC, freq DESC
+                LIMIT %s
+            """
+            params.append(limit)
+
+            c.execute(query, tuple(params))
+            results = []
+            rows = c.fetchall()
+            log.info(
+                f"[Postgres] get_recent_top_commands_by_risk({protocol}) -> Found {len(rows)} rows"
+            )
+
+            for r in rows:
+                results.append(
+                    {"command": r[0], "risk": r[1], "count": r[2], "ips": r[3]}
+                )
+
+            if len(rows) == 0:
+                # Double check simple count if empty result is unexpected
+                try:
+                    check_q = "SELECT COUNT(*) FROM interactions i JOIN sessions s ON i.session_id = s.session_id WHERE s.protocol = %s"
+                    c.execute(check_q, (protocol,))
+                    cnt = c.fetchone()[0]
+                    log.info(
+                        f"[Postgres] Double Check: Total interactions for {protocol}: {cnt}"
+                    )
+                except:
+                    pass
+
+            return results
+        except Exception as e:
+            log.error(
+                f"[Postgres] Error fetching top risk commands for {protocol}: {e}"
+            )
+            return []
+        finally:
+            conn.close()

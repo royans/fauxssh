@@ -13,10 +13,15 @@ from ssh_honeypot.core.dos_protection import dos_protector
 from ssh_honeypot.core.clogging import clogger
 from ssh_honeypot.core.universal_cache import universal_cache
 
+# Globally shared for all handler threads to prevent redundant LLM calls# For thundering herd prevention - REVERTED DUE TO HANGS
+# _inflight_requests = {}
+# _inflight_lock = threading.Lock()
+
 # Non-logged management paths
 MANAGEMENT_PATHS = {
     "/stats_request.html",
     "/stats_request",
+    "/stats_request_v2.html",
     "/status_request.html",
     "/status_request",
     "/status_data.json",
@@ -28,23 +33,27 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
 
     def version_string(self):
         # Mimic Apache/Nginx based on config
-        return config.get("http", "server_header") or "Apache/2.4.52 (Ubuntu)"
+        val = config.get("http", "server_header") or "Apache/2.4.52 (Ubuntu)"
+        return str(val)
 
     def get_client_ip(self):
-        # Respect X-Forwarded-For from Reverse Proxy
-        # self.headers might not be set if log_message is called early (e.g. request parse error)
-        headers = getattr(self, "headers", None)
-        if headers:
-            x_fwd = headers.get("X-Forwarded-For")
-            if x_fwd:
-                # Standard format: client, proxy1, proxy2
-                # We want the first one
-                return x_fwd.split(",")[0].strip()
-        return self.client_address[0]
+        # Respect X-Forwarded-For ONLY if the immediate peer is localhost
+        # (Trusted Proxy mode - prevents spoofing from public internet)
+        peer_ip = self.client_address[0]
+        if peer_ip in ("127.0.0.1", "::1"):
+            headers = getattr(self, "headers", None)
+            if headers:
+                x_fwd = headers.get("X-Forwarded-For")
+                if x_fwd:
+                    # Standard format: client, proxy1, proxy2
+                    # We want the first one
+                    return x_fwd.split(",")[0].strip()
+        return peer_ip
 
     def log_message(self, format, *args):
         # Silence management APIs from access logs
-        if self.path in MANAGEMENT_PATHS:
+        path = getattr(self, "path", "")
+        if path in MANAGEMENT_PATHS:
             return
 
         try:
@@ -128,17 +137,31 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
 
         # 0. Management & Stats (Bypass logging and DoS)
         clean_path = self.path.split("?")[0]
+        query = {}
+        if "?" in self.path:
+            try:
+                from urllib.parse import parse_qs, urlparse
+
+                query = parse_qs(urlparse(self.path).query)
+            except:
+                pass
+
         is_mgmt = clean_path in MANAGEMENT_PATHS or clean_path.startswith("/api/")
         if config.get("http", "showstats") and is_mgmt:
             if clean_path in [
                 "/stats_request.html",
                 "/stats_request",
+                "/stats_request_v2.html",
                 "/status_request.html",
                 "/status_request",
             ]:
                 try:
+                    filename = "stats_request.html"
+                    if "v2" in clean_path:
+                        filename = "stats_request_v2.html"
+
                     asset_path = os.path.join(
-                        os.path.dirname(__file__), "assets", "stats_request.html"
+                        os.path.dirname(__file__), "assets", filename
                     )
                     if os.path.exists(asset_path):
                         with open(asset_path, "r") as f:
@@ -148,6 +171,16 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                         self.send_header("Content-Type", "text/html; charset=utf-8")
                         self.send_header("Content-Length", str(len(encoded_content)))
                         self.send_header("Connection", "close")
+                        # Strict CSP for Dashboard (prevents XSS while allowing CDNs)
+                        self.send_header(
+                            "Content-Security-Policy",
+                            "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://unpkg.com https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:;",
+                        )
+                        self.send_header(
+                            "Cache-Control", "no-cache, no-store, must-revalidate"
+                        )
+                        self.send_header("Pragma", "no-cache")
+                        self.send_header("Expires", "0")
                         self.end_headers()
                         self.wfile.write(encoded_content)
                         return
@@ -187,7 +220,6 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
 
             if clean_path.startswith("/api/payloads"):
                 try:
-                    from urllib.parse import parse_qs, urlparse
 
                     # Check Cache
                     cache_key = hashlib.md5(self.path.encode()).hexdigest()
@@ -202,7 +234,6 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                         self.wfile.write(resp)
                         return
 
-                    query = parse_qs(urlparse(self.path).query)
                     hours = int(query.get("hours", [24])[0])
                     data = self.server.honey_db.get_payload_summary(hours=hours)
 
@@ -318,13 +349,166 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                     self.end_headers()
                     return
 
-                except Exception as e:
-                    log.error(f"[HTTP] Error in session_details api: {e}")
-                    self.send_response(500)
+            if clean_path.startswith("/api/v2/"):
+                # -------------------------------------------------------------------
+                # Rate Limiting Logic (Internal IPs Exempt)
+                # -------------------------------------------------------------------
+                try:
+                    from ipaddress import ip_address
+
+                    ip_obj = ip_address(client_ip)
+                    is_internal = (
+                        ip_obj.is_loopback or ip_obj.is_private or ip_obj.is_reserved
+                    )
+
+                    # Also check config
+                    cfg_internal = config.get("internal_ips", [])
+                    if client_ip in cfg_internal:
+                        is_internal = True
+
+                except:
+                    is_internal = False
+
+                if not is_internal:
+                    # Apply Rate Limits for Public APIs to prevent scraping abuse
+                    # 100 requests per minute per IP for stats API seems generous but safe
+                    allowed, reason = self.server.honey_db.check_api_rate_limit(
+                        service="stats_api",
+                        identifier=client_ip,
+                        rpm_limit=100,
+                        rph_limit=2000,
+                        rpd_limit=10000,
+                    )
+
+                    # Also record usage
+                    self.server.honey_db.record_api_usage("stats_api", client_ip)
+
+                    if not allowed:
+                        log.warning(
+                            f"[HTTP] API Rate Limit Exceeded for {client_ip}: {reason}"
+                        )
+                        self.send_response(429)
+                        self.end_headers()
+                        self.wfile.write(b'{"error": "Too Many Requests"}')
+                        return
+
+                # -------------------------------------------------------------------
+                # End Rate Limiting
+                # -------------------------------------------------------------------
+
+                try:
+                    from urllib.parse import parse_qs, urlparse
+
+                    engine = self.server.analytics_engine
+
+                    parsed_path = urlparse(self.path)
+                    query = parse_qs(parsed_path.query)
+                    hours = int(query.get("hours", [24])[0])
+
+                    if clean_path == "/api/v2/totals":
+                        data = engine.get_dashboard_totals(hours=hours)
+                        key = "totals"
+                    else:
+                        # Common Params
+                        limit = int(query.get("limit", [50])[0])
+                        # REQUIRE anonymity for web dashboard
+                        anon = True
+                        ip_filter = query.get("ip", [None])[0]
+
+                        # Support multi-protocol (e.g. ?proto=ssh&proto=telnet)
+                        raw_protos = query.get("proto", [])
+                        if not raw_protos:
+                            # Also check 'protocol' alias
+                            raw_protos = query.get("protocol", [])
+
+                        protocol_filter = (
+                            raw_protos
+                            if len(raw_protos) > 1
+                            else (raw_protos[0] if raw_protos else None)
+                        )
+
+                        risk_min = query.get("risk", [None])[0]
+                        if not risk_min:
+                            risk_min = query.get("risk_min", [None])[0]
+                        if risk_min:
+                            risk_min = float(risk_min)
+
+                        if clean_path == "/api/v2/sessions":
+                            user_filter = query.get("user", [None])[0]
+                            asn_filter = query.get("asn", [None])[0]
+                            data = engine.get_recent_sessions(
+                                limit=limit,
+                                anon=anon,
+                                ip_filter=ip_filter,
+                                protocol_filter=protocol_filter,
+                                risk_min=risk_min,
+                                user_filter=user_filter,
+                                asn_filter=asn_filter,
+                            )
+                            key = "sessions"
+
+                        elif clean_path == "/api/v2/stats/top_asns":
+                            data = engine.get_top_asns(
+                                hours=hours,
+                                protocol_filter=protocol_filter,
+                            )
+                            key = "asns"
+
+                        elif clean_path == "/api/v2/stats/top_ips":
+                            data = engine.get_top_ips(hours=hours, anon=anon)
+                            key = "ips"
+
+                        elif clean_path == "/api/v2/stats/top_countries":
+                            data = engine.get_top_countries(hours=hours)
+                            key = "countries"
+
+                        elif clean_path == "/api/v2/commands":
+                            session_filter = query.get("session", [None])[0]
+                            data = engine.get_recent_commands(
+                                limit=limit,
+                                anon=anon,
+                                ip_filter=ip_filter,
+                                session_filter=session_filter,
+                                protocol_filter=protocol_filter,
+                                risk_min=risk_min,
+                            )
+                            key = "commands"
+
+                        elif clean_path == "/api/v2/top/commands":
+                            duration = int(query.get("duration", [3600])[0])
+                            data = engine.get_top_commands(
+                                limit=limit,
+                                duration_seconds=duration,
+                                protocol_filter=protocol_filter,
+                            )
+                            key = "top_commands"
+
+                        elif clean_path == "/api/v2/top/ips":
+                            data = engine.get_top_ips(limit=limit, anon=anon)
+                            key = "top_ips"
+
+                        else:
+                            self.send_response(404)
+                            self.end_headers()
+                            return
+
+                    # Return JSON
+                    resp = json.dumps({key: data}, default=str).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(resp)))
+                    self.send_header("Connection", "close")
                     self.end_headers()
+                    self.wfile.write(resp)
                     return
 
-        # 0.5 Local CONNECT Handler (Bypass LLM)
+                except Exception as e:
+                    log.error(f"[HTTP] API V2 Error: {e}")
+                    self.send_response(500)
+                    self.end_headers()
+                    self.wfile.write(b'{"error": "Internal Server Error"}')
+                    return
+
         if method == "CONNECT":
             try:
                 # Send 200 Connection Established (Fake)
@@ -469,7 +653,7 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                     "cwd": "HTTP_ROOT",
                     "input": f"{method} {self.path}",
                     "response": f"[Served VFS File: {v_path}]",
-                    "source": "handler",
+                    "source": "vfs",
                     "request_md5": request_md5,
                     "user_agent": self.headers.get("User-Agent", "-"),
                 }
@@ -509,43 +693,43 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
 
         if cached_item:
             content = cached_item["output_text"]
-            source_type = "cache"
+            source_type = "llm-cache"
             log.debug(f"[HTTP] Served Cached: {cache_key}")
         else:
+            # 3. LLM Generation and In-flight Check
             # 3. LLM Generation
             log.info(f"[HTTP] Generating Content: {cache_key}")
 
-            # Check Rate Limit
-            rpm = config.get_rate_limit("http", "llm", "rpm")
-            rph = config.get_rate_limit("http", "llm", "rph")
-            rpd = config.get_rate_limit("http", "llm", "rpd")
-
-            allowed, reason = db.check_llm_rate_limit(
-                client_ip,
-                rpm_limit=rpm,
-                rph_limit=rph,
-                rpd_limit=rpd,
-            )
-
-            if not allowed:
-                log.warning(f"[HTTP] Rate Limit Exceeded for {client_ip}: {reason}")
-                # Return 429 Too Many Requests
-                err_body = b"Too Many Requests"
-                self.send_response(429)
-                self.send_header("Content-Type", "text/plain")
-                self.send_header("Content-Length", str(len(err_body)))
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.wfile.write(err_body)
-                return  # Stop processing
-
-            # Record Usage
-            db.record_llm_usage(client_ip, source="http")
-            source_type = "llm"
-
+            # LLM Generation
             try:
-                # We need a dedicated method or a generic prompt for this
-                # Let's use a specialized prompt wrapper
+                # Check Rate Limit
+                rpm = config.get_rate_limit("http", "llm", "rpm")
+                rph = config.get_rate_limit("http", "llm", "rph")
+                rpd = config.get_rate_limit("http", "llm", "rpd")
+
+                allowed, reason = db.check_llm_rate_limit(
+                    client_ip,
+                    rpm_limit=rpm,
+                    rph_limit=rph,
+                    rpd_limit=rpd,
+                )
+
+                if not allowed:
+                    log.warning(f"[HTTP] Rate Limit Exceeded for {client_ip}: {reason}")
+                    # Return 429 Too Many Requests
+                    err_body = b"Too Many Requests"
+                    self.send_response(429)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(err_body)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(err_body)
+                    return
+
+                # Record Usage
+                db.record_llm_usage(client_ip, source="http")
+
+                # LLM Generation
                 prompt = (
                     f"You are simulating a web server ({self.version_string()}).\n"
                     f"Request: {method} {self.path}\n"
@@ -561,49 +745,45 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                     "8. Just generate the body content. Do NOT include HTTP headers."
                 )
 
-                content = llm.generate_response(
-                    command="",
-                    cwd="HTTP_ROOT",
+                llm_res = llm.generate_response(
+                    "http",
+                    "HTTP_ROOT",
+                    [],
+                    [],
+                    [],
+                    client_ip=client_ip,
                     override_prompt=prompt,
-                    analyze_risk=True,
-                    request_md5=request_md5,
-                    db=db,
                     protocol="http",
+                    return_source=True,
                 )
 
-                # Strip markdown just in case the LLM ignored instructions
-                if content.startswith("```"):
-                    import re
+                if isinstance(llm_res, tuple) and len(llm_res) == 2:
+                    content, source_type = llm_res
+                else:
+                    content = llm_res
+                    source_type = "llm"
 
-                    # Simple strip if main stripper didn't catch it logic (LLMInterface does it, but V1/V2 varies)
-                    # Actually LLMInterface internal clean should handle it.
-                    pass
-
-                # Cache it
-                universal_cache.set(
-                    service="http_cache",
-                    key=cache_key_hash,
-                    input_text=cache_key,
-                    output_text=content,
-                    ttl_days=30,
-                )
+                if content:
+                    # Cache it
+                    universal_cache.set(
+                        service="http_cache",
+                        key=cache_key_hash,
+                        input_text=cache_key,
+                        output_text=content,
+                        ttl_days=30,
+                    )
             except Exception as e:
                 log.error(f"[HTTP] LLM Error: {e}")
                 content = self._get_fallback_404()
-                encoded_content = content.encode("utf-8")
-                self.send_response(404)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(encoded_content)))
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.wfile.write(encoded_content)
-                return  # Exit early
+                source_type = "error"
 
         # 3. Serve Response
         try:
-            self.send_response(200)
+            status_code = 404 if source_type == "error" else 200
+            self.send_response(status_code)
             # Default Headers
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("X-Honeypot-Source", source_type)
 
             # Custom Headers from Config/Persona
             custom_headers = config.get("http", "headers") or {}
@@ -700,6 +880,10 @@ def start_http_server(port, db, llm):
 
         server.honey_db = db
         server.llm_interface = llm
+
+        from ssh_honeypot.core.analytics_engine import AnalyticsEngine
+
+        server.analytics_engine = AnalyticsEngine(db)
 
         family_str = "IPv4"
         if server.address_family == socket.AF_INET6:

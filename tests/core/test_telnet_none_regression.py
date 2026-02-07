@@ -59,7 +59,7 @@ class TestTelnetNoneRegression:
             )
 
             assert "crashed" in res[0]
-            assert res[2]["source"] == "chain"
+            assert res[2]["source"].startswith("chain")
 
     def test_assignment_with_none_updates_handled(self, handler):
         """

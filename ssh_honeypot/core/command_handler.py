@@ -1,4 +1,5 @@
 import json
+import threading
 import re
 import os
 import datetime
@@ -57,6 +58,10 @@ try:
 except ImportError:
     from ssh_honeypot.core.logging_setup import log
     from ssh_honeypot.core.universal_cache import universal_cache
+
+# For thundering herd prevention - REVERTED DUE TO HANGS
+# _inflight_ssh_calls = {}
+# _inflight_ssh_lock = threading.Lock()
 
 try:
     from ssh_honeypot.handlers.cisco import cmd_main as cisco_handlers
@@ -820,7 +825,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 handler_func = None
                 if base == "enable":
                     handler_func = cisco_handlers.handle_cisco_enable
-                elif base == "show":
+                elif base == "show" or base == "sh":
                     handler_func = cisco_handlers.handle_cisco_show
                 elif base == "configure" or base == "conf":
                     handler_func = cisco_handlers.handle_cisco_configure
@@ -1853,20 +1858,25 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     protocol=context.get("protocol"),
                 )
                 return out, up, {"source": "llm-cache", "cached": True}
+            else:
+                log.debug(
+                    f"[Session: {session_id}] [Cache] HIT (but contains error status, ignoring)"
+                )
 
         cached_resp = (
             None  # Legacy variable for downstream if needed, but we used cached_item
         )
 
         log.debug(f"[Session: {session_id}] [Cache] MISS")
+
+        # 1.1 In-flight Check - REMOVED
+
         log.info(
             f"[Session: {session_id}] [LLM] Calling LLM API for generic command..."
         )
 
         # Call LLM
-        # Note: llm_interface.generate_response uses the 'generic' prompt internally.
-        # Ideally we refactor LLMInterface to accept a prompt, but for now we reuse it.
-        resp = self.llm.generate_response(
+        llm_res = self.llm.generate_response(
             cmd,
             cwd,
             history,
@@ -1875,7 +1885,15 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             client_ip=context.get("client_ip"),
             honeypot_ip=context.get("honeypot_ip"),
             persona_config=context.get("persona_config"),
+            protocol=context.get("protocol") or "ssh",
+            return_source=True,
         )
+
+        if isinstance(llm_res, tuple) and len(llm_res) == 2:
+            resp, source = llm_res
+        else:
+            resp = llm_res
+            source = "llm"
 
         # Parse logic
         j, t = self._extract_json_or_text(resp)
@@ -1885,10 +1903,10 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             and "INTERNAL_ERROR" not in resp
             and "Internal Logic Offline" not in resp
         ):
-            cache_key = hashlib.md5(f"{cmd}:{cwd}".encode()).hexdigest()
+            cache_key_db = hashlib.md5(f"{cmd}:{cwd}".encode()).hexdigest()
             universal_cache.set(
                 service="ssh_command",
-                key=cache_key,
+                key=cache_key_db,
                 input_text=f"{cmd} (cwd: {cwd})",
                 output_text=resp,
                 ttl_days=30,
@@ -1897,135 +1915,13 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         out, up, meta = self._process_llm_json(
             j, t, user=user, protocol=context.get("protocol")
         )
+        # Override source with the one from LLM
+        if meta:
+            meta["source"] = source
+        else:
+            meta = {"source": source, "cached": source == "llm-cache"}
 
-        # Sync Analysis Save
-        if up and up.get("analysis"):
-            try:
-                cmd_hash = hashlib.md5(cmd.encode("utf-8")).hexdigest()
-                self.db.save_analysis(cmd_hash, cmd, up["analysis"])
-                log.info(f"[Handler] Saved Sync Analysis for '{cmd}'")
-            except Exception as e:
-                log.error(f"[Handler] Error saving sync analysis: {e}")
-
-        return out, up, {"source": "llm", "cached": False}
-
-        # 3. Check Global FS Cache (Treat as Directory)
-        cached_files = self.db.list_fs_dir(abs_path)
-
-        # 3a. Check User Persisted FS (Uploads)
-        client_ip = context.get("client_ip")
-        user = context.get("user")
-        user_files = self.db.list_user_dir(client_ip, user, abs_path)
-
-        # Merge User files over Global files
-        # Map by filename to dedup
-        file_map = {f["path"].split("/")[-1]: f for f in cached_files}
-
-        for uf in user_files:
-            fname = uf["path"].split("/")[-1]
-            file_map[fname] = uf  # User file overrides global
-
-        # 3b. Merge with Session VFS (if present)
-        # Session VFS is passed in context['vfs']. It is a dict of path -> [filenames] (simple strings)
-        vfs_data = context.get("vfs", {})
-        if abs_path in vfs_data:
-            for fname in vfs_data[abs_path]:
-                # If in map, we already have metadata (either Global or User)
-                # If NOT in map, it's a temp file created in this session (touch, or generated)
-                if fname not in file_map:
-                    file_map[fname] = {
-                        "path": os.path.join(abs_path, fname),
-                        "parent_path": abs_path,
-                        "type": "file",
-                        "metadata": {
-                            "permissions": "-rw-r--r--",
-                            "size": (
-                                random.randint(100, 15000)
-                                if not fname.endswith(".gz")
-                                else random.randint(100000, 500000)
-                            ),
-                            "owner": user or "root",
-                            "group": user or "root",
-                            "modified": datetime.datetime.now().strftime("%b %d %H:%M"),
-                        },
-                    }
-
-        all_files = list(file_map.values())
-
-        if all_files and len(all_files) > 0:
-            log.debug(
-                f"[DEBUG] LS Cache Hit for {abs_path}: {len(all_files)} files (DB: {len(cached_files)}, User/VFS: {len(all_files)-len(cached_files)})"
-            )
-            return (
-                self._format_ls_output(all_files, flags),
-                {},
-                {"source": "handler", "cached": False},
-            )
-
-        # 4. Fallback to LLM (Provide context if needed)
-        # We pass empty file list for external paths to avoid hallucination confusion.
-        lookup_files = []
-        if abs_path == context.get("cwd") or abs_path.startswith("/home/"):
-            # Use vfs from context if available as fallback context
-            if abs_path in context.get("vfs", {}):
-                lookup_files = context.get("vfs", {}).get(abs_path, [])
-            elif abs_path == context.get("cwd"):
-                lookup_files = context.get("file_list", [])
-
-        # Strong instruction to prevent history hallucination
-        cmd_with_instruction = f"{cmd} (INSTRUCTION: List files in '{abs_path}'. Do NOT list files from {context.get('cwd')} or previous history keys. If directory is not empty, generate realistic files.)"
-
-        resp = self.llm.generate_response(
-            cmd_with_instruction,
-            context.get("cwd"),
-            context.get("history"),
-            lookup_files,
-            context.get("known_paths", []),
-            client_ip=context.get("client_ip"),
-            honeypot_ip=context.get("honeypot_ip"),
-        )
-
-        j, t = self._extract_json_or_text(resp)
-
-        # 5. Save Generated Files to DB
-        if j and j.get("generated_files"):
-            print(
-                f"[DEBUG] Saving {len(j['generated_files'])} generated files for {abs_path}"
-            )
-            for gf in j["generated_files"]:
-                # Ensure metadata fields
-                if "permissions" not in gf:
-                    gf["permissions"] = "-rw-r--r--"
-                if "size" not in gf:
-                    gf["size"] = 1024
-                if "owner" not in gf:
-                    gf["owner"] = "root"
-                if "modified" not in gf:
-                    gf["modified"] = datetime.datetime.now().strftime("%b %d %H:%M")
-
-                fname = gf.get("name")
-                if fname:
-                    fpath = os.path.join(abs_path, fname)
-                    # Use TempFS (User DB) instead of Global DB to prevent pollution
-                    client_ip = context.get("client_ip")
-                    user_name = context.get("user")
-                    self.db.update_user_file(
-                        client_ip,
-                        user_name,
-                        fpath,
-                        abs_path,
-                        gf.get("type", "file"),
-                        gf,
-                    )
-
-        if (
-            "INTERNAL_ERROR" not in resp
-            and "Resource temporarily unavailable" not in resp
-            and hasattr(self.db, "cache_response")
-        ):
-            self.db.cache_response(cmd, context.get("cwd"), resp)
-
-        return self._process_llm_json(j, t)
+        return out, up, meta
 
     def _resolve_path(self, cwd, path):
         if path.startswith("/"):
@@ -2156,6 +2052,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             context.get("known_paths", []),
             client_ip=context.get("client_ip"),
             honeypot_ip=context.get("honeypot_ip"),
+            protocol=context.get("protocol") or "ssh",
         )
         j, t = self._extract_json_or_text(resp)
 
@@ -2496,8 +2393,9 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             source = "stdin"
 
         if not content:
-            if len(parts) < 2:
+            if len(parts) < 2 or target_path == "stdin":
                 # Interactive mode not supported well, return fake prompt or error
+                # Prevent falling through to LLM for just typing "bash" or "sh"
                 return (
                     f"{interpreter_name}: missing file operand\n",
                     {},
@@ -2571,6 +2469,9 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             history,
             context.get("file_list"),
             context.get("known_paths"),
+            client_ip=context.get("client_ip", "Unknown"),
+            protocol=interpreter_name,
+            return_source=True,
         )
 
         # Cache it

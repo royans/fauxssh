@@ -1,0 +1,877 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FauxSSH Analytics Dashboard</title>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;900&family=JetBrains+Mono:wght@700&display=swap"
+        rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js"></script>
+    <style type="text/tailwindcss">
+        :root {
+            --bg-color: #050507;
+            --card-bg: rgba(15, 15, 20, 0.7);
+            --indigo-accent: #6366f1;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: #e2e8f0;
+            overflow-x: hidden;
+        }
+
+        .term-font { font-family: 'JetBrains Mono', monospace; }
+
+        .glass {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .pill {
+            @apply px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider transition-all;
+        }
+        .pill-ssh { @apply bg-indigo-500/10 text-indigo-400 border border-indigo-500/20; }
+        .pill-telnet { @apply bg-orange-500/10 text-orange-400 border border-orange-500/20; }
+        .pill-http { @apply bg-green-500/10 text-green-400 border border-green-500/20; }
+        .pill-redis { @apply bg-red-500/10 text-red-400 border border-red-500/20; }
+        .pill-mysql { @apply bg-blue-500/10 text-blue-400 border border-blue-500/20; }
+        .pill-llm { @apply bg-purple-500/10 text-purple-400 border border-purple-500/20; }
+        .pill-mcp { @apply bg-pink-500/10 text-pink-400 border border-pink-500/20; }
+
+        .risk-high { @apply text-red-500 underline decoration-red-500/30 underline-offset-4; }
+        .risk-med { @apply text-orange-500; }
+        .risk-low { @apply text-green-500; }
+
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: rgba(0,0,0,0.1); }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.05); border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.1); }
+
+        .fade-enter-active, .fade-leave-active { transition: opacity 0.3s; }
+        .fade-enter-from, .fade-leave-to { opacity: 0; }
+
+        .slide-enter-active, .slide-leave-active { transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
+        .slide-enter-from, .slide-leave-to { transform: translateX(100%); }
+
+        @keyframes pulse-ring {
+            0% { transform: scale(.3); opacity: 0; }
+            50% { opacity: .5; }
+            100% { transform: scale(1); opacity: 0; }
+        }
+        .pulse { position: relative; }
+        .pulse::after {
+            content: ''; position: absolute; width: 100%; height: 100%; top: 0; left: 0;
+            background: var(--indigo-accent); border-radius: 50%;
+            animation: pulse-ring 2.5s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="app" class="min-h-screen p-6 lg:p-10 flex flex-col gap-8 max-w-[1600px] mx-auto">
+        <!-- Header -->
+        <header class="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+            <div class="flex flex-col gap-2">
+                <h1 @click="resetFilters"
+                    class="text-2xl font-black text-white flex items-center cursor-pointer hover:opacity-80 transition-all">
+                    FauxSSH <span class="text-indigo-500 ml-2">Analytics</span>
+                    <span
+                        class="ml-4 px-2 py-0.5 bg-indigo-500/10 text-indigo-500 text-[10px] font-black rounded border border-indigo-500/20">V2.1
+                        BETA EX</span>
+                </h1>
+                <div class="flex items-center gap-2 text-xs font-bold uppercase tracking-tight">
+                    <span class="w-1.5 h-1.5 bg-green-500 rounded-full pulse"></span>
+                    <span class="text-gray-500">Live Threat Intelligence Engine •</span>
+                    <span class="text-gray-600">Last Updated: {{ lastUpdated }}</span>
+                </div>
+            </div>
+
+            <div class="flex items-center gap-4">
+                <!-- Time Range Toggle -->
+                <div class="flex bg-white/5 border border-white/5 p-1 rounded-xl">
+                    <button v-for="opt in timeOptions" :key="opt.value" @click="setTimeWindow(opt.value)"
+                        :class="['px-4 py-1.5 rounded-lg text-xs font-black transition-all', 
+                                filters.hours === opt.value ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300']">
+                        {{ opt.label }}
+                    </button>
+                </div>
+
+                <div class="h-8 w-px bg-white/5"></div>
+
+                <button @click="showAbout = true" class="p-2 text-gray-500 hover:text-white transition">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path
+                            d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z">
+                        </path>
+                        <path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                    </svg>
+                </button>
+
+                <button @click="fetchData"
+                    class="px-5 py-2 bg-white/5 hover:bg-white/10 text-white text-xs font-black rounded-xl border border-white/5 transition-all">
+                    Refresh
+                </button>
+            </div>
+        </header>
+
+        <!-- Stats Overview -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+            <div v-for="(val, key) in stats" :key="key"
+                class="glass p-6 rounded-2xl border-l-[3px] flex flex-col gap-1 transition-all hover:translate-y-[-2px] hover:bg-white/[0.08]"
+                :class="{'border-indigo-500': key.includes('sessions'), 'border-purple-500': key.includes('commands'), 'border-pink-500': key.includes('ips'), 'border-orange-500': key.includes('asns')}">
+                <span class="text-[10px] uppercase font-black tracking-widest text-gray-500">
+                    {{ key.replace('total_', '').replace('_', ' ') }} ({{ currentRangeLabel }})
+                </span>
+                <span class="text-3xl font-black text-white tabular-nums">{{ val.toLocaleString() }}</span>
+            </div>
+        </div>
+
+        <!-- Filter Bar -->
+        <div class="flex flex-col lg:flex-row items-center justify-between gap-6 p-6 glass rounded-2xl">
+            <div class="flex flex-wrap items-center gap-4">
+                <span class="text-[10px] font-black uppercase tracking-widest text-gray-500 mr-2">Protocols:</span>
+                <button v-for="p in ALL_PROTOCOLS" :key="p" @click="toggleProtocol(p)"
+                    :class="['px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-tighter transition-all', 
+                            filters.protocols.includes(p) ? 'pill-' + (p === 'llm-api'?'llm':p) : 'bg-white/5 text-gray-600 border border-transparent']">
+                    {{ p === 'llm-api' ? 'LLM' : p }}
+                </button>
+                <div class="flex items-center gap-2 ml-2">
+                    <button @click="selectProtocols(true)"
+                        class="text-[10px] text-gray-500 hover:text-white transition">All</button>
+                    <button @click="selectProtocols(false)"
+                        class="text-[10px] text-gray-500 hover:text-white transition">None</button>
+                </div>
+            </div>
+
+            <div class="flex items-center gap-6">
+                <!-- Risk Filter -->
+                <div class="flex items-center gap-3">
+                    <span class="text-[10px] font-black uppercase tracking-widest text-gray-500">Risk:</span>
+                    <select v-model="filters.risk"
+                        class="bg-transparent text-xs font-bold text-gray-300 focus:outline-none cursor-pointer">
+                        <option value="">All Levels</option>
+                        <option value="50">Medium +</option>
+                        <option value="80">Critical</option>
+                    </select>
+                </div>
+
+                <div class="h-6 w-px bg-white/5"></div>
+
+                <!-- IP / ASN Search -->
+                <div class="flex items-center gap-4">
+                    <div class="flex items-center gap-2">
+                        <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                        </svg>
+                        <input v-model.lazy="filters.ip" placeholder="IP (1.2.3.XXX)"
+                            class="bg-transparent text-xs font-bold focus:outline-none w-32 placeholder-gray-700">
+                        <button v-if="filters.ip" @click="filters.ip = ''"
+                            class="text-gray-600 hover:text-white">&times;</button>
+                    </div>
+                    <div class="flex items-center gap-2 border-l border-white/5 pl-4">
+                        <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path
+                                d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                        </svg>
+                        <input v-model.lazy="filters.asn" placeholder="ASN / Org..."
+                            class="bg-transparent text-xs font-bold focus:outline-none w-32 placeholder-gray-700">
+                        <button v-if="filters.asn" @click="filters.asn = ''"
+                            class="text-gray-600 hover:text-white">&times;</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Content (Tabs) -->
+        <main class="flex-1 flex flex-col gap-4">
+            <!-- Tab Switcher -->
+            <div class="flex gap-8 border-b border-white/5 px-2">
+                <button v-for="tab in ['sessions', 'asns', 'ips', 'countries']" :key="tab" @click="activeTab = tab"
+                    :class="['pb-4 text-sm font-black uppercase tracking-widest transition-all', 
+                            activeTab === tab ? 'text-white border-b-2 border-white' : 'text-gray-500 border-b-0 border-transparent hover:text-gray-300']">
+                    {{ {sessions: 'Recent Sessions', asns: 'Top ASNs', ips: 'Top IPs', countries: 'Top Countries'}[tab]
+                    }}
+                </button>
+            </div>
+
+            <!-- Sessions Tab -->
+            <div v-if="activeTab === 'sessions'" class="glass rounded-3xl overflow-hidden flex flex-col">
+                <div class="overflow-x-auto custom-scrollbar">
+                    <table class="w-full text-left border-collapse min-w-[1000px]">
+                        <thead class="bg-white/[0.03] text-[10px] text-gray-500 uppercase font-black tracking-widest">
+                            <tr>
+                                <th class="px-6 py-4">Time</th>
+                                <th class="px-6 py-4">Attacker IP</th>
+                                <th class="px-6 py-4">Proto</th>
+                                <th class="px-6 py-4">Credentials</th>
+                                <th class="px-6 py-4">Request Preview</th>
+                                <th class="px-6 py-4 w-60">Origin / ASN</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-white/5">
+                            <tr v-for="s in sessions" :key="s.session_id" @click="selectSession(s)"
+                                class="hover:bg-white/[0.04] cursor-pointer transition-colors group">
+                                <td class="px-6 py-4 whitespace-nowrap text-[11px] text-gray-600 font-mono">{{
+                                    timeAgo(s.start_time) }}</td>
+                                <td class="px-6 py-4">
+                                    <div @click.stop="filters.ip = s.remote_ip"
+                                        class="flex flex-col hover:opacity-80 transition-opacity">
+                                        <span
+                                            class="text-sm font-black text-indigo-400/90 underline decoration-indigo-500/30 underline-offset-4">{{
+                                            s.remote_ip }}</span>
+                                        <div class="flex items-center gap-2 text-[9px] text-gray-600 font-bold mt-0.5">
+                                            <span>CMDS: {{ s.cmd_count || 0 }}</span>
+                                            <span :class="getRiskClass(s.risk_score)">RISK: {{ s.risk_score || 0
+                                                }}</span>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4">
+                                    <span
+                                        :class="['pill', 'pill-' + (s.protocol === 'llm-api'?'llm':s.protocol||'ssh')]">{{
+                                        protoLabel(s.protocol) }}</span>
+                                </td>
+                                <td class="px-6 py-4">
+                                    <div class="flex flex-col max-w-[120px]">
+                                        <span class="text-xs font-black text-white truncate">{{ s.username || '-'
+                                            }}</span>
+                                        <span class="text-[9px] text-gray-700 font-mono truncate"
+                                            v-if="s.password">••••••••</span>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4">
+                                    <div v-if="s.last_command && settings.showCommandPrvw"
+                                        class="text-green-500 font-bold term-font text-xs italic opacity-80 group-hover:opacity-100 truncate max-w-md">
+                                        $ {{ s.last_command }}
+                                    </div>
+                                    <span v-else class="text-gray-800 text-[10px] italic">No activity yet</span>
+                                </td>
+                                <td class="px-6 py-4">
+                                    <div class="flex flex-col text-[11px]">
+                                        <span class="text-gray-300 font-bold">{{ s.city || 'Unknown' }}, {{ s.country ||
+                                            'Unknown' }}</span>
+                                        <span @click.stop="filterByAsn(s.asn)"
+                                            class="text-[9px] text-indigo-600 font-black hover:underline mt-0.5">{{
+                                            s.asn || '-' }}</span>
+                                    </div>
+                                </td>
+                            </tr>
+                            <tr v-if="sessions.length === 0 && !loading">
+                                <td colspan="6" class="py-20 text-center text-gray-700 font-bold italic">No matching
+                                    sessions found</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Top ASNs Tab -->
+            <div v-if="activeTab === 'asns'" class="glass rounded-3xl overflow-hidden flex flex-col">
+                <div class="overflow-x-auto custom-scrollbar">
+                    <table class="w-full text-left border-collapse min-w-[1200px]">
+                        <thead class="bg-white/[0.03] text-[10px] text-gray-500 uppercase font-black tracking-widest">
+                            <tr>
+                                <th class="px-6 py-4">ASN Info</th>
+                                <th class="px-6 py-4 text-center">Unique IPs</th>
+                                <th class="px-6 py-4 text-center">Total Sessions</th>
+                                <th v-for="p in ALL_PROTOCOLS" :key="p"
+                                    class="px-4 py-4 text-center border-l border-white/5">
+                                    {{ p === 'llm-api' ? 'LLM' : p }}
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-white/5">
+                            <tr v-for="a in topAsns" :key="a.asn" class="hover:bg-white/[0.02] transition-colors">
+                                <td class="px-6 py-4">
+                                    <div class="flex flex-col">
+                                        <span @click="filterByAsn(a.asn)"
+                                            class="text-sm font-black text-indigo-400 cursor-pointer hover:underline">{{
+                                            a.asn }}</span>
+                                        <span class="text-[11px] text-gray-500 font-bold truncate max-w-xs">{{ a.org
+                                            }}</span>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 text-center font-black text-white text-lg">{{ a.unique_ips }}</td>
+                                <td class="px-6 py-4 text-center font-bold text-gray-400">{{ a.total_sessions }}</td>
+                                <td v-for="p in ALL_PROTOCOLS" :key="p"
+                                    class="px-4 py-4 text-center border-l border-white/5">
+                                    <div v-if="a.protocols[p]" class="flex flex-col items-center">
+                                        <span class="text-xs font-black text-white">{{ a.protocols[p].sessions }}</span>
+                                        <span class="text-[9px] text-gray-600 font-bold">cmds: {{
+                                            a.protocols[p].commands }}</span>
+                                    </div>
+                                    <span v-else class="text-gray-800 text-xs">-</span>
+                                </td>
+                            </tr>
+                            <tr v-if="loadingAsns">
+                                <td :colspan="3 + ALL_PROTOCOLS.length" class="py-20 text-center">
+                                    <div class="flex flex-col items-center gap-3 opacity-50">
+                                        <div
+                                            class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin">
+                                        </div>
+                                        <span
+                                            class="text-[10px] font-black uppercase tracking-widest text-gray-400">Aggregating
+                                            Intelligence...</span>
+                                    </div>
+                                </td>
+                            </tr>
+                            <tr v-else-if="topAsns.length === 0">
+                                <td :colspan="3 + ALL_PROTOCOLS.length"
+                                    class="py-20 text-center text-gray-700 font-bold italic">No ASN data available</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Top IPs Tab -->
+            <div v-if="activeTab === 'ips'" class="glass rounded-3xl overflow-hidden flex flex-col">
+                <div class="overflow-x-auto custom-scrollbar">
+                    <table class="w-full text-left border-collapse min-w-[1200px]">
+                        <thead class="bg-white/[0.03] text-[10px] text-gray-500 uppercase font-black tracking-widest">
+                            <tr>
+                                <th class="px-6 py-4">Attacker IP</th>
+                                <th class="px-6 py-4">Location / Network</th>
+                                <th class="px-6 py-4 text-center">Sessions</th>
+                                <th v-for="p in ALL_PROTOCOLS" :key="p"
+                                    class="px-4 py-4 text-center border-l border-white/5">
+                                    {{ p === 'llm-api' ? 'LLM' : p }}
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-white/5">
+                            <tr v-for="ip in topIps" :key="ip.ip" class="hover:bg-white/[0.02] transition-colors">
+                                <td class="px-6 py-4">
+                                    <span @click="filters.ip = ip.ip"
+                                        class="text-sm font-black text-indigo-400 cursor-pointer hover:underline">{{
+                                        ip.ip }}</span>
+                                </td>
+                                <td class="px-6 py-4">
+                                    <div class="flex flex-col">
+                                        <span class="text-xs font-bold text-gray-300">{{ ip.country }}</span>
+                                        <span class="text-[10px] text-gray-600 font-bold truncate max-w-[200px]"
+                                            :title="ip.org">{{ ip.org }}</span>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4 text-center font-black text-white text-lg">{{ ip.total_sessions }}
+                                </td>
+                                <td v-for="p in ALL_PROTOCOLS" :key="p"
+                                    class="px-4 py-4 text-center border-l border-white/5">
+                                    <div v-if="ip.protocols[p]" class="flex flex-col items-center">
+                                        <span class="text-xs font-black text-white">{{ ip.protocols[p].sessions
+                                            }}</span>
+                                        <span class="text-[9px] text-gray-600 font-bold uppercase">cmds: {{
+                                            ip.protocols[p].commands }}</span>
+                                    </div>
+                                    <span v-else class="text-gray-800 text-xs">-</span>
+                                </td>
+                            </tr>
+                            <tr v-if="loadingIps">
+                                <td :colspan="3 + ALL_PROTOCOLS.length" class="py-20 text-center">
+                                    <div class="flex flex-col items-center gap-3 opacity-50">
+                                        <div
+                                            class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin">
+                                        </div>
+                                        <span
+                                            class="text-[10px] font-black uppercase tracking-widest text-gray-400">Aggregating
+                                            IP Stats...</span>
+                                    </div>
+                                </td>
+                            </tr>
+                            <tr v-else-if="topIps.length === 0">
+                                <td :colspan="3 + ALL_PROTOCOLS.length"
+                                    class="py-20 text-center text-gray-700 font-bold italic">No IP data available</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Top Countries Tab -->
+            <div v-if="activeTab === 'countries'" class="glass rounded-3xl overflow-hidden flex flex-col">
+                <div class="overflow-x-auto custom-scrollbar">
+                    <table class="w-full text-left border-collapse min-w-[1200px]">
+                        <thead class="bg-white/[0.03] text-[10px] text-gray-500 uppercase font-black tracking-widest">
+                            <tr>
+                                <th class="px-6 py-4">Country</th>
+                                <th class="px-6 py-4 text-center">Unique IPs</th>
+                                <th class="px-6 py-4 text-center">Sessions</th>
+                                <th v-for="p in ALL_PROTOCOLS" :key="p"
+                                    class="px-4 py-4 text-center border-l border-white/5">
+                                    {{ p === 'llm-api' ? 'LLM' : p }}
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-white/5">
+                            <tr v-for="c in topCountries" :key="c.country"
+                                class="hover:bg-white/[0.02] transition-colors">
+                                <td class="px-6 py-4">
+                                    <span class="text-sm font-black text-indigo-400">{{ c.country }}</span>
+                                </td>
+                                <td class="px-6 py-4 text-center font-black text-white text-lg">{{ c.unique_ips }}</td>
+                                <td class="px-6 py-4 text-center font-bold text-gray-400">{{ c.total_sessions }}</td>
+                                <td v-for="p in ALL_PROTOCOLS" :key="p"
+                                    class="px-4 py-4 text-center border-l border-white/5">
+                                    <div v-if="c.protocols && c.protocols[p]" class="flex flex-col items-center">
+                                        <span class="text-xs font-black text-white">{{ c.protocols[p].unique_ips
+                                            }}</span>
+                                        <span class="text-[9px] text-gray-600 font-bold uppercase">sess: {{
+                                            c.protocols[p].sessions }}</span>
+                                    </div>
+                                    <span v-else class="text-gray-800 text-xs">-</span>
+                                </td>
+                            </tr>
+                            <tr v-if="loadingCountries">
+                                <td :colspan="3 + ALL_PROTOCOLS.length" class="py-20 text-center">
+                                    <div class="flex flex-col items-center gap-3 opacity-50">
+                                        <div
+                                            class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin">
+                                        </div>
+                                        <span
+                                            class="text-[10px] font-black uppercase tracking-widest text-gray-400">Aggregating
+                                            Geo Stats...</span>
+                                    </div>
+                                </td>
+                            </tr>
+                            <tr v-else-if="topCountries.length === 0">
+                                <td :colspan="3 + ALL_PROTOCOLS.length"
+                                    class="py-20 text-center text-gray-700 font-bold italic">No country data
+                                    available</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+
+        <!-- Session Detail Modal (Centered) -->
+        <transition name="fade">
+            <div v-if="selectedSession"
+                class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm transition-opacity"
+                @click.self="selectedSession = null">
+                <div class="bg-[#0a0a0c] border border-white/10 rounded-2xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl shadow-indigo-500/10"
+                    @click.stop>
+                    <!-- Modal Header -->
+                    <div class="p-6 border-b border-white/5 flex justify-between items-center bg-white/5">
+                        <div class="flex items-center gap-4">
+                            <div
+                                class="w-12 h-12 rounded-xl bg-indigo-500/10 flex items-center justify-center text-indigo-400">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                </svg>
+                            </div>
+                            <div>
+                                <div class="text-[10px] text-gray-500 uppercase font-black tracking-widest mb-0.5">
+                                    Session Audit Log</div>
+                                <h2 class="text-2xl font-black text-white flex items-center gap-3">
+                                    {{ selectedSession.remote_ip }}
+                                    <span
+                                        :class="['pill !text-xs', 'pill-' + (selectedSession.protocol === 'llm-api'?'llm':selectedSession.protocol||'ssh')]">{{
+                                        protoLabel(selectedSession.protocol) }}</span>
+                                </h2>
+                            </div>
+                        </div>
+                        <button @click="selectedSession = null"
+                            class="w-10 h-10 rounded-full hover:bg-white/10 flex items-center justify-center text-gray-400 hover:text-white transition-all">
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                        </button>
+                    </div>
+
+                    <!-- Modal Content (Scrollable) -->
+                    <div class="flex-1 overflow-y-auto custom-scrollbar">
+                        <!-- Session Metadata Grid -->
+                        <div class="grid grid-cols-4 gap-px bg-white/5 border-b border-white/5">
+                            <div class="p-6">
+                                <div
+                                    class="text-[10px] text-indigo-400/60 uppercase font-black tracking-widest mb-2 flex items-center gap-2">
+                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path
+                                            d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                                        <path d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                                    </svg>
+                                    Location
+                                </div>
+                                <div class="text-base font-bold text-white">
+                                    {{ selectedSession.city || 'Unknown City' }}, {{ selectedSession.country || 'Unknown Country' }}
+                                </div>
+                            </div>
+                            <div class="p-6 bg-[#0a0a0c]">
+                                <div class="text-[10px] text-gray-500 uppercase font-black tracking-widest mb-2">Network
+                                    Intel</div>
+                                <div class="text-sm font-bold text-gray-300 truncate" :title="selectedSession.org">
+                                    {{ selectedSession.org || 'Unknown Org' }}
+                                </div>
+                                <div @click="filterByAsn(selectedSession.asn)"
+                                    class="text-[10px] text-indigo-500 font-black mt-1 cursor-pointer hover:underline">
+                                    ASN: {{ selectedSession.asn || '-' }}
+                                </div>
+                            </div>
+                            <div class="p-6 bg-[#0a0a0c]">
+                                <div class="text-[10px] text-gray-500 uppercase font-black tracking-widest mb-2">Auth
+                                    Credentials</div>
+                                <div class="flex flex-col">
+                                    <span class="text-sm font-bold text-white">{{ selectedSession.username || 'n/a'
+                                        }}</span>
+                                    <span class="text-[10px] text-gray-600 font-mono" v-if="selectedSession.password">{{
+                                        selectedSession.password }}</span>
+                                </div>
+                            </div>
+                            <div class="p-6 bg-[#0a0a0c]">
+                                <div class="text-[10px] text-gray-500 uppercase font-black tracking-widest mb-2">Session
+                                    Info</div>
+                                <div class="grid grid-cols-2 gap-2">
+                                    <div>
+                                        <div class="text-[9px] text-gray-600 uppercase font-bold">Risk Score</div>
+                                        <div :class="['text-sm font-black', getRiskClass(selectedSession.risk_score)]">
+                                            {{ selectedSession.risk_score || 0 }}</div>
+                                    </div>
+                                    <div>
+                                        <div class="text-[9px] text-gray-600 uppercase font-bold">CMD Count</div>
+                                        <div class="text-sm font-bold text-white">{{ selectedSession.cmd_count || 0 }}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Activity Timeline -->
+                        <div class="p-8">
+                            <div class="flex items-center justify-between mb-6">
+                                <h3
+                                    class="text-sm font-black text-gray-400 uppercase tracking-widest flex items-center gap-3">
+                                    Activity Timeline
+                                    <span class="px-2 py-0.5 bg-white/5 rounded text-[10px] text-gray-500">{{
+                                        sessionCommands.length }} Events</span>
+                                </h3>
+                            </div>
+
+                            <div v-if="loadingCommands"
+                                class="flex flex-col items-center justify-center py-12 opacity-50">
+                                <div
+                                    class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4">
+                                </div>
+                                <span class="text-xs font-bold text-gray-500 uppercase tracking-widest">Reconstructing
+                                    Activity...</span>
+                            </div>
+
+                            <div v-else-if="sessionCommands.length === 0"
+                                class="flex flex-col items-center justify-center py-12 border-2 border-dashed border-white/5 rounded-2xl">
+                                <span class="text-sm font-bold text-gray-700 uppercase italic">No interactive commands
+                                    recorded for this session</span>
+                            </div>
+
+                            <div v-else class="space-y-4">
+                                <div v-for="c in sessionCommands" :key="c.timestamp + c.command"
+                                    class="bg-white/[0.02] border border-white/5 rounded-xl overflow-hidden hover:border-indigo-500/30 transition-all group">
+                                    <div class="p-5">
+                                        <div class="flex justify-between items-start mb-3">
+                                            <div class="flex items-center gap-3">
+                                                <span class="text-[10px] text-gray-600 font-mono">{{
+                                                    timeShort(c.timestamp) }}</span>
+                                                <span
+                                                    class="px-1.5 py-0.5 bg-indigo-900/40 text-indigo-400 rounded text-[9px] font-black uppercase tracking-tighter">{{
+                                                    c.source || 'LLM' }}</span>
+                                            </div>
+                                            <button @click="c.showOutput = !c.showOutput"
+                                                class="text-[10px] font-black text-indigo-500 uppercase tracking-widest hover:text-indigo-400 transition-all">
+                                                {{ c.showOutput ? 'Hide Output' : 'View Output' }}
+                                            </button>
+                                        </div>
+                                        <div class="flex gap-3">
+                                            <span v-if="selectedSession.protocol !== 'http'"
+                                                class="text-green-800 font-black term-font">$</span>
+                                            <div class="flex-1">
+                                                <div
+                                                    class="text-green-500 font-bold term-font leading-relaxed break-all">
+                                                    {{ c.command }}</div>
+                                                <div v-if="c.explanation"
+                                                    class="mt-2 text-[11px] text-gray-500 italic leading-relaxed">{{
+                                                    c.explanation }}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <!-- Collapsible Output -->
+                                    <transition name="fade">
+                                        <div v-if="c.showOutput"
+                                            class="bg-black/80 p-5 border-t border-white/5 term-font text-[13px] text-gray-400 whitespace-pre-wrap leading-relaxed shadow-inner">
+                                            {{ c.response || 'No output recorded for this command.' }}
+                                        </div>
+                                    </transition>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
+        <!-- About Modal -->
+        <transition name="fade">
+            <div v-if="showAbout"
+                class="fixed inset-0 bg-black/80 backdrop-blur-md z-[60] flex items-center justify-center p-6"
+                @click.self="showAbout = false">
+                <div
+                    class="glass max-w-lg w-full rounded-3xl overflow-hidden shadow-2xl flex flex-col border border-white/10">
+                    <div class="p-8 border-b border-white/5 bg-white/5 flex justify-between items-center">
+                        <h3 class="text-2xl font-black text-white">About <span class="text-indigo-500">FauxSSH</span>
+                        </h3>
+                        <button @click="showAbout = false"
+                            class="text-gray-500 hover:text-white transition text-2xl">&times;</button>
+                    </div>
+                    <div class="p-8 space-y-6">
+                        <div>
+                            <h4 class="text-[10px] font-black text-gray-500 uppercase tracking-widest mb-4">Dashboard
+                                Engine</h4>
+                            <div class="space-y-4">
+                                <label class="flex items-center gap-3 cursor-pointer group">
+                                    <input type="checkbox" v-model="settings.autoRefresh"
+                                        class="w-4 h-4 rounded border-white/10 bg-black/40 text-indigo-600 focus:ring-indigo-500">
+                                    <span class="text-sm text-gray-300 group-hover:text-white transition">Auto-refresh
+                                        (every 5m)</span>
+                                </label>
+                                <label class="flex items-center gap-3 cursor-pointer group">
+                                    <input type="checkbox" v-model="settings.showCommandPrvw"
+                                        class="w-4 h-4 rounded border-white/10 bg-black/40 text-indigo-600 focus:ring-indigo-500">
+                                    <span class="text-sm text-gray-300 group-hover:text-white transition">Show command
+                                        previews</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </transition>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted, watch } = Vue;
+
+        createApp({
+            setup() {
+                const sessions = ref([]);
+                const topAsns = ref([]);
+                const topIps = ref([]);
+                const topCountries = ref([]);
+                const activeTab = ref('sessions');
+                const selectedSession = ref(null);
+                const sessionCommands = ref([]);
+
+                const loading = ref(true);
+                const loadingAsns = ref(false);
+                const loadingIps = ref(false);
+                const loadingCountries = ref(false);
+                const loadingCommands = ref(false);
+                const lastUpdated = ref('');
+
+                const stats = ref({
+                    total_sessions: 0,
+                    total_commands: 0,
+                    unique_ips: 0,
+                    unique_asns: 0
+                });
+
+                const ALL_PROTOCOLS = ['ssh', 'telnet', 'http', 'redis', 'mysql', 'llm-api', 'mcp'];
+                const timeOptions = [
+                    { label: '1H', value: 1 },
+                    { label: '24H', value: 24 },
+                    { label: '1W', value: 168 }
+                ];
+
+                const showAbout = ref(false);
+                const settings = ref({
+                    autoRefresh: true,
+                    showCommandPrvw: true
+                });
+
+                const filters = ref({
+                    protocols: [...ALL_PROTOCOLS],
+                    risk: '',
+                    ip: '',
+                    asn: '',
+                    hours: 24
+                });
+
+                const updateUrl = () => {
+                    const params = new URLSearchParams();
+                    if (filters.value.risk) params.set('risk', filters.value.risk);
+                    if (filters.value.ip) params.set('ip', filters.value.ip);
+                    if (filters.value.asn) params.set('asn', filters.value.asn);
+                    if (filters.value.hours !== 24) params.set('h', filters.value.hours);
+                    params.set('p', filters.value.protocols.join(','));
+                    if (activeTab.value !== 'sessions') params.set('tab', activeTab.value);
+
+                    let hash = '#' + params.toString();
+                    if (selectedSession.value) hash += '&session=' + selectedSession.value.session_id;
+
+                    if (window.location.hash !== hash) {
+                        window.history.pushState(null, '', hash);
+                    }
+                };
+
+                const loadFromUrl = () => {
+                    const hash = window.location.hash.substring(1);
+                    if (!hash) return;
+                    const params = new URLSearchParams(hash);
+                    if (params.has('risk')) filters.value.risk = params.get('risk');
+                    if (params.has('ip')) filters.value.ip = params.get('ip');
+                    if (params.has('asn')) filters.value.asn = params.get('asn');
+                    if (params.has('tab')) activeTab.value = params.get('tab');
+                    if (params.has('p')) filters.value.protocols = params.get('p').split(',').filter(x => x);
+                    if (params.has('h')) filters.value.hours = parseInt(params.get('h'));
+
+                    const sid = params.get('session');
+                    if (sid && (!selectedSession.value || selectedSession.value.session_id !== sid)) {
+                        selectSession({ session_id: sid, remote_ip: 'Loading...' });
+                    }
+                };
+
+                const fetchData = async () => {
+                    loading.value = true;
+                    try {
+                        const p = new URLSearchParams();
+                        filters.value.protocols.forEach(proto => p.append('proto', proto));
+                        if (filters.value.risk) p.append('risk', filters.value.risk);
+                        if (filters.value.ip) p.append('ip', filters.value.ip);
+                        if (filters.value.asn) p.append('asn', filters.value.asn);
+                        p.append('hours', filters.value.hours);
+
+                        // Totals
+                        const totalRes = await fetch(`/api/v2/totals?hours=${filters.value.hours}`);
+                        if (totalRes.ok) stats.value = (await totalRes.json()).totals || stats.value;
+
+                        // Sessions
+                        const sessRes = await fetch(`/api/v2/sessions?${p.toString()}&limit=50`);
+                        if (sessRes.ok) {
+                            sessions.value = (await sessRes.json()).sessions || [];
+                            if (window.location.hash.includes('session=')) {
+                                const sid = new URLSearchParams(window.location.hash.substring(1)).get('session');
+                                if (sid && (!selectedSession.value || selectedSession.value.remote_ip === 'Loading...')) {
+                                    const found = sessions.value.find(s => s.session_id === sid);
+                                    if (found) selectSession(found);
+                                }
+                            }
+                        }
+
+                        // Top Stats (if active tab)
+                        if (activeTab.value === 'asns') fetchAsns();
+                        if (activeTab.value === 'ips') fetchIps();
+                        if (activeTab.value === 'countries') fetchCountries();
+
+                        lastUpdated.value = moment().format('HH:mm:ss');
+                    } catch (e) { console.error(e); } finally { loading.value = false; }
+                };
+
+                const fetchAsns = async () => {
+                    loadingAsns.value = true;
+                    try {
+                        const p = new URLSearchParams();
+                        filters.value.protocols.forEach(proto => p.append('proto', proto));
+                        p.append('hours', filters.value.hours);
+                        const res = await fetch(`/api/v2/stats/top_asns?${p.toString()}`);
+                        if (res.ok) topAsns.value = (await res.json()).asns || [];
+                    } finally { loadingAsns.value = false; }
+                };
+
+                const fetchIps = async () => {
+                    loadingIps.value = true;
+                    try {
+                        const res = await fetch(`/api/v2/stats/top_ips?hours=${filters.value.hours}`);
+                        if (res.ok) topIps.value = (await res.json()).ips || [];
+                    } finally { loadingIps.value = false; }
+                };
+
+                const fetchCountries = async () => {
+                    loadingCountries.value = true;
+                    try {
+                        const res = await fetch(`/api/v2/stats/top_countries?hours=${filters.value.hours}`);
+                        if (res.ok) topCountries.value = (await res.json()).countries || [];
+                    } finally { loadingCountries.value = false; }
+                };
+
+                const selectSession = async (session) => {
+                    selectedSession.value = session;
+                    sessionCommands.value = [];
+                    loadingCommands.value = true;
+                    updateUrl();
+                    try {
+                        const res = await fetch(`/api/v2/commands?session=${session.session_id}&limit=200`);
+                        if (res.ok) sessionCommands.value = (await res.json()).commands.map(c => ({ ...c, showOutput: false }));
+                    } finally { loadingCommands.value = false; }
+                };
+
+                const filterByAsn = (asn) => {
+                    if (!asn) return;
+                    filters.value.asn = asn;
+                    activeTab.value = 'sessions';
+                    selectedSession.value = null;
+                };
+
+                const toggleProtocol = (proto) => {
+                    const idx = filters.value.protocols.indexOf(proto);
+                    if (idx > -1) filters.value.protocols.splice(idx, 1);
+                    else filters.value.protocols.push(proto);
+                };
+
+                const selectProtocols = (all) => {
+                    filters.value.protocols = all ? [...ALL_PROTOCOLS] : [];
+                };
+
+                const resetFilters = () => {
+                    filters.value.protocols = [...ALL_PROTOCOLS];
+                    filters.value.risk = '';
+                    filters.value.ip = '';
+                    filters.value.asn = '';
+                    filters.value.hours = 24;
+                };
+
+                const getRiskClass = (score) => {
+                    if (score >= 80) return 'risk-high';
+                    if (score >= 50) return 'risk-med';
+                    return 'risk-low';
+                };
+
+                const timeAgo = (date) => {
+                    if (!date) return '-';
+                    const diff = moment().diff(moment(date), 'seconds');
+                    if (diff < 60) return diff + 's';
+                    if (diff < 3600) return Math.floor(diff / 60) + 'm';
+                    if (diff < 86400) return Math.floor(diff / 3600) + 'h';
+                    if (diff < 604800) return Math.floor(diff / 86400) + 'd';
+                    return Math.floor(diff / 604800) + 'w';
+                };
+                const timeShort = (date) => date ? moment(date).format('HH:mm:ss') : '-';
+                const protoLabel = (p) => p === 'llm-api' ? 'LLM' : (p || 'ssh').toUpperCase();
+
+                onMounted(() => {
+                    loadFromUrl();
+                    fetchData();
+                    setInterval(() => { if (settings.value.autoRefresh) fetchData(); }, 300000);
+                    window.addEventListener('popstate', loadFromUrl);
+                });
+
+                watch([filters, activeTab], fetchData, { deep: true });
+                watch(selectedSession, (val) => { if (!val) updateUrl(); });
+
+                return {
+                    sessions, topAsns, topIps, topCountries, activeTab, selectedSession, sessionCommands,
+                    loading, loadingAsns, loadingIps, loadingCountries, loadingCommands, lastUpdated,
+                    stats, filters, ALL_PROTOCOLS, timeOptions, showAbout, settings,
+                    toggleProtocol, selectProtocols, selectSession, resetFilters, filterByAsn,
+                    getRiskClass, timeAgo, timeShort, protoLabel, setTimeWindow: (h) => filters.value.hours = h,
+                    currentRangeLabel: Vue.computed(() => timeOptions.find(o => o.value === filters.value.hours)?.label.toLowerCase() || '24h')
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+
+</html>

@@ -78,7 +78,9 @@ class LLMInterface:
         """
         Generic query method for arbitary prompts (used by MySQL/Redis layers).
         """
-        return self._call_api(prompt, protocol=protocol)
+        if "client_ip" not in kwargs:
+            kwargs["client_ip"] = "Unknown"
+        return self._call_api(prompt, protocol=protocol, **kwargs)
 
     def generate_response(
         self,
@@ -93,6 +95,7 @@ class LLMInterface:
         override_prompt=None,
         persona_config=None,
         protocol="ssh",
+        return_source=False,
         **kwargs,
     ):
         """
@@ -111,9 +114,14 @@ class LLMInterface:
 
         # If raw prompt override is provided, skip template logic
         if override_prompt:
-            res = self._call_api(override_prompt)
+            res, source = self._call_api(override_prompt, return_source=True)
             if "INTERNAL_ERROR" in res:
-                return self._get_bash_fallback(command, protocol=protocol)
+                fallback = self._get_bash_fallback(command, protocol=protocol)
+                if return_source:
+                    return fallback, "error"
+                return fallback
+            if return_source:
+                return res, source
             return res
 
         # Construct Context String
@@ -213,11 +221,27 @@ class LLMInterface:
             )
         except Exception as e:
             log.error(f"[!] Prompt Formatting Error: {e}")
-            return '{"output": "Error: Internal System Error", "new_cwd": null}'
+            resp = '{"output": "Error: Internal System Error", "new_cwd": null}'
+            if return_source:
+                return resp, "error"
+            return resp
 
-        res = self._call_api(prompt, command=command, protocol=protocol)
+        res, source = self._call_api(
+            prompt,
+            command=command,
+            protocol=protocol,
+            return_source=True,
+            client_ip=client_ip,
+            **kwargs,
+        )
         if "INTERNAL_ERROR" in res:
-            return self._get_bash_fallback(command, protocol=protocol)
+            fallback = self._get_bash_fallback(command, protocol=protocol)
+            if return_source:
+                return fallback, "error"
+            return fallback
+
+        if return_source:
+            return res, source
         return res
 
     def _get_bash_fallback(self, command, protocol="ssh"):
@@ -238,59 +262,126 @@ class LLMInterface:
             )
         return f"bash: {cmd_base}: command not found"
 
-    def generate_content(self, command, url, persona_summary):
+    def generate_content(
+        self, command, url, persona_summary, return_source=False, **kwargs
+    ):
         """
         Generates dynamic content (HTML/JSON) for wget/curl emulation.
         """
         try:
             template = config.get("persona", "prompts", "generate_content")
             if not template:
-                return "Error: Content generation not configured."
+                resp = "Error: Content generation not configured."
+                if return_source:
+                    return resp, "error"
+                return resp
 
             prompt = template.format(
                 command=command, url=url, persona_summary=persona_summary
             )
-            return self._call_api(
-                prompt, command=command, is_command=False, protocol="http"
+            res, source = self._call_api(
+                prompt,
+                command=command,
+                is_command=False,
+                protocol="http",
+                return_source=True,
+                client_ip=kwargs.get("client_ip", "Unknown"),
+                **kwargs,
             )
+            if return_source:
+                return res, source
+            return res
         except Exception as e:
             log.error(f"[!] Content Generation Error: {e}")
-            return "Error: Content generation failed."
+            resp = "Error: Content generation failed."
+            if return_source:
+                return resp, "error"
+            return resp
 
-    def _call_api(self, prompt, command=None, is_command=True, protocol="ssh"):
-        # 1. Check Cache
+    def _call_api(
+        self,
+        prompt,
+        command=None,
+        is_command=True,
+        protocol="ssh",
+        return_source=False,
+        client_ip="Unknown",
+        **kwargs,
+    ):
+        # 1. Check Global Cache
         prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
 
         cached_item = universal_cache.get("llm", prompt_hash)
         if cached_item:
             log.debug(f"[LLM] Cache Hit for hash {prompt_hash[:8]}")
-            return cached_item["output_text"]
+            output = cached_item["output_text"]
+            if return_source:
+                return output, "llm-cache"
+            return output
 
         log.debug(f"[LLM] Cache Miss for hash {prompt_hash[:8]}")
 
-        # Global Rate Limit Check
-        db_backend = get_db_backend()
-        l_rpm = config.get("throttling", "global", "google_llm", "rpm") or 10
-        l_rph = config.get("throttling", "global", "google_llm", "rph") or 400
-        l_rpd = config.get("throttling", "global", "google_llm", "rpd") or 10000
+        # Rate Limit Logic
+        if os.getenv("FAUXSSH_TEST_MODE") == "1":
+            log.debug("[LLM] Bypassing rate limit check in Test Mode")
+            allowed_global = True
+            allowed_ip = True
+        else:
+            db_backend = get_db_backend()
+            # client_ip is now an explicit argument
 
-        allowed, reason = db_backend.check_api_rate_limit(
-            "google_llm", "GLOBAL", l_rpm, l_rph, l_rpd
-        )
-        if not allowed:
-            # SHHH: Silent return for rate limit blocks to prevent debug file spam
-            log.warning(f"[LLM] Global Rate Limit Block: {reason}")
-            return '{"output": "Error: System resources exhausted. Please try again later.", "new_cwd": null}'
+            # Global Rate Limit
+            l_rpm = config.get("throttling", "global", "google_llm", "rpm") or 10
+            l_rph = config.get("throttling", "global", "google_llm", "rph") or 400
+            l_rpd = config.get("throttling", "global", "google_llm", "rpd") or 10000
+            allowed_global, reason_global = db_backend.check_api_rate_limit(
+                "google_llm", "GLOBAL", l_rpm, l_rph, l_rpd
+            )
 
-        db_backend.record_api_usage("google_llm", "GLOBAL")
+            # Per-IP Rate Limit (Stricter)
+            ip_rpm = config.get("throttling", "per_ip", "google_llm", "rpm") or 5
+            ip_rph = config.get("throttling", "per_ip", "google_llm", "rph") or 50
+            ip_rpd = config.get("throttling", "per_ip", "google_llm", "rpd") or 200
+            allowed_ip, reason_ip = db_backend.check_api_rate_limit(
+                "google_llm", client_ip, ip_rpm, ip_rph, ip_rpd
+            )
+
+        if not allowed_global or not allowed_ip:
+            source = "ratelimit-global" if not allowed_global else "ratelimit-ip"
+            reason = reason_global if not allowed_global else reason_ip
+            log.warning(f"[LLM] Rate Limit Block ({source}): {reason}")
+
+            # Realistic Responses
+            if protocol == "http":
+                resp = '{"output": "Error: 404 Not Found", "status": 404}'
+            elif protocol == "mysql":
+                resp = "{\"output\": \"ERROR 1045 (28000): Access denied for user 'root'@'localhost'\"}"
+            else:
+                resp = (
+                    '{"output": "bash: fork: retry: Resource temporarily unavailable"}'
+                )
+
+            if return_source:
+                return resp, source
+            return resp
+
+        if os.getenv("FAUXSSH_TEST_MODE") != "1":
+            db_backend = get_db_backend()
+            db_backend.record_api_usage("google_llm", "GLOBAL")
+            if client_ip and client_ip != "Unknown":
+                db_backend.record_api_usage("google_llm", client_ip)
 
         # Route to provider
         if self.provider == "openai":
-            return self._call_openai(prompt, prompt_hash, command, is_command, protocol)
+            res = self._call_openai(prompt, prompt_hash, command, is_command, protocol)
         elif self.provider == "ollama":
-            return self._call_ollama(prompt, prompt_hash, command, is_command, protocol)
+            res = self._call_ollama(prompt, prompt_hash, command, is_command, protocol)
         else:
-            return self._call_google(prompt, prompt_hash, command, is_command, protocol)
+            res = self._call_google(prompt, prompt_hash, command, is_command, protocol)
+
+        if return_source:
+            return res, "llm"
+        return res
 
     def _call_google(
         self, prompt, prompt_hash, command=None, is_command=True, protocol="ssh"
@@ -526,8 +617,12 @@ class LLMInterface:
 
         prompt = template.replace("{command}", command)
 
-        raw_json = self._call_api(
-            prompt, command=command, is_command=False, protocol="analytics"
+        raw_json, _ = self._call_api(
+            prompt,
+            command=command,
+            is_command=False,
+            protocol="analytics",
+            return_source=True,
         )
         try:
             data = json.loads(raw_json)

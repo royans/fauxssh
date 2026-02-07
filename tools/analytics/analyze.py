@@ -54,47 +54,15 @@ try:
     from ssh_honeypot.core.utils import get_data_dir, get_ignored_ips
     from ssh_honeypot.core.config import config
     from ssh_honeypot.core.database import get_db_backend
+    from ssh_honeypot.core.analytics_engine import AnalyticsEngine
 except ImportError as e:
     console.print(f"[bold red][!] Import Error: {e}[/bold red]")
     sys.exit(1)
 
 
-def get_db_connection(db_path_override=None):
-    # If path override is provided, assume SQLite for backward compat or manual file checks
-    if db_path_override:
-        conn = sqlite3.connect(db_path_override)
-        conn.row_factory = sqlite3.Row
-        return conn, "?"
-
-    # Use central factory
+def get_engine():
     db = get_db_backend()
-    conn = db._get_conn()
-
-    # If using psycopg2 (Postgres), we might need to set row_factory or equivalent if not using RealDictCursor.
-    # PostgresBackend._get_conn returns raw connection.
-    # psycopg2 needs extras.RealDictCursor for dictionary-like access.
-    # Let's inspect connection type or just handle it.
-
-    # Check for placeholder
-    ph = getattr(db, "placeholder", "?")
-
-    # If wrapper needed for Row-like access?
-    # SSHPot logic usually uses tuples for fetching unless row_factory set.
-    # But analyze.py heavily uses r["column"] access.
-    # So we MUST ensure the cursor yields dict-like objects.
-
-    # Robustness: Force Row/Cursor Factory based on connection type
-    conn_type = str(type(conn))
-    if "sqlite3" in conn_type:
-        conn.row_factory = sqlite3.Row
-        ph = "?"  # Force SQLite placeholder
-    elif "psycopg2" in conn_type:
-        import psycopg2.extras
-
-        conn.cursor_factory = psycopg2.extras.RealDictCursor
-        ph = "%s"
-
-    return conn, ph
+    return AnalyticsEngine(db)
 
 
 def to_local_time(ts_str):
@@ -120,22 +88,6 @@ def to_local_time(ts_str):
         return local_dt.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return str(ts_str)
-
-
-def clean_ip(ip, anon=False):
-    """Removes ::ffff: prefix from IPv4 mapped addresses and optionally masks last octet."""
-    if not ip:
-        return "-"
-    if ip.startswith("::ffff:"):
-        ip = ip.replace("::ffff:", "")
-
-    if anon:
-        if "." in ip:
-            parts = ip.split(".")
-            if len(parts) == 4:
-                parts[3] = "XXX"
-                return ".".join(parts)
-    return ip
 
 
 def get_risk_style(score):
@@ -196,113 +148,10 @@ def list_sessions(
     ip_filter=None,
     protocol_filter=None,
 ):
-    conn, ph = get_db_connection(db_path)
-    c = conn.cursor()
-
-    # Dialect-specific aggregation
-    agg_func = "STRING_AGG" if ph == "%s" else "group_concat"
-
-    query = f"""
-        SELECT 
-            s.session_id, 
-            s.remote_ip, 
-            s.username, 
-            s.password,
-            s.start_time, 
-            s.end_time,
-            s.client_version,
-            s.client_version,
-            s.fingerprint,
-            s.fingerprint,
-            s.protocol,
-            (SELECT COUNT(*) FROM interactions i WHERE i.session_id = s.session_id) as cmd_count,
-            (SELECT COUNT(*) FROM interactions i WHERE i.session_id = s.session_id AND i.source = 'llm') as llm_count,
-            (SELECT MIN(timestamp) FROM interactions i WHERE i.session_id = s.session_id) as first_cmd,
-            (SELECT MAX(timestamp) FROM interactions i WHERE i.session_id = s.session_id) as last_cmd,
-            (
-                SELECT AVG(ca.risk_score) 
-                FROM interactions i 
-                JOIN command_analysis ca ON i.request_md5 = ca.command_hash 
-                WHERE i.session_id = s.session_id
-            ) as avg_risk,
-            (SELECT {agg_func}(command, '|||') FROM interactions i WHERE i.session_id = s.session_id) as all_commands,
-            s.summary,
-            s.risk_score,
-            ii.country,
-            ii.org,
-            ii.asn,
-            ii.network_type,
-            ii.abuse_tags
-        FROM sessions s
-        LEFT JOIN ip_intelligence ii ON s.remote_ip = ii.ip
-        WHERE 1=1
-    """
-    params = []
-
-    if protocol_filter:
-        query += f" AND s.protocol = {ph}"
-        params.append(protocol_filter)
-
-    # Filter Ignored IPs
-    try:
-        ignored = get_ignored_ips()
-    except:
-        ignored = []
-
-    if ignored:
-        placeholders = ",".join([ph] * len(ignored))
-        query += f" AND s.remote_ip NOT IN ({placeholders})"
-        params.extend(ignored)
-
-    if ip_filter:
-        query += f" AND (s.remote_ip = {ph} OR s.remote_ip = {ph})"
-        params.append(ip_filter)
-        if not ip_filter.startswith("::ffff:"):
-            params.append(f"::ffff:{ip_filter}")
-        else:
-            params.append(ip_filter)
-
-    # Filter 0-Command Sessions (Connection Checks) by default
-    # User can override with FAUXSSH_ANALYTICS_SHOW_EMPTY=true
-    show_empty = (
-        str(os.getenv("FAUXSSH_ANALYTICS_SHOW_EMPTY", "false")).lower() == "true"
+    engine = get_engine()
+    rows = engine.get_recent_sessions(
+        limit=limit, anon=anon, ip_filter=ip_filter, protocol_filter=protocol_filter
     )
-    if not show_empty:
-        # Filter based on interactions count using a subquery in WHERE
-        # HAVING requires GROUP BY in SQLite, so we must repeat the subquery condition
-        query += " AND (SELECT COUNT(*) FROM interactions i WHERE i.session_id = s.session_id) > 0"
-
-    # Sorting
-    # Maps: User Field -> SQL Column
-    sort_map = {
-        "risk": "s.risk_score",
-        "cmds": "cmd_count",
-        "time": "s.start_time",
-        "ip": "s.remote_ip",
-        "user": "s.username",
-        "client": "s.client_version",
-        "sessionid": "s.session_id",
-        "proto": "s.protocol",
-    }
-
-    order_clause = parse_sort_param(sort_param, sort_map)
-    if order_clause:
-        query += f" ORDER BY {order_clause} LIMIT {ph}"
-    else:
-        query += f" ORDER BY s.start_time DESC LIMIT {ph}"
-
-    params.append(limit)
-
-    if ph == "%s":
-        import psycopg2.extras
-
-        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    else:
-        c = conn.cursor()
-
-    c.execute(query, tuple(params))
-    rows = c.fetchall()
-    conn.close()
 
     table = Table(title=f"Recent Sessions (Last {limit})", box=box.SIMPLE)
     table.add_column("Time", style="cyan", no_wrap=True)
@@ -322,22 +171,18 @@ def list_sessions(
     table.add_column("SessionID", style="dim", no_wrap=True)
 
     for r in rows:
-        start = to_local_time(r["start_time"])
-        ip = clean_ip(r["remote_ip"], anon=anon)
-        user = r["username"]
-        proto = r["protocol"] or "ssh"
+        start = to_local_time(r.get("start_time"))
+        ip = r.get("remote_ip")  # Already cleaned by engine if anon=True
+        user = r.get("username")
+        proto = r.get("protocol") or "ssh"
 
         # Special handling for HTTP to show Method+URL
         if proto == "http":
-            all_cmds = r["all_commands"]
+            all_cmds = r.get("all_commands", "")
             if all_cmds:
                 # Take the first command
                 first_req = all_cmds.split("|||")[0]
-                # If it's pure GET, strip it to save space? User asked for "Method if not Get".
-                # But "Show URL in User including Method if its not Get".
                 if " GET " in first_req:
-                    # Strip "HTTP GET " prefix if present or similar
-                    # Format is "HTTP GET /path" usually from server.py logic
                     user = first_req.replace("HTTP GET ", "").strip()
                 else:
                     user = first_req.replace("HTTP ", "").strip()  # Keep Method
@@ -346,30 +191,25 @@ def list_sessions(
                 if len(user) > 50:
                     user = user[:47] + "..."
 
-        # Truncate Password (unused now but kept variable if needed)
-        pwd = r["password"] or ""
-        # if len(pwd) > 15:
-        #     pwd = pwd[:12] + "..."
-
         # Truncate Client
-        ver = (r["client_version"] or "").replace("SSH-2.0-", "")
+        ver = (r.get("client_version") or "").replace("SSH-2.0-", "")
         if len(ver) > 15:
             ver = ver[:12] + "..."
 
-        cmds = str(r["cmd_count"])
-        llms = str(r["llm_count"])
+        cmds = str(r.get("cmd_count", 0))
+        llms = str(r.get("llm_count", 0))
 
         # Calculate Duration
         duration_str = "-"
-        if r["first_cmd"] and r["last_cmd"] and r["cmd_count"] > 1:
+        if r.get("first_cmd") and r.get("last_cmd") and r.get("cmd_count", 0) > 1:
             try:
                 t1 = r["first_cmd"]
                 t2 = r["last_cmd"]
 
                 if not isinstance(t1, datetime):
-                    t1 = datetime.strptime(t1, "%Y-%m-%d %H:%M:%S")
+                    t1 = parser.parse(str(t1))
                 if not isinstance(t2, datetime):
-                    t2 = datetime.strptime(t2, "%Y-%m-%d %H:%M:%S")
+                    t2 = parser.parse(str(t2))
 
                 delta = t2 - t1
                 total_seconds = int(delta.total_seconds())
@@ -382,32 +222,29 @@ def list_sessions(
                 pass
 
         # Risk Priority: Session Risk > Avg Risk
-        risk_val = r["risk_score"]
+        risk_val = r.get("risk_score")
         if risk_val is None:
-            risk_val = r["avg_risk"]
+            risk_val = r.get("avg_risk")
 
         risk_str = f"{risk_val:.1f}" if risk_val is not None else "-"
         risk_style = get_risk_style(risk_val)
 
-        summary = r["summary"] or ""
+        summary = r.get("summary") or ""
         if len(summary) > 60:  # Reduced width to fit new columns
             summary = summary[:57] + "..."
 
-        # Full Session ID requested
-        sid = r["session_id"]
+        sid = r.get("session_id")
 
-        # Geo Info
-        geo = r["country"] or "-"
-        isp = r["org"] or r["network_type"] or "-"
+        geo = r.get("country") or "-"
+        isp = r.get("org") or r.get("network_type") or "-"
         if len(isp) > 20:
             isp = isp[:17] + "..."
 
-        asn = r["asn"] or "-"
-        # Parse just the ID if possible (e.g. "AS12345 Google" -> "AS12345")
+        asn = r.get("asn") or "-"
         if asn != "-" and " " in asn:
             asn = asn.split(" ")[0]
 
-        tags = r["abuse_tags"]
+        tags = r.get("abuse_tags")
         if tags and tags != "[]":
             risk_str += " !"  # Flag abuse tags
 
@@ -415,7 +252,6 @@ def list_sessions(
             start,
             ip,
             user,
-            # pwd, # Passwd hidden
             proto,
             ver,
             cmds,
@@ -442,117 +278,15 @@ def list_commands(
     protocol_filter=None,
     show_output=False,
 ):
-    conn, ph = get_db_connection(db_path)
-    # Ensure cursor factory
-    if ph == "%s":
-        import psycopg2.extras
-
-        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    else:
-        c = conn.cursor()
-
-    # 1. Get Total Unique IPs for Unique% Calculation
-    try:
-        c.execute("SELECT COUNT(DISTINCT remote_ip) FROM sessions")
-        total_ips = c.fetchone()["count"] if ph == "%s" else c.fetchone()[0]
-        # Postgres returns dict with RealDictCursor, SQLite returns Row (indexable) or tuple?
-        # Row is indexable by name too.
-        # But wait, fetchone()[0] works for Row if it behaves like tuple.
-        # RealDictCursor returns dict, so [0] fails.
-        # Safe way: list(row.values())[0] or use alias?
-        # Let's fix the query to have an alias.
-    except:
-        total_ips = 1
-
-    # Fix query to have alias
-    try:
-        c.execute("SELECT COUNT(DISTINCT remote_ip) as cnt FROM sessions")
-        row = c.fetchone()
-        if row:
-            if isinstance(row, dict):
-                total_ips = row["cnt"]
-            else:
-                total_ips = row[0]  # SQLite Row supports index or name
-        else:
-            total_ips = 1
-    except:
-        total_ips = 1
-
-    if not total_ips:
-        total_ips = 1
-
-    query = f"""
-        SELECT 
-            i.timestamp,
-            s.remote_ip,
-            s.protocol,
-            s.username,
-            i.command,
-            i.response,
-            i.source,
-            i.request_md5,
-            i.response_size,
-            ca.activity_type,
-            ca.risk_score,
-            ca.explanation,
-            (SELECT COUNT(DISTINCT s2.remote_ip) 
-             FROM interactions i2 
-             JOIN sessions s2 ON i2.session_id = s2.session_id 
-             WHERE i2.request_md5 = i.request_md5) as cmd_ip_count
-        FROM interactions i
-        JOIN sessions s ON i.session_id = s.session_id
-        LEFT JOIN command_analysis ca ON i.request_md5 = ca.command_hash
-        WHERE 1=1
-    """
-
-    params = []
-
-    try:
-        ignored = get_ignored_ips()
-    except:
-        ignored = []
-
-    if ignored:
-        placeholders = ",".join([ph] * len(ignored))
-        query += f" AND s.remote_ip NOT IN ({placeholders})"
-        params.extend(ignored)
-
-    if ip_filter:
-        query += f" AND (s.remote_ip = {ph} OR s.remote_ip = {ph})"
-        params.append(ip_filter)
-        if not ip_filter.startswith("::ffff:"):
-            params.append(f"::ffff:{ip_filter}")
-        else:
-            params.append(ip_filter)
-
-    if session_filter:
-        query += f" AND i.session_id LIKE {ph}"
-        params.append(f"{session_filter}%")
-
-    if protocol_filter:
-        query += f" AND s.protocol = {ph}"
-        params.append(protocol_filter)
-
-    sort_map = {
-        "time": "i.timestamp",
-        "ip": "s.remote_ip",
-        "user": "s.username",
-        "unique": "cmd_ip_count",
-        "risk": "ca.risk_score",
-        "src": "i.source",
-    }
-    order_clause = parse_sort_param(sort_param, sort_map)
-
-    if order_clause:
-        query += f" ORDER BY {order_clause} LIMIT {ph}"
-    else:
-        query += f" ORDER BY i.id DESC LIMIT {ph}"
-
-    params.append(limit)
-
-    c.execute(query, tuple(params))
-    rows = c.fetchall()
-    conn.close()
+    engine = get_engine()
+    rows = engine.get_recent_commands(
+        limit=limit,
+        anon=anon,
+        ip_filter=ip_filter,
+        session_filter=session_filter,
+        protocol_filter=protocol_filter,
+        sort_by=sort_param,
+    )
 
     table = Table(title=f"Recent Commands (Last {limit})", box=box.ROUNDED)
     table.add_column("Time", style="dim", no_wrap=True)
@@ -567,30 +301,38 @@ def list_commands(
     table.add_column("Analysis", style="italic cyan", overflow="fold", max_width=60)
 
     for r in rows:
-        ts = to_local_time(r["timestamp"])
-        ip = clean_ip(r["remote_ip"], anon=anon) or "-"
-        proto = r["protocol"] or "-"
-        user = r["username"] or "-"
-        src = r["source"] or "-"
+        ts = to_local_time(r.get("timestamp"))
+        ip = r.get("remote_ip") or "-"
+        proto = r.get("protocol") or "-"
+        user = r.get("username") or "-"
+        src = r.get("source") or "-"
+        src_style = "yellow"
+        if src == "llm":
+            src_style = "bold magenta"
+        elif src == "llm-cache":
+            src_style = "cyan"
+        elif "handler" in src:
+            src_style = "green"
+        elif "chain" in src:
+            src_style = "blue"
+        elif src == "ratelimit":
+            src_style = "bold red"
+
+        src_cell = Text(src, style=src_style)
 
         # New Size Column
-        size_val = r["response_size"]
+        size_val = r.get("response_size")
         size_str = f"{size_val}" if size_val is not None else "-"
 
-        # Calculate Unique%
-        # % of IPs that ran this command = cmd_ip_count / total_ips
-        # Unique% = 100% - (Freq%)
-        # High Unique% = Rare command
-        cmd_ip_count = r["cmd_ip_count"] or 0
-        freq = cmd_ip_count / total_ips
-        unique_pct = (1.0 - freq) * 100.0
+        # Unique%
+        unique_pct = r.get("unique_pct", 0.0)
         unique_str = f"{unique_pct:.1f}%"
 
-        risk_val = r["risk_score"]
+        risk_val = r.get("risk_score")
         risk_str = f"{risk_val}" if risk_val is not None else "-"
         risk_style = get_risk_style(risk_val)
 
-        cmd_text = r["command"] or ""
+        cmd_text = r.get("command") or ""
         cmd_styled = Text(cmd_text)
 
         # Highlight Non-GET HTTP Requests
@@ -601,7 +343,7 @@ def list_commands(
 
         # Append Output Snippet if requested
         if show_output:
-            resp = r["response"] or ""
+            resp = r.get("response") or ""
             if resp:
                 # Truncate response
                 snippet = textwrap.shorten(resp, width=300, placeholder="...")
@@ -611,8 +353,7 @@ def list_commands(
                     cmd_cell, Rule(style="dim"), Text(snippet, style="italic grey50")
                 )
 
-        explanation = r["explanation"] or ""
-        # Relaxed truncation to allow wrapping to show more context
+        explanation = r.get("explanation") or ""
         if len(explanation) > 300:
             explanation = textwrap.shorten(explanation, width=300, placeholder="...")
 
@@ -623,7 +364,7 @@ def list_commands(
             user,
             cmd_cell,
             size_str,
-            src,
+            src_cell,
             unique_str,
             f"[{risk_style}]{risk_str}[/{risk_style}]",
             explanation,
@@ -660,50 +401,11 @@ def list_top_commands(
     protocol_filter=None,
     show_output=False,
 ):
-    conn, ph = get_db_connection(db_path)
-    if ph == "%s":
-        import psycopg2.extras
-
-        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    else:
-        c = conn.cursor()
-
     duration_secs = parse_duration(duration_str)
-
-    # Time filter clause
-    if ph == "%s":
-        time_filter = f"i.timestamp > NOW() - INTERVAL '{duration_secs} seconds'"
-    else:
-        time_filter = f"i.timestamp > datetime('now', '-{duration_secs} seconds')"
-
-    query = f"""
-        SELECT 
-            i.command,
-            COUNT(*) as total_count,
-            COUNT(DISTINCT s.remote_ip) as unique_ips,
-            MAX(ca.risk_score) as max_risk,
-            { "STRING_AGG(DISTINCT s.protocol, ', ')" if ph == "%s" else "group_concat(DISTINCT s.protocol)" } as protocols,
-            MAX(i.response) as sample_response
-        FROM interactions i
-        JOIN sessions s ON i.session_id = s.session_id
-        LEFT JOIN command_analysis ca ON i.request_md5 = ca.command_hash
-        WHERE {time_filter}
-    """
-    params = []
-
-    if protocol_filter:
-        query += f" AND s.protocol = {ph}"
-        params.append(protocol_filter)
-
-    if ip_filter:
-        query += f" AND s.remote_ip = {ph}"
-        params.append(ip_filter)
-
-    query += " GROUP BY i.command ORDER BY total_count DESC LIMIT " + str(int(limit))
-
-    c.execute(query, tuple(params))
-    rows = c.fetchall()
-    conn.close()
+    engine = get_engine()
+    rows = engine.get_top_commands(
+        limit=limit, duration_seconds=duration_secs, protocol_filter=protocol_filter
+    )
 
     title = f"Top Commands (Last {duration_str or '1h'})"
     table = Table(title=title, box=box.ROUNDED)
@@ -716,14 +418,14 @@ def list_top_commands(
 
     rank = 1
     for r in rows:
-        cmd = r["command"] or "-"
-        risk = r["max_risk"]
+        cmd = r.get("command") or "-"
+        risk = r.get("max_risk")
         risk_str = f"{risk}" if risk is not None else "-"
         risk_style = get_risk_style(risk)
 
         cmd_cell = Text(cmd)
         if show_output:
-            resp = r["sample_response"] or ""
+            resp = r.get("sample_response") or ""
             if resp:
                 snippet = textwrap.shorten(resp, width=300, placeholder="...")
                 cmd_cell = Group(
@@ -744,227 +446,38 @@ def list_top_commands(
 
 
 def list_top_ips(limit=50, anon=False, db_path=None):
-    conn, ph = get_db_connection(db_path)
-    # Ensure cursor factory
-    if ph == "%s":
-        import psycopg2.extras
+    engine = get_engine()
+    rows = engine.get_top_ips(limit=limit, anon=anon)
 
-        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    else:
-        c = conn.cursor()
-
-    # Get total unique IPs for stats
-    try:
-        c.execute("SELECT COUNT(DISTINCT remote_ip) as cnt FROM sessions")
-        row = c.fetchone()
-        if hasattr(row, "keys") and "cnt" in row:
-            total_unique_ips = row["cnt"]
-        elif isinstance(row, dict) and "cnt" in row:
-            total_unique_ips = row["cnt"]
-        elif row:
-            total_unique_ips = row[0]
-        else:
-            total_unique_ips = 0
-    except:
-        total_unique_ips = 0
-
-    query = f"""
-        SELECT 
-            s.remote_ip,
-            COUNT(DISTINCT s.session_id) as total_sessions,
-            MIN(s.start_time) as first_seen,
-            MAX(s.start_time) as last_seen,
-            
-            -- Total Commands
-            (SELECT COUNT(*) 
-             FROM interactions i 
-             JOIN sessions s2 ON i.session_id = s2.session_id 
-             WHERE s2.remote_ip = s.remote_ip) as total_cmds,
-             
-            -- Last 1 Hour Activity (Active Attackers)
-            (SELECT COUNT(*) 
-             FROM interactions i 
-             JOIN sessions s2 ON i.session_id = s2.session_id 
-             WHERE s2.remote_ip = s.remote_ip 
-             AND i.timestamp > datetime('now', '-1 hour')) as recent_cmds_1h,
-             -- Note: datetime('now') is SQLite specific. 
-             -- Postgres uses NOW() or CURRENT_TIMESTAMP.
-             -- Fixed below via regex or replacement if needed? 
-             -- Actually, PostgresBackend might need to install 'datetime' function/compatibility?
-             -- Or we blindly replace datetime usage.
-             
-            -- Estimated Current RPM
-            (SELECT COUNT(*) 
-             FROM interactions i 
-             JOIN sessions s2 ON i.session_id = s2.session_id 
-             WHERE s2.remote_ip = s.remote_ip 
-             AND i.timestamp > datetime('now', '-1 minute')) as current_rpm,
-
-            -- LLM Usage 1h
-            (SELECT COUNT(*) 
-             FROM interactions i 
-             JOIN sessions s2 ON i.session_id = s2.session_id 
-             WHERE s2.remote_ip = s.remote_ip 
-             AND i.source = 'llm'
-             AND i.timestamp > datetime('now', '-1 hour')) as llm_1h,
-
-            -- LLM Usage 24h
-            (SELECT COUNT(*) 
-             FROM interactions i 
-             JOIN sessions s2 ON i.session_id = s2.session_id 
-             WHERE s2.remote_ip = s.remote_ip 
-             AND i.source = 'llm'
-             AND i.timestamp > datetime('now', '-24 hours')) as llm_24h,
-
-             ii.country,
-             ii.org
-
-        FROM sessions s
-        LEFT JOIN ip_intelligence ii ON s.remote_ip = ii.ip
-        WHERE 1=1
-        GROUP BY s.remote_ip, ii.country, ii.org
-        -- Group By must include all non-agg columns in standard SQL (Postgres strictness)
-        ORDER BY current_rpm DESC, total_sessions DESC
-        LIMIT {ph}
-    """
-
-    # Postgres Compatibility Fixes
-    if ph == "%s":
-        # Replace SQLite datetime calls with Postgres equivalent
-        # SQLite: datetime('now', '-1 hour')
-        # Postgres: NOW() - INTERVAL '1 hour'
-        query = query.replace(
-            "datetime('now', '-1 hour')", "(NOW() - INTERVAL '1 hour')"
-        )
-        query = query.replace(
-            "datetime('now', '-24 hours')", "(NOW() - INTERVAL '24 hours')"
-        )
-        query = query.replace(
-            "datetime('now', '-1 minute')", "(NOW() - INTERVAL '1 minute')"
-        )
-        # Ensure 'current_rpm' and others are usable in ORDER BY (standard SQL supports alias in ORDER BY, but GROUP BY requirements are strict)
-
-    c.execute(query, (limit,))
-    rows = c.fetchall()
-    conn.close()
-
-    table = Table(
-        title=f"Top Attacking IPs (Limit {limit}) - Total IPs: {total_unique_ips}",
-        box=box.ROUNDED,
-    )
-    table.add_column("Rank", style="dim", justify="right")
+    table = Table(title=f"Top IPs (Session Count)", box=box.ROUNDED)
     table.add_column("IP", style="magenta")
     table.add_column("Sessions", justify="right", style="green")
-    table.add_column("Total Cmds", justify="right")
-    table.add_column("LLM (1h/24h)", justify="right", style="cyan")
-    table.add_column(
-        "Latest Cmds", justify="right", style="yellow"
-    )  # Renamed for space
-    table.add_column("RPM", justify="right", style="bold")
-    table.add_column("Location", style="blue")
-    table.add_column("Last Seen", style="dim")
-    table.add_column("Status", justify="center")
+    table.add_column("Last Seen", style="cyan")
+    table.add_column("Geo", style="blue")
+    table.add_column("ISP/Org", style="dim", overflow="fold")
 
-    rank = 1
     for r in rows:
-        ip = clean_ip(r["remote_ip"], anon=anon)
-        sessions = r["total_sessions"]
-        cmds = r["total_cmds"]
-        recent_1h = r["recent_cmds_1h"]
-        llm_1h = r["llm_1h"]
-        llm_24h = r["llm_24h"]
-        rpm = r["current_rpm"]
-        last_seen = to_local_time(r["last_seen"])
+        ip = r.get("remote_ip") or "-"  # Already cleaned
 
-        # Determine Status/Risk
-        # RPM Limit is 1000
-        rpm_style = "white"
-        status = "Idle"
-        status_style = "dim"
-
-        if rpm > 0:
-            status = "Active"
-            status_style = "green"
-
-        if rpm >= 1000:
-            status = "SUSPENDED (Sim)"  # Likely suspended by DoSProtector
-            status_style = "bold red reverse"
-            rpm_style = "bold red"
-        elif rpm >= 800:
-            status = "CRITICAL"
-            status_style = "bold red"
-            rpm_style = "red"
-        elif rpm >= 500:
-            status = "WARNING"
-            status_style = "yellow"
-            rpm_style = "yellow"
-        elif rpm > 100:
-            status = "High Traffic"
-            status_style = "bold blue"
-
-        loc = f"{r['country'] or '?'} / {r['org'] or '?'}"
-        if len(loc) > 30:
-            loc = loc[:27] + "..."
+        last = to_local_time(r.get("last_seen"))
+        geo = r.get("country") or "-"
+        org = r.get("org") or "-"
 
         table.add_row(
-            str(rank),
             ip,
-            str(sessions),
-            str(cmds),
-            f"{llm_1h}/{llm_24h}",
-            str(recent_1h),
-            f"[{rpm_style}]{rpm}[/{rpm_style}]",
-            loc,
-            last_seen,
-            f"[{status_style}]{status}[/{status_style}]",
+            str(r["session_count"]),
+            last,
+            geo,
+            org,
         )
-        rank += 1
 
     console.print(table)
-    console.print(
-        "[dim]Note: 'Current RPM' is based on DB logs. Actual DoS suspension happens in-memory at 1000 RPM.[/dim]"
-    )
 
 
 def list_payloads(limit=50, anon=False, db_path=None, show_all=False):
-    conn, ph = get_db_connection(db_path)
-    # conn.row_factory set in get_db_connection if SQLite, else RealDictCursor for PG
-    # Ensure cursor factory
-    if ph == "%s":
-        import psycopg2.extras
-
-        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    else:
-        c = conn.cursor()
-
-    # Dialect-specific aggregation
-    agg_func = "STRING_AGG" if ph == "%s" else "group_concat"
-
-    query = f"""
-        SELECT 
-            p.id,
-            p.timestamp,
-            p.url,
-            p.status,
-            p.payload_md5,
-            p.payload_size,
-            p.file_path,
-            p.ip as first_ip,
-            (SELECT {agg_func}(DISTINCT ip, ', ') FROM payload_requests pr WHERE pr.payload_id = p.id) as all_ips,
-            p.session_id,
-            p.session_id,
-            p.error_message,
-            p.virustotal_result,
-            p.vt_last_scanned
-        FROM malicious_payloads p
-
-        ORDER BY p.timestamp DESC
-        LIMIT {ph}
-    """
-
-    c.execute(query, (limit,))
-    rows = c.fetchall()
-    conn.close()
+    # Use Engine
+    engine = get_engine()
+    rows = engine.get_recent_payloads(limit=limit, anon=anon)
 
     table = Table(title=f"Malicious Payloads (Last {limit})", box=box.ROUNDED)
     table.add_column("Time", style="dim", no_wrap=True)
@@ -976,30 +489,16 @@ def list_payloads(limit=50, anon=False, db_path=None, show_all=False):
     table.add_column("IPs", style="magenta")
 
     for r in rows:
-        ts = to_local_time(r["timestamp"])
+        ts = to_local_time(r.get("timestamp"))
 
-        # Combine first IP (legacy/backup) with new list if new table empty?
-        # Ideally all_ips covers it. But for safety:
-        ips_str = r["all_ips"]
-        if not ips_str:
-            ips_str = r["first_ip"]  # Fallback for old records
-
-        # Clean IPs
-        ip_list = (
-            [clean_ip(ip.strip(), anon=anon) for ip in ips_str.split(",")]
-            if ips_str
-            else []
-        )
-        # Unique valid IPs
-        ip_list = sorted(list(set([ip for ip in ip_list if ip and ip != "-"])))
-
-        # Format for display (truncate if too many)
+        # IP Display
+        ip_list = r.get("ip_list", [])
         if len(ip_list) > 3:
             display_ip = f"{', '.join(ip_list[:2])} (+{len(ip_list)-2})"
         else:
             display_ip = ", ".join(ip_list)
 
-        status = r["status"]
+        status = r.get("status")
         status_style = "white"
         if status == "completed":
             status_style = "green"
@@ -1013,21 +512,18 @@ def list_payloads(limit=50, anon=False, db_path=None, show_all=False):
         if not show_all:
             if status == "failed":
                 continue
-            if r["payload_size"] and r["payload_size"] < 500:
+            if r.get("payload_size") and r["payload_size"] < 500:
                 continue
 
         # VirusTotal Info
         vt_score_str = "-"
-        details = r["payload_md5"] or ""
+        details = r.get("payload_md5") or ""
 
-        vt_res = r["virustotal_result"]
+        vt_res = r.get("virustotal_result")
         if vt_res and vt_res.startswith("{"):
             try:
-                import json
-
                 j = json.loads(vt_res)
                 if "error" in j:
-                    # Handle fallback error JSON from PayloadManager
                     vt_score_str = "[bold red]Err[/bold red]"
                     details = f"[red]{j.get('error')}[/red]"
                 else:
@@ -1035,7 +531,6 @@ def list_payloads(limit=50, anon=False, db_path=None, show_all=False):
                     if stats:
                         malicious = stats.get("malicious", 0)
                         tot = sum(stats.values())
-
                         color = "green"
                         if malicious > 0:
                             color = "yellow"
@@ -1043,20 +538,16 @@ def list_payloads(limit=50, anon=False, db_path=None, show_all=False):
                             color = "red"
                         if malicious > 20:
                             color = "bold red"
-
                         vt_score_str = f"[{color}]{malicious}/{tot}[/{color}]"
 
                     tags = j.get("tags", [])
 
-                # Details Priority: Error > Code Insights > Meaningful Name > Threat Label > Tags > MD5
                 m_name = j.get("meaningful_name")
                 code_insights = j.get("code_insights")
-
                 classification = j.get("classification", {})
                 t_label = classification.get("suggested_threat_label")
 
                 if code_insights:
-                    # Truncate insight if too long
                     if len(code_insights) > 80:
                         code_insights = code_insights[:77] + "..."
                     details = f"[bold cyan]{code_insights}[/bold cyan]"
@@ -1072,11 +563,11 @@ def list_payloads(limit=50, anon=False, db_path=None, show_all=False):
         elif vt_res == "skipped_size":
             vt_score_str = "[dim]Too Small[/dim]"
 
-        if r["error_message"]:
+        if r.get("error_message"):
             details = f"[red]{r['error_message']}[/red]"
 
         size_str = "-"
-        if r["payload_size"]:
+        if r.get("payload_size"):
             size = r["payload_size"]
             if size < 1024:
                 size_str = f"{size} B"
@@ -1085,8 +576,8 @@ def list_payloads(limit=50, anon=False, db_path=None, show_all=False):
 
         table.add_row(
             ts,
-            f"[{status_style}]{status.upper()}[/{status_style}]",
-            r["url"],
+            f"[{status_style}]{str(status).upper()}[/{status_style}]",
+            r.get("url"),
             vt_score_str,
             details,
             size_str,
@@ -1098,8 +589,14 @@ def list_payloads(limit=50, anon=False, db_path=None, show_all=False):
 
 
 def reset_failed_analysis(db_path=None):
-    conn = get_db_connection(db_path)
+    # This still sends a write query - we might need to move this to engine or keep specific separate DB conn?
+    # For now, let's keep basic connection here OR move to engine.
+    # Moving to engine is cleaner.
+    # BUT, we need get_db_connection back or use engine.db._get_conn()
+    engine = get_engine()
+    conn = engine.db._get_conn()
     c = conn.cursor()
+
     console.print("[*] Checking for failed analysis records...")
     c.execute(
         "SELECT COUNT(*) FROM command_analysis WHERE explanation LIKE '%Batch Miss%'"

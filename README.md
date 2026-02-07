@@ -25,7 +25,19 @@ FauxSSH deceptively emulates a realistic Linux server, engaging attackers in lon
 - **🚨 Real-Time Alerting**: Stream high-risk sessions live to Discord or Slack.
 - **📊 Built-in Analytics**: CLI tools to visualize sessions, inspect malware, and correlate threat actors.
 
-## Recent Improvements (Jan 31)
+
+## Recent Improvements (Feb 6)
+- **UI Integrity Testing**: Added automated linting (`tests/core/test_ui_integrity.py`) to ensure all HTML and Vue templates are syntactically valid and error-free, preventing runtime template crashes.
+- **Dashboard UX Refinements**:
+    - **Density & Layout**: Optimized table layouts for higher information density (abbreviated time stamps, stacked columns).
+    - **Auto-Refresh**: Dashboard now auto-refreshes every 5 minutes for hands-off monitoring.
+    - **Risk Scoring**: Visualized risk scores normalized to 0-100 scale directly in the session list.
+- **Security Hardening**:
+    - **Strict CSP**: Implemented Content Security Policy headers to mitigate XSS risks.
+    - **Proxy Trust**: Restricted `X-Forwarded-For` header processing to trusted proxies only.
+- **Deployment Reliability**: Fixed critical test failures (`test_payload_consolidation.py`) and resolved `mysql-mimic` compatibility issues to ensure stable deployments.
+- **Analytics Debugging**: Fixed an issue where LLM commands were not being correctly analyzed for risk scores.
+
 - **Multi-Service Protocol Filters**: Added dynamic filters to the dashboard (About -> Personalization). Researchers can now toggle visibility for SSH, Telnet, HTTP, MySQL, and Redis to focus on specific threat vectors.
 - **Smart Dashboard Visibility**: The dashboard now automatically hides cards for inactive services or unselected protocols, ensuring a clean, high-signal UI.
 - **Enhanced Persona Robustness**: Improved the persona engine to automatically handle diverse user data structures (String, List, Dict), preventing crashes during legacy command simulation (`last`, `who`).

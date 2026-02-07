@@ -1,6 +1,23 @@
 # Changelog
 
-## Weekly Changelog: Feb 1st 2026
+
+## Weekly Changelog: Feb 6th 2026
+
+### New Features
+- **UI Integrity Testing**: Added `tests/core/test_ui_integrity.py` to validate HTML and Vue templates, catching syntax errors before deployment.
+- **Attribute Handlers**: Implemented `lsattr` and `lockrc` command simulation for enhanced realism.
+- **Advanced Dashboard**:
+    - **Risk Scoring Visualization**: Normalized 0-100 risk scores with color-coded indicators.
+    - **Auto-Refresh**: Dashboard health checks and session lists now refresh every 5 minutes.
+    - **Responsive Layout**: Improved table density for better readability on smaller screens.
+
+### Reliability & Security
+- **Strict CSP**: Enforced Content Security Policy to prevent XSS.
+- **Trusted Proxies**: Configurable `TRUSTED_PROXIES` for `X-Forwarded-For` handling.
+- **MySQL Stability**: Fixed `AttributeError` crashes in `mysql-mimic` integration.
+- **Test Pipeline**: Fixed `test_payload_consolidation.py` and other flaky tests to unblock deployment.
+- **LLM Debugging**: Resolved issue with missing risk analysis for certain LLM response types.
+
 
 ### New Features
 - **Self-Healing Payload Analysis**: Implemented automatic path recovery using file MD5 hashes to resolve "file_not_found" errors when analyzing downloaded payloads.

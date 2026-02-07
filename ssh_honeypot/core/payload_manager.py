@@ -620,6 +620,10 @@ class PayloadManager:
 
     def download_file(self, url, timeout=10, max_size=10 * 1024 * 1024):
         """Helper to download with safety limits."""
+        if os.getenv("FAUXSSH_TEST_MODE") == "1":
+            timeout = 1  # Fail fast in tests
+            logger.debug(f"[PayloadManager] Test Mode: Reducing timeout to {timeout}s")
+
         # Pre-flight SSRF Check
         is_safe, reason = self._is_safe_url(url)
         if not is_safe:

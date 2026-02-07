@@ -146,25 +146,27 @@ class HoneypotServer(paramiko.ServerInterface):
         self.password = password
         log.debug(f"[DEBUG] check_auth_password: user={username} pass={password}")
 
-        # Use globally bound db (will be set in start_ssh_server scope or truly global)
-        # Using global db
-        is_safe, reason = db.validate_anti_harvesting(
-            self.client_ip, username, password
-        )
-        if not is_safe:
-            log.warning(f"[SSH] [!] {reason}")
-            return paramiko.AUTH_FAILED
+        # Bypass for Trusted IPs (Analytics Ignored IPs) - Move this to top to avoid anti-harvesting blocks
+        ignored_ips = get_ignored_ips()
+        is_trusted = self.client_ip in ignored_ips or self.client_ip == "127.0.0.1"
+
+        if not is_trusted:
+            # Use globally bound db (will be set in start_ssh_server scope or truly global)
+            is_safe, reason = db.validate_anti_harvesting(
+                self.client_ip, username, password
+            )
+            if not is_safe:
+                log.warning(f"[SSH] [!] {reason}")
+                return paramiko.AUTH_FAILED
 
         # Check Root Policy
         allow_root = config.get("persona", "access_control", "allow_root")
         if allow_root is None:
             allow_root = False
 
-        # Bypass for Trusted IPs (Analytics Ignored IPs)
-        ignored_ips = get_ignored_ips()
-        if self.client_ip in ignored_ips:
+        if is_trusted:
             allow_root = True
-            log.info(f"[SSH] Allowing root login from Trusted IP: {self.client_ip}")
+            log.info(f"[SSH] Allowing login from Trusted IP: {self.client_ip}")
 
         # Root Desperation Check
         if username == "root":

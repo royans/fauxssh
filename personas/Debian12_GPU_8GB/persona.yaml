@@ -93,13 +93,15 @@ prompts:
       Output JSON ONLY. No markdown formatted code blocks.
 
   generate_content: |
-      You are simulating a web server.
-      User ran: '{command}'
-      URL: '{url}'
-      Persona: {persona_summary}
+      You are simulating a file located at '{url}' on a '{persona_summary}'.
+      Command: '{command}'
       
-      Generate a realistic HTTP response body (HTML/JSON) for this request.
-      Do not include HTTP headers, just the body.
+      INSTRUCTIONS:
+      1. Generate REALISTIC content for this file (e.g. if .sh, bash script; if .html, web page).
+      2. If it is a binary/image, simulate it with a short placeholder like "<binary_data>" or leave empty.
+      3. Do NOT explain what you are doing.
+      4. Do NOT say "Here is the file".
+      5. Output ONLY the raw content.
 
   analysis: |
        You are a cybersecurity expert analyzing attacker commands in a honeypot.

@@ -130,15 +130,30 @@ def configure_paramiko_noise():
             # Suppress Banner Check Timouts/Errors (Scanner Noise)
             if "_check_banner" in str(record.funcName) or "check_banner" in msg:
                 return False
+
+            # Suppress empty messages (Source: transport.py:1907)
+            if not msg.strip():
+                return False
+
+            # Suppress Broken Pipe / Connection Reset in Transport
+            if "Broken pipe" in msg or "Connection reset" in msg:
+                return False
+
             if record.exc_info:
                 exc_type, exc_value, _ = record.exc_info
+                exc_str = str(exc_type)
+                val_str = str(exc_value)
+
                 if (
-                    "SSHException" in str(exc_type)
-                    or "timeout" in str(exc_type)
-                    or "TimeoutError" in str(exc_type)
+                    "SSHException" in exc_str
+                    or "timeout" in exc_str
+                    or "TimeoutError" in exc_str
+                    or "BrokenPipeError" in exc_str
+                    or "ConnectionResetError" in exc_str
+                    or "Broken pipe" in val_str
+                    or "Connection reset" in val_str
                 ):
-                    if "_check_banner" in str(record.funcName):
-                        return False
+                    return False
 
             return True
 

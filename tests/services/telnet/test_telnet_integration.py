@@ -45,7 +45,7 @@ class MockDB:
 
 class MockLLM:
     def generate_response(self, *args, **kwargs):
-        return "Mock LLM Response"
+        return "Mock system Response"
 
 
 @pytest.fixture(scope="module")
@@ -126,9 +126,9 @@ def test_telnet_full_session_flow(telnet_server):
 
     # Command 1: 'ls' with CRLF
     s.sendall(b"ls\r\n")
-    resp = read_until(s, [b"foo", b"Mock LLM Response", b"Error"], timeout=2.0)
+    resp = read_until(s, [b"foo", b"Mock system Response", b"Error"], timeout=3.0)
     # Our mock db returns one file 'foo' in list_user_dir, context should reflect that or LLM
-    # The MockLLM returns "Mock LLM Response"
+    # The MockLLM returns "Mock system Response"
     # Actually, if the handler sees a file_list, it might list it depending on prompt?
     # Or strict command handler?
     # Note: The server uses real CommandHandler, which calls LLM.

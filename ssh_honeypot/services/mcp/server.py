@@ -119,7 +119,16 @@ def tool_query_database(sql: str, db, llm) -> str:
     """
 
     try:
-        resp = llm.generate_response(sql, "/", [], [], [], override_prompt=prompt)
+        resp = llm.generate_response(
+            sql,
+            "/",
+            [],
+            [],
+            [],
+            override_prompt=prompt,
+            protocol="mysql",
+            client_ip="mcp-internal",
+        )
         # Clean response
         final_resp = resp.strip()
 

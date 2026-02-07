@@ -17,7 +17,7 @@ from ssh_honeypot.core.config import config
 from ssh_honeypot.core.utils import get_data_dir
 from ssh_honeypot.core.logging_setup import log, apply_config_to_logging
 from ssh_honeypot.core.persona_validator import validate_active_persona
-from ssh_honeypot.core.background_tasks import start_background_tasks
+from ssh_honeypot.core.background_tasks import start_background_tasks, analysis_loop
 from ssh_honeypot.core import fs_seeder
 
 # Imports from Services

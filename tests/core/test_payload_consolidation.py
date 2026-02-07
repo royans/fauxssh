@@ -107,10 +107,12 @@ def test_deduplicated_analysis_storage(payload_manager, mock_db):
         mock_report.sha256 = "dummy_sha256"
         mock_vt.check_hash.return_value = mock_report
 
-        # Download first
-        payload_manager.process_queue()
-        # Then Analyze
-        payload_manager.process_analysis_queue(force=True)
+        # Bypass SSRF Check
+        with patch.object(payload_manager, "_is_safe_url", return_value=(True, "Safe")):
+            # Download first
+            payload_manager.process_queue()
+            # Then Analyze
+            payload_manager.process_analysis_queue(force=True)
 
     # Check payload_analysis table
     analysis = mock_db.get_payload_analysis(file_hash)

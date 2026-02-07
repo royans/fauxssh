@@ -159,6 +159,24 @@ def run_stats_generation_job(db_instance):
         stats_1d = db_instance.get_infographic_stats(hours=24, ignore_ips=ignore_ips)
         stats_1w = db_instance.get_infographic_stats(hours=168, ignore_ips=ignore_ips)
 
+        # DEBUG: Check Protocols in DB (Remote Debugging)
+        try:
+            conn = db_instance._get_conn()
+            c = conn.cursor()
+            c.execute("SELECT DISTINCT protocol FROM sessions")
+            protos = [r[0] for r in c.fetchall()]
+            log.info(f"[StatsJob] Distinct Protocols in Sessions: {protos}")
+
+            # Check interaction counts per protocol
+            c.execute(
+                "SELECT s.protocol, COUNT(i.id) FROM interactions i JOIN sessions s ON i.session_id = s.session_id GROUP BY s.protocol"
+            )
+            counts = c.fetchall()
+            log.info(f"[StatsJob] Interaction Counts: {counts}")
+            conn.close()
+        except Exception as e:
+            log.error(f"[StatsJob] Debug Error: {e}")
+
         composite = {
             "windows": {"1H": stats_1h, "1D": stats_1d, "1W": stats_1w},
             "graphs": {
@@ -166,6 +184,15 @@ def run_stats_generation_job(db_instance):
                 "daily_7d": db_instance.get_daily_session_counts(days=7),
                 "daily_21d": db_instance.get_daily_session_counts(days=21),
             },
+            "top_mysql_risk": db_instance.get_recent_top_commands_by_risk(
+                "mysql", limit=15
+            ),
+            "top_telnet_risk": db_instance.get_recent_top_commands_by_risk(
+                "telnet", limit=15
+            ),
+            "top_llm_risk": db_instance.get_recent_top_commands_by_risk(
+                "llm-api", limit=15
+            ),
             "recent_high_risk": db_instance.get_recent_high_risk_events(limit=15),
             "recent_payloads": db_instance.get_recent_payloads(limit=15),
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
