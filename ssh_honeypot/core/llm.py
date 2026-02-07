@@ -320,17 +320,24 @@ class LLMInterface:
                 log.warning(
                     f"[LLM] Detected 'Thinking' artifact in cache. Invalidating key {prompt_hash}."
                 )
-                # Invalidate so it regenerates next time
                 universal_cache.delete("llm", prompt_hash)
                 # Return it anyway as per user request ("ok to present for now")
                 if return_source:
                     return output, "llm-cache (tainted)"
                 return output
 
-            log.debug(f"[LLM] Cache Hit for hash {prompt_hash[:8]}")
-            if return_source:
-                return output, "llm-cache"
-            return output
+            # Validation: Check for cached resource errors (TAINTED CACHE)
+            if "System resources exhausted" in output:
+                log.warning(
+                    f"[LLM] Detected Resource Exhaustion error in cache. Invalidating key {prompt_hash} and retrying."
+                )
+                universal_cache.delete("llm", prompt_hash)
+                # Proceed to Cache Miss logic (fall through) to retry generation
+            else:
+                log.debug(f"[LLM] Cache Hit for hash {prompt_hash[:8]}")
+                if return_source:
+                    return output, "llm-cache"
+                return output
 
         log.debug(f"[LLM] Cache Miss for hash {prompt_hash[:8]}")
 
@@ -392,6 +399,21 @@ class LLMInterface:
         else:
             res = self._call_google(prompt, prompt_hash, command, is_command, protocol)
 
+        # Route to provider
+        if self.provider == "openai":
+            res = self._call_openai(prompt, prompt_hash, command, is_command, protocol)
+        elif self.provider == "ollama":
+            res = self._call_ollama(prompt, prompt_hash, command, is_command, protocol)
+        else:
+            res = self._call_google(prompt, prompt_hash, command, is_command, protocol)
+
+        # Final Guard: Check for Resource Exhaustion in result (double check)
+        if res and "System resources exhausted" in res:
+            log.warning(
+                f"[LLM] Detected Resource Exhaustion in API result. Returning error state."
+            )
+            return '{"output": "INTERNAL_ERROR", "new_cwd": null}'
+
         if return_source:
             return res, "llm"
         return res
@@ -430,8 +452,8 @@ class LLMInterface:
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {
                 "temperature": 1.0,
-                "maxOutputTokens": 2048,
-                "responseMimeType": "text/plain",
+                "maxOutputTokens": 8192,
+                "responseMimeType": "application/json",
             },
         }
 
@@ -589,6 +611,14 @@ class LLMInterface:
                     log.warning(f"[LLM] Risk analysis failed: {e}")
 
             # 2. Save to Universal Cache
+            # Guard: If error detected (and not already caught by universal_cache which returns False),
+            # we should return an error state so server.py sends 404/500 instead of JSON.
+            if "System resources exhausted" in final_text:
+                log.warning(
+                    f"[LLM] Detected Resource Exhaustion in response. Returning error state."
+                )
+                return '{"output": "INTERNAL_ERROR", "new_cwd": null}'
+
             universal_cache.set(
                 service="llm",
                 key=prompt_hash,
@@ -787,11 +817,49 @@ class LLMInterface:
                             "explanation": an.get("explanation", "Batch Analysis"),
                         }
         except Exception as e:
-            log.error(
-                f"[LLM] Batch Analysis Parsing Error: {e} | Raw Response: {raw_json[:200]}"
-            )
+            # Attempt to repair truncated JSON (common with batch limits)
+            try:
+                repaired_json = self._repair_json_list(raw_json)
+                data = json.loads(repaired_json)
+                if isinstance(data, list):
+                    for item in data:
+                        h = item.get("hash")
+                        an = item.get("analysis", {})
+                        if h:
+                            results[h] = {
+                                "type": an.get("type", "Unknown"),
+                                "stage": an.get("stage", "Unknown"),
+                                "risk": int(an.get("risk", 0)),
+                                "explanation": an.get("explanation", "Batch Analysis"),
+                            }
+                    log.warning(
+                        f"[LLM] Successfully repaired truncated JSON response. Recovered {len(results)} items."
+                    )
+            except Exception as repair_error:
+                log.error(
+                    f"[LLM] Batch Analysis Parsing Error: {e} | Repair Failed: {repair_error} | Raw Response: {raw_json[:200]}"
+                )
 
         return results
+
+    def _repair_json_list(self, raw_json):
+        """
+        Attempts to repair a truncated JSON list of objects.
+        Strategies:
+        1. Find last closing brace '}', truncate there, append ']'.
+        """
+        raw_json = raw_json.strip()
+        if not raw_json.startswith("["):
+            raise ValueError("Not a JSON list")
+
+        # Find last valid object closure
+        last_brace = raw_json.rfind("}")
+        if last_brace == -1:
+            raise ValueError("No valid objects found")
+
+        # Truncate and close
+        repaired = raw_json[: last_brace + 1] + "]"
+        return repaired
 
     def generate_session_summary(self, session_history):
         """

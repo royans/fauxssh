@@ -102,6 +102,7 @@ class SloggingProcessor:
                     client_version=data.get("client_version"),
                     fingerprint=data.get("fingerprint"),
                     protocol=protocol,
+                    start_time=timestamp,
                 )
             elif event_type == "session_end":
                 self.db.end_session(session_id)

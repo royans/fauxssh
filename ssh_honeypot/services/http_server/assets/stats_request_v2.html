@@ -96,8 +96,7 @@
                 <!-- Time Range Toggle -->
                 <div class="flex bg-white/5 border border-white/5 p-1 rounded-xl">
                     <button v-for="opt in timeOptions" :key="opt.value" @click="setTimeWindow(opt.value)"
-                        :class="['px-4 py-1.5 rounded-lg text-xs font-black transition-all', 
-                                filters.hours === opt.value ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300']">
+                        :class="['px-4 py-1.5 rounded-lg text-xs font-black transition-all',  filters.hours === opt.value ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300']">
                         {{ opt.label }}
                     </button>
                 </div>
@@ -137,8 +136,7 @@
             <div class="flex flex-wrap items-center gap-4">
                 <span class="text-[10px] font-black uppercase tracking-widest text-gray-500 mr-2">Protocols:</span>
                 <button v-for="p in ALL_PROTOCOLS" :key="p" @click="toggleProtocol(p)"
-                    :class="['px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-tighter transition-all', 
-                            filters.protocols.includes(p) ? 'pill-' + (p === 'llm-api'?'llm':p) : 'bg-white/5 text-gray-600 border border-transparent']">
+                    :class="['px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-tighter transition-all',  filters.protocols.includes(p) ? 'pill-' + (p === 'llm-api'?'llm':p) : 'bg-white/5 text-gray-600 border border-transparent']">
                     {{ p === 'llm-api' ? 'LLM' : p }}
                 </button>
                 <div class="flex items-center gap-2 ml-2">
@@ -193,11 +191,22 @@
             <!-- Tab Switcher -->
             <div class="flex gap-8 border-b border-white/5 px-2">
                 <button v-for="tab in ['sessions', 'asns', 'ips', 'countries']" :key="tab" @click="activeTab = tab"
-                    :class="['pb-4 text-sm font-black uppercase tracking-widest transition-all', 
-                            activeTab === tab ? 'text-white border-b-2 border-white' : 'text-gray-500 border-b-0 border-transparent hover:text-gray-300']">
-                    {{ {sessions: 'Recent Sessions', asns: 'Top ASNs', ips: 'Top IPs', countries: 'Top Countries'}[tab]
-                    }}
+                    :class="['pb-4 text-sm font-black uppercase tracking-widest transition-all',  activeTab === tab ? 'text-white border-b-2 border-white' : 'text-gray-500 border-b-0 border-transparent hover:text-gray-300']">
+                    {{ {sessions: 'Recent Sessions', asns: 'Top ASNs', ips: 'Top IPs', countries: 'Top Countries'}[tab] }}
                 </button>
+            </div>
+
+            <!-- Active Filter Warning -->
+            <div v-if="isFiltered"
+                class="mb-6 p-4 bg-indigo-500/10 border border-indigo-500/20 rounded-2xl flex items-center justify-between group">
+                <div class="flex items-center gap-3">
+                    <div class="w-2 h-2 bg-indigo-500 rounded-full animate-pulse"></div>
+                    <span class="text-[10px] font-black uppercase tracking-widest text-indigo-400">Filters Active:
+                        Showing subset of data</span>
+                </div>
+                <button @click="resetFilters"
+                    class="text-[10px] font-black text-white uppercase tracking-widest hover:text-indigo-400 transition-all">Clear
+                    All Filters</button>
             </div>
 
             <!-- Sessions Tab -->
@@ -208,6 +217,7 @@
                             <tr>
                                 <th class="px-6 py-4">Time</th>
                                 <th class="px-6 py-4">Attacker IP</th>
+                                <th class="px-6 py-4">Duration</th>
                                 <th class="px-6 py-4">Proto</th>
                                 <th class="px-6 py-4">Credentials</th>
                                 <th class="px-6 py-4">Request Preview</th>
@@ -217,30 +227,28 @@
                         <tbody class="divide-y divide-white/5">
                             <tr v-for="s in sessions" :key="s.session_id" @click="selectSession(s)"
                                 class="hover:bg-white/[0.04] cursor-pointer transition-colors group">
-                                <td class="px-6 py-4 whitespace-nowrap text-[11px] text-gray-600 font-mono">{{
-                                    timeAgo(s.start_time) }}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-[11px] text-gray-600 font-mono">{{ timeAgo(s.start_time) }}</td>
                                 <td class="px-6 py-4">
                                     <div @click.stop="filters.ip = s.remote_ip"
                                         class="flex flex-col hover:opacity-80 transition-opacity">
                                         <span
-                                            class="text-sm font-black text-indigo-400/90 underline decoration-indigo-500/30 underline-offset-4">{{
-                                            s.remote_ip }}</span>
+                                            class="text-sm font-black text-indigo-400/90 underline decoration-indigo-500/30 underline-offset-4">{{ s.remote_ip }}</span>
                                         <div class="flex items-center gap-2 text-[9px] text-gray-600 font-bold mt-0.5">
                                             <span>CMDS: {{ s.cmd_count || 0 }}</span>
-                                            <span :class="getRiskClass(s.risk_score)">RISK: {{ s.risk_score || 0
-                                                }}</span>
+                                            <span :class="getRiskClass(s.risk_score)">RISK: {{ s.risk_score || 0 }}</span>
                                         </div>
                                     </div>
                                 </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-[11px] text-gray-500 font-mono font-bold">
+                                    {{ formatDuration(s) }}
+                                </td>
                                 <td class="px-6 py-4">
                                     <span
-                                        :class="['pill', 'pill-' + (s.protocol === 'llm-api'?'llm':s.protocol||'ssh')]">{{
-                                        protoLabel(s.protocol) }}</span>
+                                        :class="['pill', 'pill-' + (s.protocol === 'llm-api'?'llm':s.protocol||'ssh')]">{{ protoLabel(s.protocol) }}</span>
                                 </td>
                                 <td class="px-6 py-4">
                                     <div class="flex flex-col max-w-[120px]">
-                                        <span class="text-xs font-black text-white truncate">{{ s.username || '-'
-                                            }}</span>
+                                        <span class="text-xs font-black text-white truncate">{{ s.username || '-' }}</span>
                                         <span class="text-[9px] text-gray-700 font-mono truncate"
                                             v-if="s.password">••••••••</span>
                                     </div>
@@ -254,11 +262,9 @@
                                 </td>
                                 <td class="px-6 py-4">
                                     <div class="flex flex-col text-[11px]">
-                                        <span class="text-gray-300 font-bold">{{ s.city || 'Unknown' }}, {{ s.country ||
-                                            'Unknown' }}</span>
+                                        <span class="text-gray-300 font-bold">{{ s.city || 'Unknown' }}, {{ s.country || 'Unknown' }}</span>
                                         <span @click.stop="filterByAsn(s.asn)"
-                                            class="text-[9px] text-indigo-600 font-black hover:underline mt-0.5">{{
-                                            s.asn || '-' }}</span>
+                                            class="text-[9px] text-indigo-600 font-black hover:underline mt-0.5">{{ s.asn || '-' }}</span>
                                     </div>
                                 </td>
                             </tr>
@@ -291,10 +297,8 @@
                                 <td class="px-6 py-4">
                                     <div class="flex flex-col">
                                         <span @click="filterByAsn(a.asn)"
-                                            class="text-sm font-black text-indigo-400 cursor-pointer hover:underline">{{
-                                            a.asn }}</span>
-                                        <span class="text-[11px] text-gray-500 font-bold truncate max-w-xs">{{ a.org
-                                            }}</span>
+                                            class="text-sm font-black text-indigo-400 cursor-pointer hover:underline">{{ a.asn }}</span>
+                                        <span class="text-[11px] text-gray-500 font-bold truncate max-w-xs">{{ a.org }}</span>
                                     </div>
                                 </td>
                                 <td class="px-6 py-4 text-center font-black text-white text-lg">{{ a.unique_ips }}</td>
@@ -303,8 +307,7 @@
                                     class="px-4 py-4 text-center border-l border-white/5">
                                     <div v-if="a.protocols[p]" class="flex flex-col items-center">
                                         <span class="text-xs font-black text-white">{{ a.protocols[p].sessions }}</span>
-                                        <span class="text-[9px] text-gray-600 font-bold">cmds: {{
-                                            a.protocols[p].commands }}</span>
+                                        <span class="text-[9px] text-gray-600 font-bold">cmds: {{ a.protocols[p].commands }}</span>
                                     </div>
                                     <span v-else class="text-gray-800 text-xs">-</span>
                                 </td>
@@ -349,8 +352,7 @@
                             <tr v-for="ip in topIps" :key="ip.ip" class="hover:bg-white/[0.02] transition-colors">
                                 <td class="px-6 py-4">
                                     <span @click="filters.ip = ip.ip"
-                                        class="text-sm font-black text-indigo-400 cursor-pointer hover:underline">{{
-                                        ip.ip }}</span>
+                                        class="text-sm font-black text-indigo-400 cursor-pointer hover:underline">{{ ip.ip }}</span>
                                 </td>
                                 <td class="px-6 py-4">
                                     <div class="flex flex-col">
@@ -364,10 +366,8 @@
                                 <td v-for="p in ALL_PROTOCOLS" :key="p"
                                     class="px-4 py-4 text-center border-l border-white/5">
                                     <div v-if="ip.protocols[p]" class="flex flex-col items-center">
-                                        <span class="text-xs font-black text-white">{{ ip.protocols[p].sessions
-                                            }}</span>
-                                        <span class="text-[9px] text-gray-600 font-bold uppercase">cmds: {{
-                                            ip.protocols[p].commands }}</span>
+                                        <span class="text-xs font-black text-white">{{ ip.protocols[p].sessions }}</span>
+                                        <span class="text-[9px] text-gray-600 font-bold uppercase">cmds: {{ ip.protocols[p].commands }}</span>
                                     </div>
                                     <span v-else class="text-gray-800 text-xs">-</span>
                                 </td>
@@ -419,10 +419,8 @@
                                 <td v-for="p in ALL_PROTOCOLS" :key="p"
                                     class="px-4 py-4 text-center border-l border-white/5">
                                     <div v-if="c.protocols && c.protocols[p]" class="flex flex-col items-center">
-                                        <span class="text-xs font-black text-white">{{ c.protocols[p].unique_ips
-                                            }}</span>
-                                        <span class="text-[9px] text-gray-600 font-bold uppercase">sess: {{
-                                            c.protocols[p].sessions }}</span>
+                                        <span class="text-xs font-black text-white">{{ c.protocols[p].unique_ips }}</span>
+                                        <span class="text-[9px] text-gray-600 font-bold uppercase">sess: {{ c.protocols[p].sessions }}</span>
                                     </div>
                                     <span v-else class="text-gray-800 text-xs">-</span>
                                 </td>
@@ -473,8 +471,7 @@
                                 <h2 class="text-2xl font-black text-white flex items-center gap-3">
                                     {{ selectedSession.remote_ip }}
                                     <span
-                                        :class="['pill !text-xs', 'pill-' + (selectedSession.protocol === 'llm-api'?'llm':selectedSession.protocol||'ssh')]">{{
-                                        protoLabel(selectedSession.protocol) }}</span>
+                                        :class="['pill !text-xs', 'pill-' + (selectedSession.protocol === 'llm-api'?'llm':selectedSession.protocol||'ssh')]">{{ protoLabel(selectedSession.protocol) }}</span>
                                 </h2>
                             </div>
                         </div>
@@ -519,10 +516,8 @@
                                 <div class="text-[10px] text-gray-500 uppercase font-black tracking-widest mb-2">Auth
                                     Credentials</div>
                                 <div class="flex flex-col">
-                                    <span class="text-sm font-bold text-white">{{ selectedSession.username || 'n/a'
-                                        }}</span>
-                                    <span class="text-[10px] text-gray-600 font-mono" v-if="selectedSession.password">{{
-                                        selectedSession.password }}</span>
+                                    <span class="text-sm font-bold text-white">{{ selectedSession.username || 'n/a' }}</span>
+                                    <span class="text-[10px] text-gray-600 font-mono" v-if="selectedSession.password">{{ selectedSession.password }}</span>
                                 </div>
                             </div>
                             <div class="p-6 bg-[#0a0a0c]">
@@ -543,70 +538,62 @@
                             </div>
                         </div>
 
-                        <!-- Activity Timeline -->
-                        <div class="p-8">
-                            <div class="flex items-center justify-between mb-6">
-                                <h3
-                                    class="text-sm font-black text-gray-400 uppercase tracking-widest flex items-center gap-3">
-                                    Activity Timeline
-                                    <span class="px-2 py-0.5 bg-white/5 rounded text-[10px] text-gray-500">{{
-                                        sessionCommands.length }} Events</span>
-                                </h3>
-                            </div>
 
-                            <div v-if="loadingCommands"
-                                class="flex flex-col items-center justify-center py-12 opacity-50">
-                                <div
-                                    class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4">
-                                </div>
-                                <span class="text-xs font-bold text-gray-500 uppercase tracking-widest">Reconstructing
-                                    Activity...</span>
-                            </div>
+                        <div class="flex items-center justify-between mb-8">
+                            <h3
+                                class="text-sm font-black text-gray-400 uppercase tracking-widest flex items-center gap-3">
+                                Activity Timeline
+                                <span class="px-2 py-0.5 bg-white/5 rounded text-[10px] text-gray-500">{{ sessionCommands.length }} Events</span>
+                            </h3>
+                        </div>
 
-                            <div v-else-if="sessionCommands.length === 0"
-                                class="flex flex-col items-center justify-center py-12 border-2 border-dashed border-white/5 rounded-2xl">
-                                <span class="text-sm font-bold text-gray-700 uppercase italic">No interactive commands
-                                    recorded for this session</span>
+                        <div v-if="loadingCommands" class="flex flex-col items-center justify-center py-12 opacity-50">
+                            <div
+                                class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4">
                             </div>
+                            <span class="text-xs font-bold text-gray-500 uppercase tracking-widest">Reconstructing
+                                Activity...</span>
+                        </div>
 
-                            <div v-else class="space-y-4">
-                                <div v-for="c in sessionCommands" :key="c.timestamp + c.command"
-                                    class="bg-white/[0.02] border border-white/5 rounded-xl overflow-hidden hover:border-indigo-500/30 transition-all group">
-                                    <div class="p-5">
-                                        <div class="flex justify-between items-start mb-3">
-                                            <div class="flex items-center gap-3">
-                                                <span class="text-[10px] text-gray-600 font-mono">{{
-                                                    timeShort(c.timestamp) }}</span>
-                                                <span
-                                                    class="px-1.5 py-0.5 bg-indigo-900/40 text-indigo-400 rounded text-[9px] font-black uppercase tracking-tighter">{{
-                                                    c.source || 'LLM' }}</span>
-                                            </div>
-                                            <button @click="c.showOutput = !c.showOutput"
-                                                class="text-[10px] font-black text-indigo-500 uppercase tracking-widest hover:text-indigo-400 transition-all">
-                                                {{ c.showOutput ? 'Hide Output' : 'View Output' }}
-                                            </button>
+                        <div v-else-if="sessionCommands.length === 0"
+                            class="flex flex-col items-center justify-center py-12 border-2 border-dashed border-white/5 rounded-2xl">
+                            <span class="text-sm font-bold text-gray-700 uppercase italic">No interactive commands
+                                recorded for this session</span>
+                        </div>
+
+                        <div v-else class="space-y-4">
+                            <div v-for="c in sessionCommands" :key="c.timestamp + c.command"
+                                class="bg-white/[0.02] border border-white/5 rounded-xl overflow-hidden hover:border-indigo-500/30 transition-all group">
+                                <div class="p-5">
+                                    <div class="flex justify-between items-start mb-3">
+                                        <div class="flex items-center gap-3">
+                                            <span class="text-[10px] text-gray-600 font-mono">{{ timeShort(c.timestamp) }}</span>
+                                            <span
+                                                class="px-1.5 py-0.5 bg-indigo-900/40 text-indigo-400 rounded text-[9px] font-black uppercase tracking-tighter">{{ c.source || 'LLM' }}</span>
                                         </div>
-                                        <div class="flex gap-3">
-                                            <span v-if="selectedSession.protocol !== 'http'"
-                                                class="text-green-800 font-black term-font">$</span>
-                                            <div class="flex-1">
-                                                <div
-                                                    class="text-green-500 font-bold term-font leading-relaxed break-all">
-                                                    {{ c.command }}</div>
-                                                <div v-if="c.explanation"
-                                                    class="mt-2 text-[11px] text-gray-500 italic leading-relaxed">{{
-                                                    c.explanation }}</div>
-                                            </div>
+                                        <button @click="c.showOutput = !c.showOutput"
+                                            class="text-[10px] font-black text-indigo-500 uppercase tracking-widest hover:text-indigo-400 transition-all">
+                                            {{ c.showOutput ? 'Hide Output' : 'View Output' }}
+                                        </button>
+                                    </div>
+                                    <div class="flex gap-3">
+                                        <span v-if="selectedSession.protocol !== 'http'"
+                                            class="text-green-800 font-black term-font">$</span>
+                                        <div class="flex-1">
+                                            <div class="text-green-500 font-bold term-font leading-relaxed break-all">
+                                                {{ c.command }}</div>
+                                            <div v-if="c.explanation"
+                                                class="mt-2 text-[11px] text-gray-500 italic leading-relaxed">{{ c.explanation }}</div>
                                         </div>
                                     </div>
-                                    <!-- Collapsible Output -->
-                                    <transition name="fade">
-                                        <div v-if="c.showOutput"
-                                            class="bg-black/80 p-5 border-t border-white/5 term-font text-[13px] text-gray-400 whitespace-pre-wrap leading-relaxed shadow-inner">
-                                            {{ c.response || 'No output recorded for this command.' }}
-                                        </div>
-                                    </transition>
                                 </div>
+                                <!-- Collapsible Output -->
+                                <transition name="fade">
+                                    <div v-if="c.showOutput"
+                                        class="bg-black/80 p-5 border-t border-white/5 term-font text-[13px] text-gray-400 whitespace-pre-wrap leading-relaxed shadow-inner">
+                                        {{ c.response || 'No output recorded for this command.' }}
+                                    </div>
+                                </transition>
                             </div>
                         </div>
                     </div>
@@ -653,7 +640,7 @@
     </div>
 
     <script>
-        const { createApp, ref, onMounted, watch } = Vue;
+        const { createApp, ref, onMounted, watch, computed } = Vue;
 
         createApp({
             setup() {
@@ -825,6 +812,13 @@
                     filters.value.protocols = all ? [...ALL_PROTOCOLS] : [];
                 };
 
+                const isFiltered = computed(() => {
+                    return filters.value.risk !== '' ||
+                        filters.value.ip !== '' ||
+                        filters.value.asn !== '' ||
+                        filters.value.protocols.length < ALL_PROTOCOLS.length;
+                });
+
                 const resetFilters = () => {
                     filters.value.protocols = [...ALL_PROTOCOLS];
                     filters.value.risk = '';
@@ -841,7 +835,10 @@
 
                 const timeAgo = (date) => {
                     if (!date) return '-';
+                    // moment(date) correctly parses ISO strings with offsets (e.g. -08:00)
+                    // We use moment() (current local time) to compare against it.
                     const diff = moment().diff(moment(date), 'seconds');
+                    if (diff < 0) return '0s'; // Defensive
                     if (diff < 60) return diff + 's';
                     if (diff < 3600) return Math.floor(diff / 60) + 'm';
                     if (diff < 86400) return Math.floor(diff / 3600) + 'h';
@@ -849,6 +846,22 @@
                     return Math.floor(diff / 604800) + 'w';
                 };
                 const timeShort = (date) => date ? moment(date).format('HH:mm:ss') : '-';
+                const formatDuration = (s) => {
+                    if (!s.start_time) return '-';
+                    const start = moment(s.start_time);
+                    if (!start.isValid()) return '-';
+
+                    let end = moment(s.end_time || s.last_cmd || s.start_time);
+                    if (!end.isValid()) end = moment();
+
+                    let seconds = end.diff(start, 'seconds');
+                    if (seconds < 0) seconds = 0;
+
+                    if (seconds < 60) return seconds + 's';
+                    if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
+                    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h';
+                    return Math.floor(seconds / 86400) + 'd';
+                };
                 const protoLabel = (p) => p === 'llm-api' ? 'LLM' : (p || 'ssh').toUpperCase();
 
                 onMounted(() => {
@@ -866,7 +879,7 @@
                     loading, loadingAsns, loadingIps, loadingCountries, loadingCommands, lastUpdated,
                     stats, filters, ALL_PROTOCOLS, timeOptions, showAbout, settings,
                     toggleProtocol, selectProtocols, selectSession, resetFilters, filterByAsn,
-                    getRiskClass, timeAgo, timeShort, protoLabel, setTimeWindow: (h) => filters.value.hours = h,
+                    getRiskClass, timeAgo, timeShort, formatDuration, protoLabel, setTimeWindow: (h) => filters.value.hours = h,
                     currentRangeLabel: Vue.computed(() => timeOptions.find(o => o.value === filters.value.hours)?.label.toLowerCase() || '24h')
                 };
             }

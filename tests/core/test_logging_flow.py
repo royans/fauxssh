@@ -106,51 +106,52 @@ class TestLoggingIntegration(unittest.TestCase):
             "auth", auth_data, session_id="SESS-INT-01", ip="9.9.9.9", protocol="ssh"
         )
 
-        # Wait a bit
-        time.sleep(0.1)
+        # Wait and retry for log file presence (robustness)
+        log_found = False
+        lines = []
+        for _ in range(20):  # Retry for up to 2 seconds
+            # Force flush
+            logger = logging.getLogger(LOGGER_NAME)
+            for h in logger.handlers:
+                h.flush()
 
-        # 1. Verify JSON Log (Ensure it exists in the test dir)
-        log_found = os.path.exists(self.json_log_path)
-        if not log_found:
-            # Debug: what dir are we in?
-            logs = os.listdir(self.test_dir)
-            print(f"DEBUG: Files in test dir: {logs}")
-
-        self.assertTrue(log_found, f"JSON log not found at {self.json_log_path}")
-
-        with open(self.json_log_path, "r") as f:
-            lines = f.readlines()
-            # self.assertEqual(len(lines), 1)
-            # Allow potential extra lines (e.g. startup/flush artifacts), ensure at least one
-            self.assertGreaterEqual(
-                len(lines), 1, f"Expected at least 1 log line, got {len(lines)}"
-            )
-
-            # Find the auth event
-            found_auth = False
-            for line in lines:
-                try:
-                    ev = json.loads(line)
-                    if (
-                        ev.get("type") == "auth"
-                        and ev.get("data", {}).get("username") == "attacker"
-                    ):
-                        found_auth = True
+            if os.path.exists(self.json_log_path):
+                with open(self.json_log_path, "r") as f:
+                    lines = f.readlines()
+                    if len(lines) > 0:
+                        log_found = True
                         break
-                except:
-                    continue
+            time.sleep(0.1)
 
-            self.assertTrue(found_auth, "Auth event not found in log lines")
+        if not log_found:
+            print(
+                f"DEBUG: Log not found. Files in {self.test_dir}: {os.listdir(self.test_dir)}"
+            )
+            print(f"DEBUG: Configured path: {self.json_log_path}")
+            # Check if default file exists
+            default_path = os.path.join(self.test_dir, "events.json.log")
+            if os.path.exists(default_path):
+                print(f"DEBUG: Found default file at {default_path}")
 
-            # For backward compat with verification code below, assume first valid line is sufficient if unique
-            # But the loop above validates the core requirement.
+        self.assertTrue(
+            log_found, f"JSON log not found or empty at {self.json_log_path}"
+        )
 
-            # Check the LAST found event for the specific assertions below if needed,
-            # or just rely on the found flag.
-            log_event = json.loads(
-                lines[0]
-            )  # keeping this for now but it might be the wrong one if multiple?
-            # actually if we found it, let's use that one
+        # Verify content
+        found_auth = False
+        for line in lines:
+            try:
+                ev = json.loads(line)
+                if (
+                    ev.get("type") == "auth"
+                    and ev.get("data", {}).get("username") == "attacker"
+                ):
+                    found_auth = True
+                    break
+            except:
+                continue
+
+        self.assertTrue(found_auth, "Auth event not found in log lines")
 
         # 2. Verify Database
         conn = self.db._get_conn()

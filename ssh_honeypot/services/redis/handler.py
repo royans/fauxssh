@@ -7,9 +7,12 @@ from ssh_honeypot.core.universal_cache import universal_cache
 
 
 class RedisHandler:
-    def __init__(self, db, llm):
+    def __init__(self, db, llm, session_id):
         self.db = db
         self.llm = llm
+        self.session_id = session_id
+
+    # ... (helper methods omitted)
 
     def _encode_bulk_string(self, text):
         if text is None:
@@ -38,7 +41,7 @@ class RedisHandler:
         clogger.log_event(
             "interaction",
             interaction_data,
-            session_id="redis-session",
+            session_id=self.session_id,
             ip=client_ip,
             protocol="redis",
         )

@@ -25,6 +25,7 @@ MANAGEMENT_PATHS = {
     "/status_request.html",
     "/status_request",
     "/status_data.json",
+    "/favicon.ico",
 }
 
 
@@ -53,7 +54,7 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         # Silence management APIs from access logs
         path = getattr(self, "path", "")
-        if path in MANAGEMENT_PATHS:
+        if path in MANAGEMENT_PATHS or path.startswith("/api/"):
             return
 
         try:
@@ -217,6 +218,11 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                         return
                 except Exception as e:
                     log.error(f"[HTTP] Error serving stats data: {e}")
+
+            if clean_path == "/favicon.ico":
+                self.send_response(404)
+                self.end_headers()
+                return
 
             if clean_path.startswith("/api/payloads"):
                 try:
@@ -762,6 +768,14 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                 else:
                     content = llm_res
                     source_type = "llm"
+
+                # Guard against internal LLM errors
+                if '{"output": "INTERNAL_ERROR"' in content:
+                    log.warning(
+                        f"[HTTP] Received INTERNAL_ERROR from LLM. Falling back to 404."
+                    )
+                    content = self._get_fallback_404()
+                    source_type = "error"
 
                 if content:
                     # Cache it

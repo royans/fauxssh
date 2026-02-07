@@ -22,6 +22,34 @@ class AnalyticsEngine:
     def __init__(self, db_backend):
         self.db = db_backend
 
+    def _standardize_dates(self, data):
+        """
+        Ensures all timestamps in the list of dicts are UTC ISO strings.
+        This prevents browser timezone confusion (negative timestamps).
+        """
+        if not data:
+            return data
+
+        time_fields = ["start_time", "end_time", "timestamp", "first_cmd", "last_cmd"]
+
+        for row in data:
+            for field in time_fields:
+                if field in row and row[field]:
+                    val = row[field]
+                    if isinstance(val, str):
+                        # SQLite strings are usually naive UTC.
+                        # If seemingly ISO but missing Z/Offset, append Z.
+                        # Matches "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DDTHH:MM:SS" etc.
+                        if len(val) >= 19 and not val.endswith("Z") and "+" not in val:
+                            row[field] = val + "Z"
+                    elif isinstance(val, datetime.datetime):
+                        if val.tzinfo is None:
+                            # Treat as local system time (matching analyze.py logic)
+                            # This ensures .isoformat() includes the correct local offset
+                            val = val.astimezone()
+                        row[field] = val.isoformat()
+        return data
+
     def _get_cache_key(self, method, **kwargs):
         """Generates a stable cache key based on inputs."""
         # Convert kwargs to sorted tuple for stability
@@ -271,6 +299,7 @@ class AnalyticsEngine:
                     "remote_ip_clean"
                 ]  # Override if we want to hide it completely in UI
 
+            self._standardize_dates(data)
             self._set_cache(cache_key, data)
             return data
 
@@ -471,6 +500,7 @@ class AnalyticsEngine:
                 freq = cmd_ip_count / total_ips
                 row["unique_pct"] = (1.0 - freq) * 100.0
 
+            self._standardize_dates(data)
             self._set_cache(cache_key, data)
             return data
 

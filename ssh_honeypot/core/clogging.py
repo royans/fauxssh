@@ -6,7 +6,7 @@ import socket
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ssh_honeypot.core.config import config
 from ssh_honeypot.core.event_logger import EventLogger
@@ -181,7 +181,7 @@ class ClientLogger:
         event = {
             "event_id": str(uuid.uuid4()),
             "ver": "2.0",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "source": self.server_name,
             "session_id": session_id,
             "protocol": protocol,

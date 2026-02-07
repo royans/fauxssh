@@ -23,7 +23,7 @@ def handle_redis_client(client_sock, addr, db, llm):
     try:
         from .handler import RedisHandler
 
-        handler = RedisHandler(db, llm)
+        handler = RedisHandler(db, llm, session_id)
     except Exception as e:
         log.error(f"[!] Failed to init RedisHandler: {e}")
         client_sock.close()
@@ -39,24 +39,14 @@ def handle_redis_client(client_sock, addr, db, llm):
             log.info(f"[Redis] {ip}: {command}")
 
             response = handler.handle_command(command, ip)
-            client_sock.send(response)
+            try:
+                client_sock.send(response)
+            except (BrokenPipeError, ConnectionResetError):
+                log.debug(f"[Redis] Client {ip} disconnected during send")
+                break
 
             # Log Interaction
-            try:
-                # We interpret CWD as "/" for Redis
-                cmd_hash = hashlib.md5(command.encode("utf-8")).hexdigest()
-                db.log_interaction(
-                    session_id,
-                    "/",
-                    command,
-                    response.decode(
-                        "utf-8", errors="ignore"
-                    ),  # Store response as string for log
-                    source="redis_honeypot",
-                    request_md5=cmd_hash,
-                )
-            except Exception as log_e:
-                log.error(f"[!] Redis Logging Error: {log_e}")
+            # Logging is now handled inside RedisHandler via clogger
 
     except Exception as e:
         log.error(f"[!] Redis Error {ip}: {e}")

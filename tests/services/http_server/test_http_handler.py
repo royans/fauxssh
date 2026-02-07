@@ -181,3 +181,45 @@ def test_http_llm_error_fallback(mock_server):
             b"HTTP/1.0 404 Not Found" in output or b"HTTP/1.1 404 Not Found" in output
         )
         assert b"Apache/Fake" in output
+
+
+def test_http_get_internal_error_signal(mock_server):
+    """
+    Regression Test: specific check for the 'INTERNAL_ERROR' signal from LLM.
+    Should result in a 404 response.
+    """
+    output_buf = BytesIO()
+    handler = create_handler(mock_server, output_buf, "/exhausted_resource", "GET")
+
+    with patch("ssh_honeypot.services.http_server.server.config") as mock_conf:
+
+        def config_side_effect(section, key):
+            if section == "http" and key == "server_header":
+                return "Apache/Fake"
+            if section == "http" and key == "headers":
+                return {}
+            if section == "http" and key in ["llm_rpm", "llm_rpd"]:
+                return 100
+            return None
+
+        mock_conf.get.side_effect = config_side_effect
+
+        mock_server.honey_db.get_cached_response.return_value = None
+
+        # Simulate LLM returning the specific error signal
+        mock_server.llm_interface.generate_response.return_value = (
+            '{"output": "INTERNAL_ERROR", "new_cwd": null}'
+        )
+
+        handler.do_GET()
+
+        output = output_buf.getvalue()
+
+        # 1. Status Code must be 404
+        assert (
+            b"HTTP/1.0 404 Not Found" in output or b"HTTP/1.1 404 Not Found" in output
+        )
+
+        # 2. Content should be the fallback 404 info
+        assert b"404 Not Found" in output
+        assert b"The requested URL was not found on this server." in output

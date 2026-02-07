@@ -48,7 +48,7 @@ virustotal:
 analytics:
   ignore_ips: [] # ENV: ANALYTICS_IGNORE_IPS (comma-separated)
   show_empty_sessions: false
-  batch_size: 50
+  batch_size: 10
   # Which services should have their commands/requests analyzed by LLM (Risk detection)
   # Default: ssh, telnet, mysql. HTTP is disabled by default to reduce token usage and noise.
   enabled_services:

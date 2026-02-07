@@ -7,7 +7,7 @@ class TestRedisHandler(unittest.TestCase):
     def setUp(self):
         self.mock_db = MagicMock()
         self.mock_llm = MagicMock()
-        self.handler = RedisHandler(self.mock_db, self.mock_llm)
+        self.handler = RedisHandler(self.mock_db, self.mock_llm, "test-session-id")
 
     def test_ping(self):
         res = self.handler.handle_command("PING", "1.2.3.4")

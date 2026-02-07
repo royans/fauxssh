@@ -20,6 +20,13 @@ class TestClogging(unittest.TestCase):
         self.mock_el_class.return_value = self.mock_event_logger
 
         # Mode both, small batch
+        # Ensure we don't start in test mode which forces batch_size=1
+        self.env_patcher = patch.dict(
+            os.environ,
+            {"FAUXSSH_TEST_MODE": "false", "LOGGING_DISABLE_BATCHING": "false"},
+        )
+        self.env_patcher.start()
+
         self.clogger = ClientLogger()
         self.clogger.log_mode = "both"
         self.clogger.settings["batch_size"] = 2
@@ -30,6 +37,7 @@ class TestClogging(unittest.TestCase):
         self.clogger.stop()
         self.config_patcher.stop()
         self.el_patcher.stop()
+        self.env_patcher.stop()
 
     def _mock_config_get(self, *args):
         mapping = {

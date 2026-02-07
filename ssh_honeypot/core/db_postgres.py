@@ -348,7 +348,11 @@ class PostgresBackend(DatabaseBackend):
                     try:
                         cursor.execute(
                             "INSERT INTO sessions (session_id, remote_ip, timestamp) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-                            (session_id, "unknown", datetime.datetime.now()),
+                            (
+                                session_id,
+                                "unknown",
+                                datetime.datetime.now(datetime.timezone.utc),
+                            ),
                         )
                         conn.commit()
                         cursor = conn.cursor()  # Refresh cursor after commit
@@ -374,7 +378,11 @@ class PostgresBackend(DatabaseBackend):
                         self._clean_str(response_head),
                         response_size,
                         duration_ms,
-                        created_at if created_at else datetime.datetime.now(),
+                        (
+                            created_at
+                            if created_at
+                            else datetime.datetime.now(datetime.timezone.utc)
+                        ),
                     ),
                 )
             conn.commit()

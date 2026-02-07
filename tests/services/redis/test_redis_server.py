@@ -57,6 +57,26 @@ class TestRedisServer(unittest.TestCase):
         self.db.start_session.reset_mock()
         self.db.log_interaction.reset_mock()
 
+        # PATCH SLOGGER TO USE COMPATIBLE DB MOCK
+        from ssh_honeypot.core.slogging import slogger
+
+        self.old_slogger_db = slogger._db
+        slogger._db = self.db
+
+        # CONFIG CLOGGER FOR INSTANT FLUSH
+        from ssh_honeypot.core.clogging import clogger
+
+        clogger.settings["batch_size"] = 1
+        clogger.settings["batch_timeout"] = 0.1
+        clogger.enabled = True
+        clogger.log_mode = "local"
+
+    def tearDown(self):
+        # Restore slogger
+        from ssh_honeypot.core.slogging import slogger
+
+        slogger._db = self.old_slogger_db
+
     def test_ping(self):
         self.llm.generate_response.return_value = "PONG"
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

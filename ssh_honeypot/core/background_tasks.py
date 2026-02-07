@@ -74,8 +74,8 @@ def run_analysis_batch(db_instance, llm_instance, alert_manager):
                         else:
                             ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
 
-                        # 1 Hour Timeout
-                        if (datetime.now() - ts).total_seconds() > 3600:
+                        # 10 Minute Timeout (Responsive Analysis)
+                        if (datetime.now() - ts).total_seconds() > 600:
                             should_process = True
                             log.debug(
                                 f"[Analysis] Processing partial batch (Timeout: {len(commands)} items)"
