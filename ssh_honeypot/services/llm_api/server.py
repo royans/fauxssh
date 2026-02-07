@@ -19,7 +19,12 @@ def start_llm_api_service(db, llm_interface):
 
     # 1. Start Ollama Listener
     if config.get("llm_api", "ollama", "enabled"):
-        port = config.get("llm_api", "ollama", "port") or 11434
+        port = int(
+            os.getenv(
+                "FAUXSSH_LLM_API_OLLAMA_PORT",
+                config.get("llm_api", "ollama", "port") or 11434,
+            )
+        )
         t = threading.Thread(
             target=_run_server, args=(port, OllamaHandler, "Ollama"), daemon=True
         )
@@ -28,7 +33,12 @@ def start_llm_api_service(db, llm_interface):
 
     # 2. Start OpenAI Listener
     if config.get("llm_api", "openai", "enabled"):
-        port = config.get("llm_api", "openai", "port") or 8000
+        port = int(
+            os.getenv(
+                "FAUXSSH_LLM_API_OPENAI_PORT",
+                config.get("llm_api", "openai", "port") or 8000,
+            )
+        )
         t = threading.Thread(
             target=_run_server, args=(port, OpenAIHandler, "OpenAI"), daemon=True
         )

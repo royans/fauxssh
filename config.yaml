@@ -1,6 +1,7 @@
 server:
   hostname: "web.blogofy.com"
-  port: 2222
+  #port: 2222
+  port: 15022
   banner_default: "SSH-2.0-OpenSSH_8.4p1 Debian-5+deb11u1"
 
 logging:
@@ -68,8 +69,9 @@ alerting:
 
 telnet:
   enabled: true
-  port: 2323
-
+  #port: 2323
+  port: 15023
+  
 redis:
   enabled: true
   port: 6379
@@ -120,7 +122,8 @@ llm_api:
 
 http:
   enabled: true
-  port: 8080
+  #port: 8080
+  port: 15080
   server_header: "Apache/2.4.52 (Ubuntu)"
   showstats: true
   headers:

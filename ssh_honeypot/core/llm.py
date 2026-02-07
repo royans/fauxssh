@@ -313,8 +313,21 @@ class LLMInterface:
 
         cached_item = universal_cache.get("llm", prompt_hash)
         if cached_item:
-            log.debug(f"[LLM] Cache Hit for hash {prompt_hash[:8]}")
             output = cached_item["output_text"]
+
+            # Validation: Check for "Thinking" artifacts
+            if self._is_thinking_artifact(output):
+                log.warning(
+                    f"[LLM] Detected 'Thinking' artifact in cache. Invalidating key {prompt_hash}."
+                )
+                # Invalidate so it regenerates next time
+                universal_cache.delete("llm", prompt_hash)
+                # Return it anyway as per user request ("ok to present for now")
+                if return_source:
+                    return output, "llm-cache (tainted)"
+                return output
+
+            log.debug(f"[LLM] Cache Hit for hash {prompt_hash[:8]}")
             if return_source:
                 return output, "llm-cache"
             return output
@@ -382,6 +395,32 @@ class LLMInterface:
         if return_source:
             return res, "llm"
         return res
+
+    def _is_thinking_artifact(self, text):
+        """
+        Checks if the text contains LLM 'thinking' or meta-commentary artifacts.
+        """
+        if not text:
+            return False
+
+        # Common starter phrases for refusal/explanation
+        patterns = [
+            r"^Okay, here is",
+            r"^Here is a (realistic|simulated)",
+            r"^Sure, I can",
+            r"^I cannot",
+            r"^As an AI",
+            r"^\*\*Response:\*\*",
+            r"^Response:",
+            r"I will prioritize",
+            r"I'll allow this",
+        ]
+
+        for p in patterns:
+            if re.search(p, text, re.IGNORECASE | re.MULTILINE):
+                return True
+
+        return False
 
     def _call_google(
         self, prompt, prompt_hash, command=None, is_command=True, protocol="ssh"

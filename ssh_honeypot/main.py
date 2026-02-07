@@ -254,13 +254,17 @@ def main(argv=None):
 
     # Start Telnet Server (Optional)
     if str(os.getenv("FAUXSSH_ENABLE_TELNET", "true")).lower() == "true":
-        t_port = int(os.getenv("FAUXSSH_TELNET_PORT", 2323))
+        t_port = int(
+            os.getenv("FAUXSSH_TELNET_PORT", config.get("telnet", "port") or 2323)
+        )
         log.info(f"[Telnet] Attempting to start service on port {t_port}...")
         start_telnet_server(t_port, db, llm)
 
     # Start Redis Server (Optional)
     if str(os.getenv("FAUXSSH_ENABLE_REDIS", "true")).lower() == "true":
-        r_port = int(os.getenv("FAUXSSH_REDIS_PORT", 6379))
+        r_port = int(
+            os.getenv("FAUXSSH_REDIS_PORT", config.get("redis", "port") or 6379)
+        )
         from ssh_honeypot.services.redis.server import start_redis_server
         from ssh_honeypot.core.utils import create_dual_stack_socket
 
@@ -320,7 +324,7 @@ def main(argv=None):
 
     # Start MCP Server (Optional)
     if str(os.getenv("FAUXSSH_ENABLE_MCP", "true")).lower() == "true":
-        mcp_port = int(os.getenv("FAUXSSH_MCP_PORT", 8001))
+        mcp_port = int(os.getenv("FAUXSSH_MCP_PORT", config.get("mcp", "port") or 8001))
         try:
             from ssh_honeypot.services.mcp.server import start_mcp_server
 
