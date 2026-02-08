@@ -35,6 +35,7 @@ class TestSCP(unittest.TestCase):
         if not is_server_running(TEST_PORT):
             # Set env var for main
             os.environ["FAUXSSH_PORT"] = str(TEST_PORT)
+            os.environ["FAUXSSH_BIND_IP"] = "127.0.0.1"
             cls.server_thread = threading.Thread(target=server_main, args=([],))
             cls.server_thread.daemon = True
             cls.server_thread.start()

@@ -1,4 +1,5 @@
 import os
+import subprocess
 
 # Base directories
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -313,3 +314,58 @@ def get_storable_content(content, max_len=1024 * 1024):
 
     text = b"\n".join(found).decode("utf-8", errors="ignore")
     return text[:max_len], True
+
+
+def ensure_ssl_keys(cert_path, key_path):
+    """
+    Checks if SSL cert/key exist at the given paths.
+    If not, generates a self-signed certificate using openssl.
+    """
+    if os.path.exists(cert_path) and os.path.exists(key_path):
+        return True
+
+    # Ensure directory exists
+    cert_dir = os.path.dirname(cert_path)
+    if not os.path.exists(cert_dir):
+        try:
+            os.makedirs(cert_dir, exist_ok=True)
+        except Exception as e:
+            print(f"[!] Critical: Could not create SSL directory at {cert_dir}: {e}")
+            return False
+
+    print(f"[*] Generating self-signed SSL certificate: {cert_path}")
+
+    # OpenSSL Command
+    cmd = [
+        "openssl",
+        "req",
+        "-new",
+        "-newkey",
+        "rsa:2048",
+        "-days",
+        "365",
+        "-nodes",
+        "-x509",
+        "-keyout",
+        key_path,
+        "-out",
+        cert_path,
+        "-subj",
+        "/C=US/ST=Denial/L=Springfield/O=Dis/CN=mail.localhost",
+    ]
+
+    try:
+        subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(cert_path) and os.path.exists(key_path):
+            print(f"[*] SSL Certificate generated successfully.")
+            return True
+    except FileNotFoundError:
+        print(
+            "[!] Error: 'openssl' command not found. Cannot generate SSL certificates."
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"[!] Error generating SSL certificate: {e}")
+    except Exception as e:
+        print(f"[!] Unexpected error generating SSL certificate: {e}")
+
+    return False

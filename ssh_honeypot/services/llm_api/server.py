@@ -52,18 +52,16 @@ def _run_server(port, handler_class, name):
         )
 
         # Address Family Detection
-        original_family = ThreadingHTTPServer.address_family
         if ":" in bind_ip or bind_ip == "::":
-            ThreadingHTTPServer.address_family = socket.AF_INET6
+            # Dynamic subclass to override address_family without affecting global class
+            class IPv6HTTPServer(ThreadingHTTPServer):
+                address_family = socket.AF_INET6
+
+            ServerClass = IPv6HTTPServer
         else:
-            ThreadingHTTPServer.address_family = socket.AF_INET
+            ServerClass = ThreadingHTTPServer
 
-        server = ThreadingHTTPServer(
-            (bind_ip, port), handler_class, bind_and_activate=False
-        )
-
-        # Restore original family to avoid polluting global state
-        ThreadingHTTPServer.address_family = original_family
+        server = ServerClass((bind_ip, port), handler_class, bind_and_activate=False)
 
         # Enable Dual Stack (IPv4 fallback on IPv6 socket) if binding ::
         if server.address_family == socket.AF_INET6 and bind_ip == "::":

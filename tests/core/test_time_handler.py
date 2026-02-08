@@ -43,6 +43,7 @@ class TestTimeHandler(unittest.TestCase):
             print(f"[*] Starting Test Server on {TEST_PORT}")
             os.environ["FAUXSSH_TEST_MODE"] = "1"
             os.environ["FAUXSSH_PORT"] = str(TEST_PORT)
+            os.environ["FAUXSSH_BIND_IP"] = "127.0.0.1"
             # Disable other services to avoid port conflicts (MySQL 3306, Redis 6379, etc)
             os.environ["FAUXSSH_ENABLE_TELNET"] = "false"
             os.environ["FAUXSSH_ENABLE_REDIS"] = "false"

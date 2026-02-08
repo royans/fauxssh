@@ -603,7 +603,8 @@
                                         <span v-if="selectedSession.protocol !== 'http'"
                                             class="text-green-800 font-black term-font">$</span>
                                         <div class="flex-1">
-                                            <div class="text-green-500 font-bold term-font leading-relaxed break-all">
+                                            <div @click="c.showOutput = !c.showOutput"
+                                                class="text-green-500 font-bold term-font leading-relaxed break-all cursor-pointer hover:underline decoration-green-500/30">
                                                 {{ c.command }}</div>
                                             <div v-if="c.explanation"
                                                 class="mt-2 text-[11px] text-gray-500 italic leading-relaxed">{{

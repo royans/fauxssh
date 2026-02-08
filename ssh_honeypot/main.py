@@ -14,7 +14,7 @@ import signal
 from ssh_honeypot.core.database import HoneyDB, get_db_backend
 from ssh_honeypot.core.llm import LLMInterface
 from ssh_honeypot.core.config import config
-from ssh_honeypot.core.utils import get_data_dir
+from ssh_honeypot.core.utils import get_data_dir, ensure_ssl_keys
 from ssh_honeypot.core.logging_setup import log, apply_config_to_logging
 from ssh_honeypot.core.persona_validator import validate_active_persona
 from ssh_honeypot.core.background_tasks import start_background_tasks, analysis_loop
@@ -374,18 +374,55 @@ def main(argv=None):
             os.getenv("FAUXSSH_IMAP_PORT", config.get("imap", "port") or 15143)
         )
         try:
+
             from ssh_honeypot.services.imap.server import start_imap_server
 
-            def start_imap_wrapper(port, db_instance, llm_instance):
+            def start_imap_wrapper(
+                port, db_instance, llm_instance, bind_addr, ssl_port, ssl_cert, ssl_key
+            ):
                 try:
                     # Asyncio event loop for this thread
-                    asyncio.run(start_imap_server(db_instance, llm_instance, port))
+                    asyncio.run(
+                        start_imap_server(
+                            db_instance,
+                            llm_instance,
+                            port=port,
+                            bind_ip=bind_addr,
+                            ssl_port=ssl_port,
+                            ssl_cert=ssl_cert,
+                            ssl_key=ssl_key,
+                        )
+                    )
                 except Exception as ex:
                     log.critical(f"[!] IMAP Thread CRASHED: {ex}", exc_info=True)
 
-            log.info(f"[IMAP] Attempting to start service on port {i_port}...")
+            # Determine SSL Config
+            ssl_port = int(
+                os.getenv(
+                    "FAUXSSH_IMAP_SSL_PORT", config.get("imap", "ssl_port") or 15993
+                )
+            )
+            # Default to data/ssl/imap.{crt,key} if not specified
+            data_dir = get_data_dir()
+            default_cert = os.path.join(data_dir, "ssl", "imap.crt")
+            default_key = os.path.join(data_dir, "ssl", "imap.key")
+
+            ssl_cert = os.getenv(
+                "FAUXSSH_IMAP_SSL_CERT", config.get("imap", "ssl_cert") or default_cert
+            )
+            ssl_key = os.getenv(
+                "FAUXSSH_IMAP_SSL_KEY", config.get("imap", "ssl_key") or default_key
+            )
+
+            # Ensure SSL keys exist
+            ensure_ssl_keys(ssl_cert, ssl_key)
+
+            log.info(
+                f"[IMAP] Attempting to start service on port {i_port} (and SSL {ssl_port})..."
+            )
             imap_thread = threading.Thread(
-                target=start_imap_wrapper, args=(i_port, db, llm)
+                target=start_imap_wrapper,
+                args=(i_port, db, llm, bind_ip, ssl_port, ssl_cert, ssl_key),
             )
             imap_thread.daemon = True
             imap_thread.start()

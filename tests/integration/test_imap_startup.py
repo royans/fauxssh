@@ -26,21 +26,28 @@ class TestIMAPStartup:
             # Mock Server Object with AsyncMock
             mock_server = AsyncMock()
 
-            # Configure create_server to return the mock server
-            # create_server is an async method on the loop
-            mock_loop.create_server = AsyncMock(return_value=mock_server)
+            # Mock create_dual_stack_socket
+            with patch(
+                "ssh_honeypot.services.imap.server.create_dual_stack_socket"
+            ) as mock_create_sock:
+                mock_sock = MagicMock()
+                mock_create_sock.return_value = mock_sock
 
-            await start_imap_server(db, llm, port)
+                # Configure create_server to return the mock server
+                mock_loop.create_server = AsyncMock(return_value=mock_server)
 
-            # Verify create_server called
-            mock_loop.create_server.assert_called_once()
-            # Verify arguments: protocol_factory, host, port
-            args, kwargs = mock_loop.create_server.call_args
-            assert args[1] == "0.0.0.0"
-            assert args[2] == port
+                await start_imap_server(db, llm, port, bind_ip="0.0.0.0")
+
+                # Verify create_dual_stack_socket called
+                mock_create_sock.assert_called_with("0.0.0.0", port)
+
+                # Verify create_server called with sock
+                mock_loop.create_server.assert_called()
+                args, kwargs = mock_loop.create_server.call_args
+                assert kwargs.get("sock") == mock_sock
 
             # Verify serve_forever was awaited
-            mock_server.serve_forever.assert_awaited_once()
+            mock_server.serve_forever.assert_awaited()
 
     def test_config_defaults(self):
         """Verify IMAP defaults are loaded in config."""

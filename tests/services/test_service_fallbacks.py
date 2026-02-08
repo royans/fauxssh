@@ -68,10 +68,12 @@ class TestServiceFallbacks(unittest.TestCase):
         self.assertEqual(resp, "wget: unable to resolve host address")
 
         # 3. SSH Command
-        resp = llm.generate_response("ssh user@host", "/")
-        self.assertEqual(
-            resp, "ssh: connect to host example.com port 22: Connection timed out"
-        )
+        # Force Test Mode to avoid potential sleep/delays
+        with patch.dict(os.environ, {"SSHPOT_TEST_MODE": "1"}):
+            resp = llm.generate_response("ssh user@host", "/")
+            self.assertEqual(
+                resp, "ssh: connect to host example.com port 22: Connection timed out"
+            )
 
 
 if __name__ == "__main__":

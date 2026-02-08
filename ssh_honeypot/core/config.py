@@ -28,7 +28,7 @@ DEFAULT_CONFIG_DICT = {
     "server": {
         "host_key_file": os.path.join(get_data_dir(), "host.key"),
         "port": 2222,
-        "bind_ip": "0.0.0.0",
+        "bind_ip": "::",
         "hostname": "web.blogofy.com",
     },
     "http": {
@@ -322,8 +322,21 @@ class ConfigManager:
                             current_dict[key] = str(env_val)
 
                         if env_val != str(old_val):
+                            # Mask sensitive values
+                            display_val = env_val
+                            display_current = current_dict[key]
+                            display_old = old_val
+
+                            if any(
+                                k in env_key.upper()
+                                for k in ["PASSWORD", "KEY", "SECRET", "TOKEN", "AUTH"]
+                            ):
+                                display_val = "********"
+                                display_current = "********"
+                                display_old = "********"
+
                             print(
-                                f"[ConfigMatch] {env_key}='{env_val}' -> {current_dict[key]} (Was: {old_val})"
+                                f"[ConfigMatch] {env_key}='{display_val}' -> {display_current} (Was: {display_old})"
                             )
                     except Exception as e:
                         print(

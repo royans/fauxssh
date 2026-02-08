@@ -1915,6 +1915,15 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         )
 
         # Call LLM
+        persona_cfg = context.get("persona_config")
+        if context.get("force_unix_handlers") and persona_cfg:
+            # Clone and force Unix behavior (remove cisco identifier)
+            import copy
+
+            persona_cfg = copy.deepcopy(persona_cfg)
+            if "system" in persona_cfg:
+                persona_cfg["system"]["handler_type"] = "unix"
+
         llm_res = self.llm.generate_response(
             cmd,
             cwd,
@@ -1923,7 +1932,7 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             context.get("known_paths", []),
             client_ip=context.get("client_ip"),
             honeypot_ip=context.get("honeypot_ip"),
-            persona_config=context.get("persona_config"),
+            persona_config=persona_cfg,
             protocol=context.get("protocol") or "ssh",
             return_source=True,
         )

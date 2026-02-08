@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import re
+import os
+from ssh_honeypot.core.utils import create_dual_stack_socket
 from .session import ImapSession, ImapState
 from ssh_honeypot.core.database import HoneyDB
 from ssh_honeypot.core.config import config
@@ -101,12 +103,64 @@ class ImapProtocol(asyncio.Protocol):
             self.db.end_session(self.session.session_id)
 
 
-async def start_imap_server(db_instance, llm_instance, port=15143):
+async def start_imap_server(
+    db_instance,
+    llm_instance,
+    port=15143,
+    bind_ip="0.0.0.0",
+    ssl_port=15993,
+    ssl_cert=None,
+    ssl_key=None,
+):
     loop = asyncio.get_running_loop()
-    server = await loop.create_server(
-        lambda: ImapProtocol(db_instance, llm_instance), "0.0.0.0", port
-    )
-    async with server:
-        log.info(f"[IMAP] Listening on 0.0.0.0:{port}")
-        await server.serve_forever()
-    return server
+    servers = []
+
+    # 1. Plain Text Server (Dual Stack capable)
+
+    try:
+        # We manually create the socket to ensure dual-stack if requested (::)
+        sock = create_dual_stack_socket(bind_ip, port)
+        server_plain = await loop.create_server(
+            lambda: ImapProtocol(db_instance, llm_instance), sock=sock
+        )
+        servers.append(server_plain)
+        log.info(f"[IMAP] Listening on {bind_ip}:{port} (Plain)")
+    except Exception as e:
+        log.error(f"[IMAP] Failed to start plain text server: {e}")
+
+    # 2. SSL Server (Optional)
+    if (
+        ssl_port
+        and ssl_cert
+        and ssl_key
+        and os.path.exists(ssl_cert)
+        and os.path.exists(ssl_key)
+    ):
+        try:
+            import ssl
+
+            ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            ssl_context.load_cert_chain(certfile=ssl_cert, keyfile=ssl_key)
+
+            # For SSL we can also use dual stack socket if we want, but create_server with ssl+sock sometimes tricky
+            # Let's try matching the plain approach
+            ssl_sock = create_dual_stack_socket(bind_ip, ssl_port)
+
+            server_ssl = await loop.create_server(
+                lambda: ImapProtocol(db_instance, llm_instance),
+                sock=ssl_sock,
+                ssl=ssl_context,
+            )
+            servers.append(server_ssl)
+            log.info(f"[IMAP] Listening on {bind_ip}:{ssl_port} (SSL)")
+        except Exception as e:
+            log.error(f"[IMAP] Failed to start SSL server: {e}")
+
+    if not servers:
+        log.error("[IMAP] No servers could be started.")
+        return
+
+    # Run all servers
+    async with asyncio.TaskGroup() as tg:
+        for s in servers:
+            tg.create_task(s.serve_forever())
