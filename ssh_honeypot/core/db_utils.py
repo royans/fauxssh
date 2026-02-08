@@ -58,7 +58,7 @@ def sync_db_schema(backend):
                         else "INTEGER PRIMARY KEY AUTOINCREMENT"
                     )
                 elif col_type == "TIMESTAMP":
-                    final_type = "TIMESTAMP" if is_postgres else "DATETIME"
+                    final_type = "TIMESTAMPTZ" if is_postgres else "DATETIME"
                 elif col_type == "BOOLEAN":
                     final_type = "BOOLEAN" if is_postgres else "BOOLEAN"
 
@@ -99,7 +99,7 @@ def sync_db_schema(backend):
                     )
                     final_type = col_type
                     if col_type == "TIMESTAMP":
-                        final_type = "TIMESTAMP" if is_postgres else "DATETIME"
+                        final_type = "TIMESTAMPTZ" if is_postgres else "DATETIME"
                     elif col_type == "BOOLEAN" and not is_postgres:
                         final_type = "BOOLEAN DEFAULT 0"
 

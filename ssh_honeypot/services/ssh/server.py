@@ -19,6 +19,7 @@ from ssh_honeypot.core.alert_manager import AlertManager
 from ssh_honeypot.core.logging_setup import log
 from ssh_honeypot.core.persona_validator import validate_active_persona
 from ssh_honeypot.core.clogging import clogger
+from ssh_honeypot.core.utils import get_ignored_ips
 
 
 # --- Logging Filter for Paramiko Noise ---
@@ -148,7 +149,15 @@ class HoneypotServer(paramiko.ServerInterface):
 
         # Bypass for Trusted IPs (Analytics Ignored IPs) - Move this to top to avoid anti-harvesting blocks
         ignored_ips = get_ignored_ips()
-        is_trusted = self.client_ip in ignored_ips or self.client_ip == "127.0.0.1"
+        bypass_enabled = config.get("security", "bypass_auth_for_ignored_ips")
+        is_trusted = bypass_enabled and (
+            self.client_ip in ignored_ips
+            or self.client_ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+        )
+
+        log.info(
+            f"[SSH] Auth Attempt: User='{username}' IP='{self.client_ip}' Trusted={is_trusted}"
+        )
 
         if not is_trusted:
             # Use globally bound db (will be set in start_ssh_server scope or truly global)
@@ -182,7 +191,10 @@ class HoneypotServer(paramiko.ServerInterface):
                 )
                 allow_root = True
 
-        if username == "root" and not allow_root:
+        if is_trusted:
+            success = True
+            log.info(f"[SSH] Bypassing auth check for Trusted IP: {self.client_ip}")
+        elif username == "root" and not allow_root:
             success = False
         else:
             success = True
@@ -226,7 +238,7 @@ class HoneypotServer(paramiko.ServerInterface):
 
         key_type = key.get_name()
         key_b64 = key.get_base64()
-        auth_data = f"{key_type} {key_b64}"
+        key_str = f"{key_type} {key_b64}"
 
         home_dir = "/root" if username == "root" else f"/home/{username}"
         auth_keys_path = f"{home_dir}/.ssh/authorized_keys"
@@ -248,7 +260,7 @@ class HoneypotServer(paramiko.ServerInterface):
         fp = self._extract_fingerprint()
         auth_data = {
             "username": username,
-            "password": auth_data,  # Use auth_data which is the b64 key for publickey
+            "password": key_str,  # Use key_str which is the b64 key for publickey
             "success": authorized,
             "method": "publickey",
             "client_version": client_version,
@@ -265,15 +277,57 @@ class HoneypotServer(paramiko.ServerInterface):
             fingerprint=fp,
         )
 
-        if authorized:
+        ignored_ips = get_ignored_ips()
+        bypass_enabled = config.get("security", "bypass_auth_for_ignored_ips")
+        is_trusted = (
+            self.client_ip in ignored_ips or self.client_ip == "127.0.0.1"
+        ) and bypass_enabled
+
+        if not is_trusted:
+            is_safe, reason = db.validate_anti_harvesting(
+                self.client_ip, username, key_str
+            )
+            if not is_safe:
+                log.warning(f"[SSH] [!] {reason}")
+                return paramiko.AUTH_FAILED
+
+        if authorized or is_trusted:
             log.info(
-                f"[SSH] Public Key Login SUCCESS for '{username}' from {self.client_ip}"
+                f"[SSH] Public Key Login SUCCESS for '{username}' from {self.client_ip} (Authorized or Trusted)"
             )
             return paramiko.AUTH_SUCCESSFUL
         else:
             return paramiko.AUTH_FAILED
 
+    def check_auth_none(self, username):
+        from ssh_honeypot.core.utils import get_ignored_ips
+
+        ignored_ips = get_ignored_ips()
+        bypass_enabled = config.get("security", "bypass_auth_for_ignored_ips")
+        is_trusted = bypass_enabled and (
+            self.client_ip in ignored_ips
+            or self.client_ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+        )
+
+        if is_trusted:
+            log.info(
+                f"[SSH] Allowing passwordless (none) auth for Trusted IP: {self.client_ip}"
+            )
+            return paramiko.AUTH_SUCCESSFUL
+        return paramiko.AUTH_FAILED
+
     def get_allowed_auths(self, username):
+        from ssh_honeypot.core.utils import get_ignored_ips
+
+        ignored_ips = get_ignored_ips()
+        bypass_enabled = config.get("security", "bypass_auth_for_ignored_ips")
+        is_trusted = bypass_enabled and (
+            self.client_ip in ignored_ips
+            or self.client_ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+        )
+
+        if is_trusted:
+            return "none,password,publickey"
         return "password,publickey"
 
     def check_channel_shell_request(self, channel):
@@ -603,7 +657,7 @@ def _handle_connection_logic(client, addr, db, llm):
                 return
 
         start_time = time.time()
-        resp_text, modifications, metadata = handler.process_command(cmd, context)
+        resp_text, updates, metadata = handler.process_command(cmd, context)
         duration_ms = round((time.time() - start_time) * 1000, 2)
 
         try:
@@ -632,9 +686,14 @@ def _handle_connection_logic(client, addr, db, llm):
             except (OSError, socket.error):
                 pass  # Socket closed by client
 
+        if updates and updates.get("terminate"):
+            log.debug("[DEBUG] Termination signal detected in single command")
+            chan.send_exit_status(0)
+            chan.close()
+            return
+
         log.debug("[DEBUG] Sending exit status 0")
         chan.send_exit_status(0)
-        log.debug("[DEBUG] Closing channel")
         chan.close()
         return
 
@@ -681,7 +740,8 @@ def _handle_connection_logic(client, addr, db, llm):
                 history_cursor = len(history)
 
                 if cmd:
-                    if cmd == "exit":
+                    # Generic exit check still useful as fallback
+                    if cmd == "exit" or cmd == "logout":
                         break
                     if cmd == "clear":
                         chan.send(b"\033[2J\033[H")
@@ -764,6 +824,16 @@ def _handle_connection_logic(client, addr, db, llm):
                                 elif action == "delete":
                                     if filename in vfs[target_dir]:
                                         vfs[target_dir].remove(filename)
+
+                        if updates.get("terminate"):
+                            log.info(
+                                f"[SSH] Session {session_id} Termination requested via command: {cmd}"
+                            )
+                            # Send response before breaking if not already sent
+                            # (resp_text is handled below)
+                            # break will trigger cleanup in finally block
+                            # However, we need to send the final prompt/message if appropriate
+                            break
 
                     fmt_resp = resp_text.replace("\n", "\r\n")
 

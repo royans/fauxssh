@@ -65,6 +65,10 @@ upload:
   max_file_size: 1048576        # 1MB limit for SFTP/SCP
   max_quota_per_ip: 1048576     # Total upload quota per IP
   cleanup_days: 30              # Upload retention period
+
+analytics:
+  batch_size: 10                # Max commands to analyze per LLM call (Higher = better token use, Lower = faster dashboard updates)
+  process_timeout: 600          # Kill analysis for commands older than this (in seconds)
 ```
 
 ## 3. Advanced Configuration (PostgreSQL)

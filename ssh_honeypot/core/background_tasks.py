@@ -184,19 +184,24 @@ def run_stats_generation_job(db_instance):
                 "daily_7d": db_instance.get_daily_session_counts(days=7),
                 "daily_21d": db_instance.get_daily_session_counts(days=21),
             },
-            "top_mysql_risk": db_instance.get_recent_top_commands_by_risk(
-                "mysql", limit=15
-            ),
-            "top_telnet_risk": db_instance.get_recent_top_commands_by_risk(
-                "telnet", limit=15
-            ),
-            "top_llm_risk": db_instance.get_recent_top_commands_by_risk(
-                "llm-api", limit=15
-            ),
             "recent_high_risk": db_instance.get_recent_high_risk_events(limit=15),
             "recent_payloads": db_instance.get_recent_payloads(limit=15),
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
+
+        # Dynamic Risk Stats for ALL protocols found
+        # This replaces the hardcoded 'mysql', 'telnet', 'llm-api' blocks
+        # ensuring new services like IMAP are automatically included.
+        for proto in protos:
+            if not proto:
+                continue
+            key = f"top_{proto}_risk"
+            try:
+                composite[key] = db_instance.get_recent_top_commands_by_risk(
+                    proto, limit=15
+                )
+            except Exception as e:
+                log.error(f"[StatsJob] Failed to get risk stats for {proto}: {e}")
 
         from ssh_honeypot.core.utils import PROJECT_ROOT
 
@@ -204,7 +209,7 @@ def run_stats_generation_job(db_instance):
         os.makedirs(os.path.dirname(data_path), exist_ok=True)
 
         with open(data_path, "w") as f:
-            json.dump(composite, f, indent=2)
+            json.dump(composite, f, indent=2, default=str)
 
         log.info(f"[StatsJob] Generated multi-window stats in {data_path}")
     except Exception as e:

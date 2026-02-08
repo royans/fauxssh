@@ -133,10 +133,17 @@ http:
   llm_rpm: 4
   llm_rpd: 20
 
+imap:
+  enabled: true
+  port: 15143
+  ssl_port: 15993
+  persona_banners: true
+
 security:
   max_input_length: 50000
   max_input_tokens: 4000
   max_rpm: 60
+  bypass_auth_for_ignored_ips: false
 
 throttling:
   dos:

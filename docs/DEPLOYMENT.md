@@ -9,12 +9,12 @@ For long-running deployments, use the included startup script. It handles:
 - Safe usage with cron (idempotent)
 
 ```bash
-./tools/startup.sh
+./start.sh
 ```
 
 To run via cron (ensures it stays up after reboot):
 ```bash
-* * * * * /path/to/fauxssh/tools/startup.sh
+* * * * * /path/to/fauxssh/start.sh
 ```
 
 ## Restarting the Server
@@ -22,7 +22,7 @@ To run via cron (ensures it stays up after reboot):
 To force a restart (applying new code or config):
 
 ```bash
-./tools/startup.sh --restart
+./start.sh --restart
 ```
 
 ## Port Forwarding (Running on Port 22)

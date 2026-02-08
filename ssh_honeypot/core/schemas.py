@@ -98,6 +98,7 @@ class SecurityConfig(BaseModel):
     max_input_length: int = 50000  # Raw chars
     max_input_tokens: int = 4000  # Approx token limit (4 chars/token heuristic)
     max_rpm: int = 60  # Rate Limit Requests Per Minute
+    bypass_auth_for_ignored_ips: bool = False
     virustotal: Optional[Dict[str, Any]] = None
 
 
@@ -158,6 +159,16 @@ class RedisConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     enabled: bool = True
     port: int = 6379
+
+
+class ImapConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    enabled: bool = False
+    port: int = 15143
+    ssl_port: int = 15993
+    persona_banners: bool = True
+    # For future expansion
+    allow_any_auth: bool = True
 
 
 class MySqlAuthConfig(BaseModel):
@@ -244,6 +255,7 @@ class AppConfig(BaseModel):
     analytics: AnalyticsConfig = Field(default_factory=AnalyticsConfig)
     telnet: TelnetConfig = Field(default_factory=TelnetConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
+    imap: ImapConfig = Field(default_factory=ImapConfig)
     mysql: MySqlConfig = Field(default_factory=MySqlConfig)
     throttling: ThrottlingConfig = Field(default_factory=ThrottlingConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)

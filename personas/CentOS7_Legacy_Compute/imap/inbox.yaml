@@ -1,0 +1,41 @@
+- id: 1
+  from: "admin@blogofy.com"
+  to: "legacy-admin@blogofy.com"
+  subject: "System Maintenance: Legacy Compute Node 07"
+  date: "05-Feb-2026 09:00:00 +0000"
+  body: |
+    Hello,
+
+    This is a reminder that the legacy compute node CentOS 7 (node-07) is scheduled for a kernel update tonight at 23:00 UTC.
+    Please ensure all critical batch jobs are completed by then.
+
+    Regards,
+    Infrastructure Team
+  flags: ["\\Seen"]
+
+- id: 2
+  from: "security-alerts@blogofy.com"
+  to: "legacy-admin@blogofy.com"
+  subject: "Unauthorized Login Attempt Detected"
+  date: "06-Feb-2026 14:30:00 +0000"
+  body: |
+    Critical Alert:
+
+    We detected an unauthorized login attempt from IP 192.168.50.12 (Internal Lab) to the 'mysql' service on node-07.
+    The attempt was blocked. Please audit the logs if this was unexpected.
+
+    Security Operations Center
+  flags: []
+
+- id: 3
+  from: "finance-noreply@blogofy.com"
+  to: "legacy-admin@blogofy.com"
+  subject: "Invoice #INV-2026-003 Ready"
+  date: "07-Feb-2026 10:15:00 +0000"
+  body: |
+    Your monthly invoice for Cloud Services (Legacy Tier) is now available in the portal.
+    Total Amount Due: $450.00
+    Due Date: 15-Feb-2026
+
+    Thank you for your business.
+  flags: []

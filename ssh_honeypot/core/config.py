@@ -106,7 +106,12 @@ DEFAULT_CONFIG_DICT = {
         "max_quota_per_ip": 1048576,
         "cleanup_days": 30,
     },
-    "security": {"max_input_length": 50000, "max_input_tokens": 4000, "max_rpm": 60},
+    "security": {
+        "max_input_length": 50000,
+        "max_input_tokens": 4000,
+        "max_rpm": 60,
+        "bypass_auth_for_ignored_ips": False,
+    },
     "persona": {
         "system": {"hostname": "fallback-system"},
         "prompts": {"system_prompt": "Error: Persona failed to load."},
@@ -123,6 +128,23 @@ DEFAULT_CONFIG_DICT = {
             "user": "honeypot",
             "password": "",
             "dbname": "logs",
+        },
+    },
+    "imap": {
+        "enabled": True,
+        "port": 15143,
+        "ssl_port": 15993,
+        "persona_banners": True,
+    },
+    "llm_api": {
+        "ollama": {
+            "enabled": True,
+            "port": 11434,
+            "fake_models": ["llama3:latest"],
+        },
+        "openai": {
+            "enabled": True,
+            "port": 8000,
         },
     },
 }
@@ -196,10 +218,8 @@ class ConfigManager:
         override = not is_test
 
         env_files = [
-            os.path.join(PROJECT_ROOT, ".env"),  # 1. Local (Lower priority)
-            os.path.join(
-                os.path.dirname(PROJECT_ROOT), ".env"
-            ),  # 2. Parent (Higher priority)
+            os.path.join(os.path.dirname(PROJECT_ROOT), ".env"),  # 1. Parent (Base)
+            os.path.join(PROJECT_ROOT, ".env"),  # 2. Local (Overrides)
         ]
         for env_path in env_files:
             if os.path.exists(env_path):
@@ -282,6 +302,7 @@ class ConfigManager:
                 if env_val is not None:
                     try:
                         # Type Casting
+                        old_val = current_dict[key]
                         if isinstance(value, bool):
                             current_dict[key] = str(env_val).lower() in (
                                 "true",
@@ -294,12 +315,16 @@ class ConfigManager:
                         elif isinstance(value, float):
                             current_dict[key] = float(env_val)
                         elif isinstance(value, list):
-                            # Comma separated list
                             current_dict[key] = [
                                 x.strip() for x in env_val.split(",") if x.strip()
                             ]
                         else:
                             current_dict[key] = str(env_val)
+
+                        if env_val != str(old_val):
+                            print(
+                                f"[ConfigMatch] {env_key}='{env_val}' -> {current_dict[key]} (Was: {old_val})"
+                            )
                     except Exception as e:
                         print(
                             f"[!] Config: Error casting env var {env_key}='{env_val}': {e}"
@@ -435,6 +460,15 @@ class ConfigManager:
                 return None  # Obj access?
             if val is None:
                 return None
+
+        if keys == ("security", "bypass_auth_for_ignored_ips"):
+            from ssh_honeypot.core.logging_setup import log
+
+            env_val = os.getenv("SECURITY_BYPASS_AUTH_FOR_IGNORED_IPS")
+            log.info(
+                f"[ConfigDebug] security.bypass_auth_for_ignored_ips = {val} (Type: {type(val)}) | ENV: {env_val}"
+            )
+
         return val
 
     def get_rate_limit(self, service, type_, metric):

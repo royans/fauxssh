@@ -1,19 +1,21 @@
 import logging
 import asyncio
+import sqlite3
+import sqlglot
+from sqlglot import exp, transpile
 from mysql_mimic.session import Session as MysqlSession
 from mysql_mimic import ResultColumn, ColumnType
 from ssh_honeypot.services.mysql.context import client_ip_ctx
 from ssh_honeypot.services.mysql.dummy_data import SYSTEM_VARIABLES, DUMMY_DATABASES
-import sqlglot
-from sqlglot import exp
 from ssh_honeypot.core.clogging import clogger
 
-log = logging.getLogger("ssh_honeypot")
+log = logging.getLogger("ssh_honeypot.mysql.session")
 
 
 class HoneyMySQLSession(MysqlSession):
     def __init__(self, honey_db, llm_interface, config):
         super().__init__()
+        self.variables.set("version", "5.5.5-10.6.12-MariaDB", force=True)
         self.honey_db = honey_db
         self.llm_interface = llm_interface
         self.config = config
@@ -25,6 +27,40 @@ class HoneyMySQLSession(MysqlSession):
         self.session_id = os.urandom(8).hex()
         # Disable built-in middlewares that cause crashes with sqlglot
         self._middlewares = []
+
+        # Initialize in-memory SQLite DB for local handling
+        self.sqlite_conn = sqlite3.connect(":memory:")
+        self._init_sqlite_db()
+
+    def _init_sqlite_db(self):
+        """Populate in-memory SQLite with dummy data."""
+        cursor = self.sqlite_conn.cursor()
+
+        # Create schema and data
+        for db_name, tables in DUMMY_DATABASES.items():
+            if db_name == "information_schema":
+                continue
+
+            for table_name, data in tables.items():
+                cols = data["columns"]
+                rows = data["rows"]
+
+                # Create Table
+                # We treat everything as TEXT or REAL for simplicity in SQLite
+                # unless we want to be specific.
+                col_defs = ", ".join([f"{col} TEXT" for col in cols])
+                create_sql = f"CREATE TABLE {table_name} ({col_defs})"
+                try:
+                    cursor.execute(create_sql)
+
+                    # Insert Data
+                    placeholders = ", ".join(["?"] * len(cols))
+                    insert_sql = f"INSERT INTO {table_name} VALUES ({placeholders})"
+                    cursor.executemany(insert_sql, rows)
+                except Exception as e:
+                    log.error(f"[MySQL] Init Error for {table_name}: {e}")
+
+        self.sqlite_conn.commit()
 
     async def init(self, connection):
         await super().init(connection)
@@ -70,8 +106,6 @@ class HoneyMySQLSession(MysqlSession):
             # Refresh context if we found a more specific one
             client_ip_ctx.set(self.client_address[0])
 
-        # log.info(f"[*] MySQL Connection from {self.client_address}")
-
         # Start session in DB
         session_data = {
             "username": self.username or "unknown",
@@ -89,298 +123,229 @@ class HoneyMySQLSession(MysqlSession):
 
     async def schema(self):
         """
-        Provide the database schema for INFORMATION_SCHEMA queries.
+        Provide the database schema for INFORMATION_SCHEMA queries (used by mysql-mimic).
         """
+        # We still provide this so mysql-mimic knows about tables for basic routing,
+        # even though we intercept most queries.
         schema_map = {}
         for db_name, tables in DUMMY_DATABASES.items():
             schema_map[db_name] = {}
             for table_name, table_data in tables.items():
                 if "columns" in table_data:
+                    # Map all to TEXT for mysql-mimic schema report
                     cols = {col: "TEXT" for col in table_data["columns"]}
                     schema_map[db_name][table_name] = cols
 
         if "mysql" not in schema_map:
             schema_map["mysql"] = {}
 
-        # Add basic mysql tables if needed
         return schema_map
-
-    async def data(self):
-        """
-        Provide data for tables defined in schema().
-        """
-        data_map = {}
-        for db_name, tables in DUMMY_DATABASES.items():
-            if db_name == "information_schema":
-                continue
-            data_map[db_name] = {}
-            for table_name, table_data in tables.items():
-                data_map[db_name][table_name] = table_data["rows"]
-        return data_map
-
-    async def handle_query(self, sql, attrs):
-        """
-        Override handle_query to bypass the middleware chain which causes
-        crashes in sqlglot due to missing functions or data.
-        """
-        log.debug(f"[MySQL] Handling query (bypassing middlewares): {sql}")
-        expressions = self._parse(sql)
-        if not expressions:
-            return [], []
-
-        last_result = ([], [])
-        for expression in expressions:
-            try:
-                last_result = await self.query(expression, sql, attrs)
-            except Exception as e:
-                log.error(f"[MySQL] Error in query handling: {e}")
-                # Fallback to empty result to prevent protocol crash
-                last_result = ([], [])
-
-        return last_result
-
-    async def query(self, expression, sql, attrs):
-        log.info(f"[MySQL] Query from {self.client_address}: {sql}")
-
-        # NOTE: 'expression' is already a parsed sqlglot AST.
-        # Do NOT call sqlglot.parse_one(expression) unless expression is string (it shouldn't be here)
-
-        results = None
-
-        # 1. Handle simple SELECTs locally
-        if isinstance(expression, exp.Select):
-            results = self._handle_local_select(expression)
-            if results is None:
-                # Check for FROM clause to handle table selects
-                table_name = None
-                for table in expression.find_all(exp.Table):
-                    table_name = table.name
-                    break
-
-                if table_name:
-                    results = self._handle_table_select(table_name)
-
-        # 2. Handle USE command
-        if results is None and isinstance(expression, exp.Use):
-            db_name = expression.this.name
-            # If it's an identifier, it might be quoted
-            await self.use(db_name)  # Call the overridden use method
-            results = [], []
-
-        # 3. Handle SHOW commands (commonly used for discovery)
-        if results is None and isinstance(expression, exp.Show):
-            results = self._handle_show(expression)
-            if results is None:
-                # Fallback to LLM for now, but we could handle common ones like 'SHOW TABLES'
-                results = await self._llm_query(sql)
-
-        # 4. Handle SET commands
-        if results is None and isinstance(expression, exp.Set):
-            # Assume success for SET commands (e.g. SET NAMES)
-            results = [], []
-
-        if results is None:
-            results = await self._llm_query(sql)
-
-        # Log Interaction with Result summary
-        try:
-            res_str = ""
-            if results and len(results) > 0 and results[0]:
-                rows = results[0]
-                cols = results[1]
-                # Format a small snippet of the result
-                col_names = [getattr(c, "name", str(c)) for c in cols]
-                res_str = f"Columns: {', '.join(col_names)}\nRows: {len(rows)}\nFirst Row: {rows[0] if rows else 'None'}"
-            else:
-                res_str = "Empty result set / Success"
-
-            interaction_data = {
-                "cwd": "mysql",
-                "input": sql,
-                "response": res_str,
-                "source": "mysql",
-            }
-            clogger.log_event(
-                "interaction",
-                interaction_data,
-                session_id=self.session_id,
-                ip=self.client_address[0] if self.client_address else "unknown",
-                protocol="mysql",
-            )
-        except Exception as le:
-            log.error(f"[MySQL] Error logging results: {le}")
-            interaction_data = {
-                "cwd": "mysql",
-                "input": sql,
-                "response": None,
-                "source": "mysql",
-            }
-            clogger.log_event(
-                "interaction",
-                interaction_data,
-                session_id=self.session_id,
-                ip=self.client_address[0] if self.client_address else "unknown",
-                protocol="mysql",
-            )
-
-        return results
 
     def _parse(self, sql):
         try:
-            # Default behavior
             return [e for e in self.dialect().parse(sql) if e]
-        except sqlglot.errors.ParseError:
-            # Fallback: Try splitting by newline if standard parse fails
-            # This handles cases like "use mysql\nshow tables" without semicolons
+        except:
+            return None
 
-            expressions = []
-            parts = sql.split("\n")
-            if len(parts) > 1:
-                # Check if we can parse the parts individually
-                all_valid = True
-                temp_exprs = []
-                for part in parts:
-                    part = part.strip()
-                    if not part:
+    async def handle_query(self, sql, attrs):
+        """
+        Overridden handle_query to ensure my custom logic is used
+        and multi-statement queries are supported.
+        """
+        log.debug(f"[MySQL] Handling query: {sql}")
+        expressions = self._parse(sql)
+        if expressions is None:
+            return await self._llm_query(sql)
+
+        last_result = ([], [])
+        for expression in expressions:
+            last_result = await self.query(expression, sql, attrs)
+        return last_result
+
+    async def query(self, expression, sql, attrs):
+        """
+        Handle query by either bypassing to local SQLite or forwarding to LLM.
+        """
+        from .dummy_data import SYSTEM_VARIABLES, DUMMY_DATABASES
+
+        # 1. Handle common SELECT functions and variables locally
+        # We check both the parsed expression and the raw SQL for robustness
+        if isinstance(expression, exp.Select):
+            # Try to identify SELECT @@var, @@var2, etc. or SELECT DATABASE()
+            projections = expression.expressions
+            if projections:
+                row_data = []
+                cols = []
+                all_matched = True
+
+                for proj in projections:
+                    proj_sql = proj.sql(dialect="mysql").upper().strip()
+
+                    # Special case for DATABASE() / SCHEMA()
+                    if proj_sql in ("DATABASE()", "SCHEMA()"):
+                        row_data.append(self.current_db)
+                        cols.append(proj_sql)
                         continue
-                    try:
-                        parsed = self.dialect().parse(part)
-                        if parsed:
-                            temp_exprs.extend([e for e in parsed if e])
-                    except:
-                        all_valid = False
+
+                    match = None
+                    for key, val in SYSTEM_VARIABLES.items():
+                        if proj_sql == key.upper():
+                            match = (key.upper(), val)
+                            break
+
+                    if match:
+                        row_data.append(match[1])
+                        cols.append(match[0])
+                    else:
+                        all_matched = False
                         break
 
-                if all_valid and temp_exprs:
-                    log.debug(
-                        f"[MySQL] Recovered {len(temp_exprs)} expressions by splitting newline"
+                if all_matched:
+                    # Return results locally
+                    return [tuple(row_data)], cols
+
+        # 2. Handle USE
+        if isinstance(expression, exp.Use):
+            db_name = expression.this.name
+            await self.use(db_name)
+            return [], []
+
+        # 3. Handle SELECT / INSERT / UPDATE / DELETE via SQLite
+        if isinstance(expression, (exp.Select, exp.Insert, exp.Update, exp.Delete)):
+            try:
+                # Transpile MySQL -> SQLite
+                sqlite_sql_list = transpile(
+                    expression.sql(dialect="mysql"), read="mysql", write="sqlite"
+                )
+                if not sqlite_sql_list:
+                    return await self._llm_query(expression.sql(dialect="mysql"))
+
+                sqlite_sql = sqlite_sql_list[0]
+
+                cursor = self.sqlite_conn.cursor()
+                cursor.execute(sqlite_sql)
+
+                if isinstance(expression, exp.Select):
+                    rows = cursor.fetchall()
+                    cols = []
+                    if cursor.description:
+                        # Return strings for test compatibility
+                        cols = [c[0] for c in cursor.description]
+                    self._log_interaction(
+                        expression.sql(dialect="mysql"), f"Local: {len(rows)} rows"
                     )
-                    return temp_exprs
+                    return rows, cols
+                else:
+                    self.sqlite_conn.commit()
+                    self._log_interaction(
+                        expression.sql(dialect="mysql"), "Local Exec (Mutation)"
+                    )
+                    return [], []
 
-            # Fallback to LLM for syntax errors (let LLM interpret "selet *")
-            log.debug(
-                f"[MySQL] Parse failed, returning raw fallback for LLM: {sql[:50]}..."
-            )
-            return [sqlglot.exp.Literal.string("SYNTAX_ERROR_FALLBACK")]
+            except Exception as e:
+                log.warning(f"[MySQL] SQLite Local Exec Failed: {e}. Fallback to LLM.")
+                return await self._llm_query(expression.sql(dialect="mysql"))
 
-    def _handle_local_select(self, parsed):
-        """Attempts to handle SELECT statements purely with local variables."""
-        # This is a simplification. We look for projections (select expressions)
-        # and see if we map them to our SYSTEM_VARIABLES.
+        # 4. Handle SHOW
+        if isinstance(expression, exp.Show):
+            res = self._handle_show(expression)
+            if res:
+                self._log_interaction(
+                    expression.sql(dialect="mysql"), f"Local SHOW: {len(res[0])} rows"
+                )
+                return res
 
-        # Build columns and row
-        row = []
-        columns = []
+        # Fallback to LLM
+        return await self._llm_query(expression.sql(dialect="mysql"))
 
-        for expression in parsed.expressions:
-            # sqlglot expression -> string representation roughly
-            # e.g. @@version -> "@@version"
-            # CURRENT_USER() -> "CURRENT_USER()"
-
-            key = None
-
-            # Handle literals/identifiers
-            if isinstance(expression, (exp.Literal, exp.Column, exp.Identifier)):
-                key = expression.sql(dialect="mysql").upper()
-
-            # Handle Function calls (DATABASE(), VERSION(), etc)
-            elif isinstance(expression, exp.Func):
-                # sqlglot represents DATABASE() as Func(this='DATABASE') ?
-                # Actually typically standard functions are parsed as specific Expression types
-                # but generic ones might be Func.
-                # Let's rely on sql() string output for normalization for these simple no-arg funcs
-                key = expression.sql(dialect="mysql").upper()
-
-            if not key:
-                # Try generic Sql generation
-                key = expression.sql(dialect="mysql").upper()
-
-            # Normalize key checks
-            val = None
-            for sys_k, sys_v in SYSTEM_VARIABLES.items():
-                if sys_k.upper() == key or sys_k.upper() == key.replace(
-                    "@@SESSION.", "@@"
-                ).replace("@@GLOBAL.", "@@"):
-                    val = sys_v
-                    break
-
-            if val is not None:
-                columns.append(expression.alias_or_name or key)
-                row.append(val)
-            else:
-                # If ANY column is unknown, we abort local handling for safety
-                # unless it's just a constant?
-                # For now, abort to allow mixed queries to go to LLM or fail gracefully
-                return None
-
-        return [tuple(row)], columns
+    def _log_interaction(self, sql, response):
+        interaction_data = {
+            "cwd": "mysql",
+            "input": sql,
+            "response": response[:200] + "..." if len(response) > 200 else response,
+            "source": "mysql",
+        }
+        clogger.log_event(
+            "interaction",
+            interaction_data,
+            session_id=self.session_id,
+            ip=self.client_address[0] if self.client_address else "unknown",
+            protocol="mysql",
+        )
 
     def _handle_show(self, expression):
-        """
-        Handles SHOW commands locally using DUMMY_DATABASES.
-        """
-        target = expression.name.upper()
+        sql = expression.sql(dialect="mysql").upper()
 
-        # SHOW TABLES / SHOW FULL TABLES
+        target = ""
+        if "TABLES" in sql:
+            target = "TABLES"
+        elif "DATABASES" in sql or "SCHEMAS" in sql:
+            target = "DATABASES"
+        elif "COLUMNS" in sql or "FIELDS" in sql:
+            target = "COLUMNS"
+        elif "VARIABLES" in sql:
+            target = "VARIABLES"
+
         if target == "TABLES":
-            db_name = self.current_db
-            # check for FROM/IN clause
-            if expression.args.get("db"):
-                db_name = expression.args.get("db").name
-
-            # Map valid DBs
-            if db_name not in DUMMY_DATABASES:
-                if db_name == "mysql":
-                    return [], [ResultColumn("Tables_in_mysql", ColumnType.VAR_STRING)]
-                return None
-
-            tables = DUMMY_DATABASES[db_name]
-            rows = []
-            for t_name, t_data in tables.items():
-                if t_name == "tables" and db_name == "information_schema":
-                    continue  # Don't show the meta-table itself usually
-
-                # SHOW FULL TABLES returns: Tables_in_db, Table_type
-                if expression.args.get("full"):
-                    rows.append((t_name, "BASE TABLE"))
-                else:
-                    rows.append((t_name,))
-
-            cols = [ResultColumn(f"Tables_in_{db_name}", ColumnType.VAR_STRING)]
-            if expression.args.get("full"):
-                cols.append(ResultColumn("Table_type", ColumnType.VAR_STRING))
-
+            # List tables in SQLite
+            cursor = self.sqlite_conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            rows = cursor.fetchall()
+            # Convert tuples to result
+            # SHOW TABLES usually returns 1 col "Tables_in_XY"
+            cols = [ResultColumn(f"Tables_in_{self.current_db}", ColumnType.VAR_STRING)]
             return rows, cols
 
-        # SHOW DATABASES / SHOW SCHEMAS
         if target in ("DATABASES", "SCHEMAS"):
             rows = [(db,) for db in DUMMY_DATABASES.keys()]
             cols = [ResultColumn("Database", ColumnType.VAR_STRING)]
             return rows, cols
 
-        # SHOW VARIABLES
+        if target == "COLUMNS":
+            # SHOW COLUMNS FROM table
+            import re
+
+            m = re.search(r"FROM\s+([^\s]+)", sql, re.IGNORECASE)
+            table = m.group(1).strip("`'\"") if m else None
+
+            if table:
+                cursor = self.sqlite_conn.cursor()
+                try:
+                    cursor.execute(f"PRAGMA table_info({table})")
+                    pragma_rows = cursor.fetchall()
+                    # SQLite PRAGMA table_info: (id, name, type, notnull, dflt_value, pk)
+                    # MySQL SHOW COLUMNS: (Field, Type, Null, Key, Default, Extra)
+                    rows = []
+                    for pr in pragma_rows:
+                        rows.append(
+                            (
+                                pr[1],  # Field
+                                pr[2],  # Type
+                                "NO" if pr[3] else "YES",  # Null
+                                "PRI" if pr[5] else "",  # Key
+                                pr[4],  # Default
+                                "",  # Extra
+                            )
+                        )
+                    cols = [
+                        ResultColumn("Field", ColumnType.VAR_STRING),
+                        ResultColumn("Type", ColumnType.VAR_STRING),
+                        ResultColumn("Null", ColumnType.VAR_STRING),
+                        ResultColumn("Key", ColumnType.VAR_STRING),
+                        ResultColumn("Default", ColumnType.VAR_STRING),
+                        ResultColumn("Extra", ColumnType.VAR_STRING),
+                    ]
+                    return rows, cols
+                except:
+                    return None
+
         if target == "VARIABLES":
-            rows = []
-            for k, v in SYSTEM_VARIABLES.items():
-                # Strip leading @@ for display if present (though system vars map keys might keep them)
-                # Usually SHOW VARIABLES returns 'Variable_name', 'Value'
-                clean_k = k.replace("@@", "").replace("()", "")
-                rows.append((clean_k, str(v)))
+            from .dummy_data import SYSTEM_VARIABLES
 
-            cols = [
-                ResultColumn("Variable_name", ColumnType.VAR_STRING),
-                ResultColumn("Value", ColumnType.VAR_STRING),
-            ]
-            return rows, cols
-
-        # SHOW STATUS
-        if target == "STATUS":
-            # internal dummy status
             rows = [
-                ("Uptime", "123456"),
-                ("Threads_connected", "1"),
-                ("Threads_running", "1"),
-                ("Questions", "10"),
+                (k.replace("@@", ""), v)
+                for k, v in SYSTEM_VARIABLES.items()
+                if k.startswith("@@")
             ]
             cols = [
                 ResultColumn("Variable_name", ColumnType.VAR_STRING),
@@ -394,67 +359,28 @@ class HoneyMySQLSession(MysqlSession):
         self.current_db = database
         await super().use(database)
 
-    def _handle_table_select(self, table_name):
-        """Attempts to return data from dummy tables."""
-        # Look in current DB
-        # Use self.database if self.current_db isn't set, or prefer base class?
-        # Base class `use` sets self.database.
-        db_to_search = self.database or self.current_db or "production_db"
-
-        db_data = DUMMY_DATABASES.get(db_to_search) or DUMMY_DATABASES.get(
-            "production_db"
-        )
-        if not db_data:
-            return None
-
-        table_data = db_data.get(table_name)
-        if table_data:
-            return table_data["rows"], table_data["columns"]
-
-        # Try information_schema mapping as fallback
-        if self.current_db == "information_schema" or table_name.lower() == "tables":
-            # Special case for 'show tables' which often maps to SELECT ... FROM information_schema.tables
-            # But sqlglot might show 'SHOW TABLES' as a command?
-            # Mimic handles show tables automatically? No, we impl query.
-            # If table_name is tables, return schema
-            return (
-                DUMMY_DATABASES["information_schema"]["tables"]["rows"],
-                DUMMY_DATABASES["information_schema"]["tables"]["columns"],
-            )
-
-        return None
-
     async def _llm_query(self, sql):
         """Forwards query to LLM to generate plausible rows."""
         log.info(f"[MySQL] Forwarding to LLM: {sql}")
 
         # Prompt Engineering
-        prompt = f"""
-        You are a MySQL server for a corporate 'production_db'. 
-        The current database is '{self.current_db}'.
-        
-        The user executed:
-        SQL: {sql}
-        
-        Return the result set as a JSON object with 'columns' (list of strings) and 'rows' (list of lists of values).
-        Make the data look realistic for a production enterprise environment.
-        If the query is an UPDATE/INSERT/DELETE, return empty columns/rows but assume success.
-        If the query contains syntax errors, return reasonable error or empty.
-        
-        JSON Format:
-        {{
-            "columns": ["id", "name"],
-            "rows": [[1, "admin"], [2, "test"]]
-        }}
-        """
+        prompt = f"You are a MySQL server for a corporate 'production_db'. The current database is '{self.current_db}'. The user executed: SQL: {sql} Return the result set as a JSON object with 'columns' (list of strings) and 'rows' (list of lists of values). Make the data look realistic for a production enterprise environment. If the query is an UPDATE/INSERT/DELETE, return empty columns/rows but assume success. If the query contains syntax errors, return reasonable error or empty. JSON Format: {{ 'columns': ['id', 'name'], 'rows': [[1, 'admin'], [2, 'test']] }}"
 
         try:
-            resp = self.llm_interface.query(prompt, protocol="mysql")
-            # Clean and parse JSON
+            # Check if sync or async
+            import inspect
+
+            res = self.llm_interface.query(prompt, protocol="mysql")
+            if inspect.isawaitable(res):
+                resp = await res
+            else:
+                resp = res
+
+            if not isinstance(resp, str):
+                resp = str(resp)
             import json
             import re
 
-            # Extract JSON block
             match = re.search(r"\{.*\}", resp, re.DOTALL)
             if match:
                 data = json.loads(match.group(0))
@@ -462,10 +388,13 @@ class HoneyMySQLSession(MysqlSession):
                 cols_raw = data.get("columns", [])
 
                 # Explicitly convert to ResultColumn to avoid inference bugs/limitations
+                # FIX: Ensure column names are strings to prevent 'int' object has no attribute 'encode' crash
                 columns = [
-                    ResultColumn(name=c, type=ColumnType.VAR_STRING) for c in cols_raw
+                    ResultColumn(name=str(c), type=ColumnType.VAR_STRING)
+                    for c in cols_raw
                 ]
 
+                self._log_interaction(sql, f"LLM: {len(rows)} rows")
                 return rows, columns
             else:
                 log.warning("[MySQL] LLM returned invalid format")

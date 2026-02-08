@@ -2,7 +2,8 @@ import socket
 import time
 import threading
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+from ssh_honeypot.core.config import config as real_config
 from ssh_honeypot.services.telnet.server import (
     start_telnet_server,
     IAC,
@@ -50,11 +51,21 @@ def telnet_echo_port():
 def start_echo_server(telnet_echo_port):
     db = MockDB()
     llm = MockLLM()
-    # Start server
-    t = start_telnet_server(telnet_echo_port, db, llm)
-    time.sleep(1)  # Wait for bind
-    yield
-    # Cleanup implies process death usually for simple threads
+
+    # Patch config to disable bypass auth
+    original_get = real_config.get
+
+    def side_effect(section, key, default=None):
+        if section == "security" and key == "bypass_auth_for_ignored_ips":
+            return False
+        return original_get(section, key, default)
+
+    with patch.object(real_config, "get", side_effect=side_effect):
+        # Start server
+        t = start_telnet_server(telnet_echo_port, db, llm)
+        time.sleep(1)  # Wait for bind
+        yield
+        # Cleanup implies process death usually for simple threads
 
 
 def test_telnet_echo_negotiation_and_backspace(start_echo_server, telnet_echo_port):

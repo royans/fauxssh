@@ -26,6 +26,9 @@ FauxSSH deceptively emulates a realistic Linux server, engaging attackers in lon
 - **📊 Built-in Analytics**: CLI tools to visualize sessions, inspect malware, and correlate threat actors.
 
 
+## Recent Improvements (Feb 7)
+- **Safe Update Workflow**: Added `update.sh` to handle seamless application updates. It automatically manages code syncing (Git/tarball), refreshes dependencies, and triggers database schema migrations via service restart while preserving user data and configurations.
+
 ## Recent Improvements (Feb 6)
 - **UI Integrity Testing**: Added automated linting (`tests/core/test_ui_integrity.py`) to ensure all HTML and Vue templates are syntactically valid and error-free, preventing runtime template crashes.
 - **Dashboard UX Refinements**:
@@ -90,7 +93,7 @@ cp .env.example .env
 Use the included script for robust background execution and logging.
 
 ```bash
-./tools/startup.sh
+./start.sh
 ```
 
 ### 3. Dynamic Persona Generation
@@ -138,6 +141,7 @@ In addition to the analytics, FauxSSH includes several utility scripts in `tools
 - **`tools/check_config.py`**: Validate your configuration and persona settings without starting the server.
 - **`tools/validate_persona.py`**: Strict validation for custom persona definitions.
 - **`tools/setup_service.sh`**: Helper to generate a `systemd` service file for production.
+- **`update.sh`**: The official update script (handles git pull, venv refresh, and DB migrations).
 
 
 ## Documentation

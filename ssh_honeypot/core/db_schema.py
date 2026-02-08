@@ -190,6 +190,33 @@ TABLE_SCHEMAS = {
         "risk_score": "INTEGER",
         "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
     },
+    "email_mailboxes": {
+        "id": "SERIAL_PRIMARY_KEY",
+        "ip": "TEXT",
+        "username": "TEXT",
+        "name": "TEXT",
+        "uid_next": "INTEGER DEFAULT 1",
+        "uid_validity": "INTEGER",
+        "metadata": "TEXT",
+        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    },
+    "email_messages": {
+        "id": "SERIAL_PRIMARY_KEY",
+        "ip": "TEXT",
+        "username": "TEXT",
+        "mailbox_id": "INTEGER REFERENCES email_mailboxes(id)",
+        "uid": "INTEGER",
+        "internal_date": "TIMESTAMP",
+        "flags": "TEXT",
+        "size": "INTEGER",
+        "header_content": "TEXT",
+        "body_content": "TEXT",
+        "template_path": "TEXT",
+        "payload_id": "INTEGER REFERENCES malicious_payloads(id)",
+        "is_deleted": "BOOLEAN DEFAULT FALSE",
+        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "last_accessed": "TIMESTAMP",
+    },
 }
 
 # Index definitions: [ (table, column, index_name), ... ]
@@ -210,6 +237,9 @@ INDEXES = [
     ("universal_cache", "expires_at", "idx_ucache_expiry"),
     ("api_usage", ["service", "identifier", "timestamp"], "idx_api_usage_svc_time"),
     ("payload_analysis", "analyzed_at", "idx_payload_analysis_ts"),
+    ("email_mailboxes", ["ip", "username"], "idx_email_mailbox_user"),
+    ("email_messages", ["mailbox_id", "uid"], "idx_email_msg_uid"),
+    ("email_messages", ["ip", "username", "is_deleted"], "idx_email_msg_user"),
 ]
 
 # Tables to be automatically dropped during sync_db_schema (Redundant/Legacy)

@@ -160,7 +160,15 @@ def handle_telnet_session(client_sock, addr, db, llm):
         return
 
     try:
-        log.info(f"[Telnet] New Connection from {ip}")
+        from ssh_honeypot.core.utils import get_ignored_ips
+
+        ignored_ips = get_ignored_ips()
+        bypass_enabled = config.get("security", "bypass_auth_for_ignored_ips")
+        is_trusted = bypass_enabled and (
+            ip in ignored_ips or ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+        )
+
+        log.info(f"[Telnet] New Connection from {ip} (Trusted: {is_trusted})")
         # 1. Basic Telnet Negotiation
         # Load Cisco IOS Persona
         persona_config = config.get_persona_by_name("cisco_ios")
@@ -193,53 +201,58 @@ def handle_telnet_session(client_sock, addr, db, llm):
         # Helper for buffered IO and CR/LF handling
         tn = TelnetHelper(client_sock)
 
-        # 2. Login Loop
-        username = ""
-        while True:
-            # Use separate helper
-            text = tn.read_line(echo=True)
+        if is_trusted:
+            log.info(f"[Telnet] Bypassing login for Trusted IP: {ip}")
+            username = "trusted_user"
+            password = ""
+        else:
+            # 2. Login Loop
+            username = ""
+            while True:
+                # Use separate helper
+                text = tn.read_line(echo=True)
 
-            if not text:
-                pass  # Empty line or EOF
+                if not text:
+                    pass  # Empty line or EOF
 
-            # Note: TelnetHelper handles echoing, backspaces, and IACs
+                # Note: TelnetHelper handles echoing, backspaces, and IACs
 
-            # Fix: Detect SSH Client on Telnet Port
-            if text.startswith("SSH-"):
-                log.warning(
-                    f"[Telnet] Protocol Mismatch: SSH Client detected from {ip} (Banner: {text.strip()}). Rejecting."
-                )
-                client_sock.close()
-                return
+                # Fix: Detect SSH Client on Telnet Port
+                if text.startswith("SSH-"):
+                    log.warning(
+                        f"[Telnet] Protocol Mismatch: SSH Client detected from {ip} (Banner: {text.strip()}). Rejecting."
+                    )
+                    client_sock.close()
+                    return
 
-            if not text:
-                continue  # Prompt again effectively
+                if not text:
+                    continue  # Prompt again effectively
 
-            username = text
-            break
+                username = text
+                break
 
-        client_sock.sendall(b"Password: ")
+            client_sock.sendall(b"Password: ")
 
-        # --- PASSWORD MASKING START ---
-        # Send IAC WILL ECHO. This tells client "Server will handle echo".
-        # Standard clients will STOP local echoing.
-        # Since we (server) won't echo the password chars, it remains hidden.
-        client_sock.sendall(IAC + WILL + ECHO)
+            # --- PASSWORD MASKING START ---
+            # Send IAC WILL ECHO. This tells client "Server will handle echo".
+            # Standard clients will STOP local echoing.
+            # Since we (server) won't echo the password chars, it remains hidden.
+            client_sock.sendall(IAC + WILL + ECHO)
 
-        password = ""
-        while True:
-            # Use helper with echo=False
-            text = tn.read_line(echo=False)
-            if not text:
-                pass
+            password = ""
+            while True:
+                # Use helper with echo=False
+                text = tn.read_line(echo=False)
+                if not text:
+                    pass
 
-            # Allow empty password? Maybe. But let's assume not.
-            if not text:
-                continue
-            password = text
-            break
+                # Allow empty password? Maybe. But let's assume not.
+                if not text:
+                    continue
+                password = text
+                break
 
-        # --- PASSWORD MASKING END ---
+            # --- PASSWORD MASKING END ---
         # We stay in WILL ECHO mode (Server Handles Echo)
         # But we start actually echoing in the shell loop.
         # We re-affirm WILL ECHO just in case client state drifted,
@@ -405,7 +418,7 @@ def handle_telnet_session(client_sock, addr, db, llm):
                     cmd = cmd_buffer.strip()
                     client_sock.sendall(b"\r\n")
 
-                    if cmd == "exit":
+                    if cmd == "exit" or cmd == "logout":
                         break
                     if cmd == "clear":
                         client_sock.sendall(b"\033[2J\033[H")
@@ -475,6 +488,13 @@ def handle_telnet_session(client_sock, addr, db, llm):
                                 ):
                                     # Merge env updates
                                     env.update(updates.get("env"))
+
+                            if updates.get("terminate"):
+                                log.info(
+                                    f"[Telnet] Session {session_id} Termination requested via command: {cmd}"
+                                )
+                                # Final response will be sent below
+                                break
 
                         except Exception as e:
                             log.error(f"[Telnet] Command Execution Error: {e}")

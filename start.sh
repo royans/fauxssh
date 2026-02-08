@@ -219,6 +219,30 @@ else
     echo "[OK] Started. PID: $PID"
 fi
 
+# 5. Display Listener Ports
+echo ""
+python3 -c "
+try:
+    from ssh_honeypot.core.config import config
+    services = [
+        ('SSH', ['server', 'port'], True),
+        ('Telnet', ['telnet', 'port'], config.get('telnet', 'enabled')),
+        ('HTTP', ['http', 'port'], config.get('http', 'enabled')),
+        ('Redis', ['redis', 'port'], config.get('redis', 'enabled')),
+        ('MySQL', ['mysql', 'port'], config.get('mysql', 'enabled')),
+        ('MCP', ['mcp', 'port'], config.get('mcp', 'enabled')),
+        ('IMAP', ['imap', 'port'], config.get('imap', 'enabled')),
+    ]
+    print('Active Service Listeners:')
+    for name, keys, enabled in services:
+        if enabled:
+            port = config.get(*keys)
+            print(f'  - {name:6} : Port {port}')
+except Exception as e:
+    print(f'[WARN] Could not resolve ports: {e}')
+"
+echo ""
+
 # Post-Startup Verification
 echo "Verifying service status..."
 sleep 2

@@ -448,16 +448,18 @@ class LLMInterface:
         self, prompt, prompt_hash, command=None, is_command=True, protocol="ssh"
     ):
         headers = {"Content-Type": "application/json"}
+        model_name = config.get("llm", "model_name") or "gemini-pro"
+        generation_config = {
+            "temperature": 1.0,
+            "maxOutputTokens": 8192,
+        }
+        if "gemini" in model_name.lower():
+            generation_config["responseMimeType"] = "application/json"
+
         data = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 1.0,
-                "maxOutputTokens": 8192,
-                "responseMimeType": "application/json",
-            },
+            "generationConfig": generation_config,
         }
-
-        model_name = config.get("llm", "model_name") or "gemini-pro"
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.api_key}"
 
         try:

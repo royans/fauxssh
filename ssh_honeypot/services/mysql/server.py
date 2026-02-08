@@ -6,6 +6,8 @@ from ssh_honeypot.services.mysql.session import HoneyMySQLSession
 from ssh_honeypot.services.mysql.context import client_ip_ctx
 from ssh_honeypot.core.database import HoneyDB
 from ssh_honeypot.core.clogging import clogger
+from ssh_honeypot.core.utils import get_ignored_ips
+from ssh_honeypot.core.config import config
 
 log = logging.getLogger("ssh_honeypot")
 
@@ -29,9 +31,17 @@ class HoneyAuthPlugin(NativePasswordAuthPlugin):
         # Create a hex representation of the response for "password" logging
         password_repr = scramble.hex() if scramble else ""
 
-        log.info(
-            f"[MySQL] Checking Password: User='{username}' IP='{ip}' ScrambleLen={len(scramble) if scramble else 0}"
+        from ssh_honeypot.core.utils import get_ignored_ips
+
+        ignored_ips = get_ignored_ips()
+        bypass_enabled = config.get("security", "bypass_auth_for_ignored_ips")
+        is_trusted = bypass_enabled and (
+            ip in ignored_ips or ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
         )
+
+        if is_trusted:
+            log.info(f"[MySQL] Bypassing auth check for Trusted IP: {ip}")
+            return True
 
         # 1. Anti-Harvesting / Rate Limit
         is_safe, reason = self.honey_db.validate_anti_harvesting(
@@ -146,13 +156,15 @@ class HoneyMySQLHandler(MysqlServer):
         # Resolve mysql config once
         self.mysql_cfg = config.get("mysql") if hasattr(config, "get") else config
 
+        from .dummy_data import SYSTEM_VARIABLES
+
         super().__init__(
             session_factory=lambda: HoneyMySQLSession(
                 honey_db, llm_interface, self.mysql_cfg
             ),
             identity_provider=HoneyMySQLIdentityProvider(honey_db, self.mysql_cfg),
-            server_version="5.5.5-10.6.12-MariaDB",
         )
+        self.server_version = SYSTEM_VARIABLES["@@version"]
 
     async def _client_connected_cb(self, reader, writer):
         try:

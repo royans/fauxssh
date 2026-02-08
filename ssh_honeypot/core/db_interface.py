@@ -339,8 +339,48 @@ class DatabaseBackend(ABC):
         pass
 
     @abstractmethod
-    def get_infographic_stats(self, hours=24, ignore_ips=None):
-        """Returns a dictionary of statistics for the infographic dashboard."""
+    def get_email_mailboxes(self, ip, username):
+        pass
+
+    @abstractmethod
+    def get_email_mailbox(self, ip, username, name):
+        pass
+
+    @abstractmethod
+    def create_email_mailbox(self, ip, username, name, uid_validity, metadata=None):
+        pass
+
+    @abstractmethod
+    def get_email_messages(self, mailbox_id, ip, username, include_deleted=False):
+        pass
+
+    @abstractmethod
+    def add_email_message(
+        self,
+        ip,
+        username,
+        mailbox_id,
+        uid,
+        internal_date,
+        flags,
+        size,
+        header,
+        body,
+        template_path=None,
+        payload_id=None,
+    ):
+        pass
+
+    @abstractmethod
+    def update_email_flags(self, message_id, flags):
+        pass
+
+    @abstractmethod
+    def delete_email_message(self, message_id):
+        pass
+
+    @abstractmethod
+    def prune_emails(self, days=30):
         pass
 
     @abstractmethod

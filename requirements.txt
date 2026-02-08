@@ -24,3 +24,4 @@ pytest-testmon
 pylint
 black
 pytest-timeout
+pytest-asyncio

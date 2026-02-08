@@ -46,6 +46,7 @@ class TestAuthorizedKeys(unittest.TestCase):
             if path == auth_path
             else None
         )
+        mock_db.validate_anti_harvesting.return_value = (True, "OK")
 
         # Execute
         result = server.check_auth_publickey(username, mock_key)
@@ -91,6 +92,7 @@ class TestAuthorizedKeys(unittest.TestCase):
             "type": "file",
             "content": "ssh-rsa AAAA_TEST_KEY_BASE64 comment",
         }
+        mock_db.validate_anti_harvesting.return_value = (True, "OK")
 
         result = server.check_auth_publickey(username, mock_key)
         self.assertEqual(result, paramiko.AUTH_FAILED)
@@ -108,6 +110,7 @@ class TestAuthorizedKeys(unittest.TestCase):
 
         # Test Case 3: No file
         mock_db.get_user_node.return_value = None
+        mock_db.validate_anti_harvesting.return_value = (True, "OK")
 
         result = server.check_auth_publickey("testuser", mock_key)
         self.assertEqual(result, paramiko.AUTH_FAILED)

@@ -43,6 +43,7 @@
         .pill-mysql { @apply bg-blue-500/10 text-blue-400 border border-blue-500/20; }
         .pill-llm { @apply bg-purple-500/10 text-purple-400 border border-purple-500/20; }
         .pill-mcp { @apply bg-pink-500/10 text-pink-400 border border-pink-500/20; }
+        .pill-imap { @apply bg-cyan-500/10 text-cyan-400 border border-cyan-500/20; }
 
         .risk-high { @apply text-red-500 underline decoration-red-500/30 underline-offset-4; }
         .risk-med { @apply text-orange-500; }
@@ -192,7 +193,8 @@
             <div class="flex gap-8 border-b border-white/5 px-2">
                 <button v-for="tab in ['sessions', 'asns', 'ips', 'countries']" :key="tab" @click="activeTab = tab"
                     :class="['pb-4 text-sm font-black uppercase tracking-widest transition-all',  activeTab === tab ? 'text-white border-b-2 border-white' : 'text-gray-500 border-b-0 border-transparent hover:text-gray-300']">
-                    {{ {sessions: 'Recent Sessions', asns: 'Top ASNs', ips: 'Top IPs', countries: 'Top Countries'}[tab] }}
+                    {{ {sessions: 'Recent Sessions', asns: 'Top ASNs', ips: 'Top IPs', countries: 'Top Countries'}[tab]
+                    }}
                 </button>
             </div>
 
@@ -227,15 +229,18 @@
                         <tbody class="divide-y divide-white/5">
                             <tr v-for="s in sessions" :key="s.session_id" @click="selectSession(s)"
                                 class="hover:bg-white/[0.04] cursor-pointer transition-colors group">
-                                <td class="px-6 py-4 whitespace-nowrap text-[11px] text-gray-600 font-mono">{{ timeAgo(s.start_time) }}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-[11px] text-gray-600 font-mono">{{
+                                    timeAgo(s.start_time) }}</td>
                                 <td class="px-6 py-4">
                                     <div @click.stop="filters.ip = s.remote_ip"
                                         class="flex flex-col hover:opacity-80 transition-opacity">
                                         <span
-                                            class="text-sm font-black text-indigo-400/90 underline decoration-indigo-500/30 underline-offset-4">{{ s.remote_ip }}</span>
+                                            class="text-sm font-black text-indigo-400/90 underline decoration-indigo-500/30 underline-offset-4">{{
+                                            s.remote_ip }}</span>
                                         <div class="flex items-center gap-2 text-[9px] text-gray-600 font-bold mt-0.5">
                                             <span>CMDS: {{ s.cmd_count || 0 }}</span>
-                                            <span :class="getRiskClass(s.risk_score)">RISK: {{ s.risk_score || 0 }}</span>
+                                            <span :class="getRiskClass(s.risk_score)">RISK: {{ s.risk_score || 0
+                                                }}</span>
                                         </div>
                                     </div>
                                 </td>
@@ -244,11 +249,13 @@
                                 </td>
                                 <td class="px-6 py-4">
                                     <span
-                                        :class="['pill', 'pill-' + (s.protocol === 'llm-api'?'llm':s.protocol||'ssh')]">{{ protoLabel(s.protocol) }}</span>
+                                        :class="['pill', 'pill-' + (s.protocol === 'llm-api'?'llm':s.protocol||'ssh')]">{{
+                                        protoLabel(s.protocol) }}</span>
                                 </td>
                                 <td class="px-6 py-4">
                                     <div class="flex flex-col max-w-[120px]">
-                                        <span class="text-xs font-black text-white truncate">{{ s.username || '-' }}</span>
+                                        <span class="text-xs font-black text-white truncate">{{ s.username || '-'
+                                            }}</span>
                                         <span class="text-[9px] text-gray-700 font-mono truncate"
                                             v-if="s.password">••••••••</span>
                                     </div>
@@ -262,9 +269,11 @@
                                 </td>
                                 <td class="px-6 py-4">
                                     <div class="flex flex-col text-[11px]">
-                                        <span class="text-gray-300 font-bold">{{ s.city || 'Unknown' }}, {{ s.country || 'Unknown' }}</span>
+                                        <span class="text-gray-300 font-bold">{{ s.city || 'Unknown' }}, {{ s.country ||
+                                            'Unknown' }}</span>
                                         <span @click.stop="filterByAsn(s.asn)"
-                                            class="text-[9px] text-indigo-600 font-black hover:underline mt-0.5">{{ s.asn || '-' }}</span>
+                                            class="text-[9px] text-indigo-600 font-black hover:underline mt-0.5">{{
+                                            s.asn || '-' }}</span>
                                     </div>
                                 </td>
                             </tr>
@@ -297,8 +306,10 @@
                                 <td class="px-6 py-4">
                                     <div class="flex flex-col">
                                         <span @click="filterByAsn(a.asn)"
-                                            class="text-sm font-black text-indigo-400 cursor-pointer hover:underline">{{ a.asn }}</span>
-                                        <span class="text-[11px] text-gray-500 font-bold truncate max-w-xs">{{ a.org }}</span>
+                                            class="text-sm font-black text-indigo-400 cursor-pointer hover:underline">{{
+                                            a.asn }}</span>
+                                        <span class="text-[11px] text-gray-500 font-bold truncate max-w-xs">{{ a.org
+                                            }}</span>
                                     </div>
                                 </td>
                                 <td class="px-6 py-4 text-center font-black text-white text-lg">{{ a.unique_ips }}</td>
@@ -307,7 +318,8 @@
                                     class="px-4 py-4 text-center border-l border-white/5">
                                     <div v-if="a.protocols[p]" class="flex flex-col items-center">
                                         <span class="text-xs font-black text-white">{{ a.protocols[p].sessions }}</span>
-                                        <span class="text-[9px] text-gray-600 font-bold">cmds: {{ a.protocols[p].commands }}</span>
+                                        <span class="text-[9px] text-gray-600 font-bold">cmds: {{
+                                            a.protocols[p].commands }}</span>
                                     </div>
                                     <span v-else class="text-gray-800 text-xs">-</span>
                                 </td>
@@ -352,7 +364,8 @@
                             <tr v-for="ip in topIps" :key="ip.ip" class="hover:bg-white/[0.02] transition-colors">
                                 <td class="px-6 py-4">
                                     <span @click="filters.ip = ip.ip"
-                                        class="text-sm font-black text-indigo-400 cursor-pointer hover:underline">{{ ip.ip }}</span>
+                                        class="text-sm font-black text-indigo-400 cursor-pointer hover:underline">{{
+                                        ip.ip }}</span>
                                 </td>
                                 <td class="px-6 py-4">
                                     <div class="flex flex-col">
@@ -366,8 +379,10 @@
                                 <td v-for="p in ALL_PROTOCOLS" :key="p"
                                     class="px-4 py-4 text-center border-l border-white/5">
                                     <div v-if="ip.protocols[p]" class="flex flex-col items-center">
-                                        <span class="text-xs font-black text-white">{{ ip.protocols[p].sessions }}</span>
-                                        <span class="text-[9px] text-gray-600 font-bold uppercase">cmds: {{ ip.protocols[p].commands }}</span>
+                                        <span class="text-xs font-black text-white">{{ ip.protocols[p].sessions
+                                            }}</span>
+                                        <span class="text-[9px] text-gray-600 font-bold uppercase">cmds: {{
+                                            ip.protocols[p].commands }}</span>
                                     </div>
                                     <span v-else class="text-gray-800 text-xs">-</span>
                                 </td>
@@ -419,8 +434,10 @@
                                 <td v-for="p in ALL_PROTOCOLS" :key="p"
                                     class="px-4 py-4 text-center border-l border-white/5">
                                     <div v-if="c.protocols && c.protocols[p]" class="flex flex-col items-center">
-                                        <span class="text-xs font-black text-white">{{ c.protocols[p].unique_ips }}</span>
-                                        <span class="text-[9px] text-gray-600 font-bold uppercase">sess: {{ c.protocols[p].sessions }}</span>
+                                        <span class="text-xs font-black text-white">{{ c.protocols[p].unique_ips
+                                            }}</span>
+                                        <span class="text-[9px] text-gray-600 font-bold uppercase">sess: {{
+                                            c.protocols[p].sessions }}</span>
                                     </div>
                                     <span v-else class="text-gray-800 text-xs">-</span>
                                 </td>
@@ -471,7 +488,8 @@
                                 <h2 class="text-2xl font-black text-white flex items-center gap-3">
                                     {{ selectedSession.remote_ip }}
                                     <span
-                                        :class="['pill !text-xs', 'pill-' + (selectedSession.protocol === 'llm-api'?'llm':selectedSession.protocol||'ssh')]">{{ protoLabel(selectedSession.protocol) }}</span>
+                                        :class="['pill !text-xs', 'pill-' + (selectedSession.protocol === 'llm-api'?'llm':selectedSession.protocol||'ssh')]">{{
+                                        protoLabel(selectedSession.protocol) }}</span>
                                 </h2>
                             </div>
                         </div>
@@ -516,8 +534,10 @@
                                 <div class="text-[10px] text-gray-500 uppercase font-black tracking-widest mb-2">Auth
                                     Credentials</div>
                                 <div class="flex flex-col">
-                                    <span class="text-sm font-bold text-white">{{ selectedSession.username || 'n/a' }}</span>
-                                    <span class="text-[10px] text-gray-600 font-mono" v-if="selectedSession.password">{{ selectedSession.password }}</span>
+                                    <span class="text-sm font-bold text-white">{{ selectedSession.username || 'n/a'
+                                        }}</span>
+                                    <span class="text-[10px] text-gray-600 font-mono" v-if="selectedSession.password">{{
+                                        selectedSession.password }}</span>
                                 </div>
                             </div>
                             <div class="p-6 bg-[#0a0a0c]">
@@ -543,7 +563,8 @@
                             <h3
                                 class="text-sm font-black text-gray-400 uppercase tracking-widest flex items-center gap-3">
                                 Activity Timeline
-                                <span class="px-2 py-0.5 bg-white/5 rounded text-[10px] text-gray-500">{{ sessionCommands.length }} Events</span>
+                                <span class="px-2 py-0.5 bg-white/5 rounded text-[10px] text-gray-500">{{
+                                    sessionCommands.length }} Events</span>
                             </h3>
                         </div>
 
@@ -567,9 +588,11 @@
                                 <div class="p-5">
                                     <div class="flex justify-between items-start mb-3">
                                         <div class="flex items-center gap-3">
-                                            <span class="text-[10px] text-gray-600 font-mono">{{ timeShort(c.timestamp) }}</span>
+                                            <span class="text-[10px] text-gray-600 font-mono">{{ timeShort(c.timestamp)
+                                                }}</span>
                                             <span
-                                                class="px-1.5 py-0.5 bg-indigo-900/40 text-indigo-400 rounded text-[9px] font-black uppercase tracking-tighter">{{ c.source || 'LLM' }}</span>
+                                                class="px-1.5 py-0.5 bg-indigo-900/40 text-indigo-400 rounded text-[9px] font-black uppercase tracking-tighter">{{
+                                                c.source || 'LLM' }}</span>
                                         </div>
                                         <button @click="c.showOutput = !c.showOutput"
                                             class="text-[10px] font-black text-indigo-500 uppercase tracking-widest hover:text-indigo-400 transition-all">
@@ -583,7 +606,8 @@
                                             <div class="text-green-500 font-bold term-font leading-relaxed break-all">
                                                 {{ c.command }}</div>
                                             <div v-if="c.explanation"
-                                                class="mt-2 text-[11px] text-gray-500 italic leading-relaxed">{{ c.explanation }}</div>
+                                                class="mt-2 text-[11px] text-gray-500 italic leading-relaxed">{{
+                                                c.explanation }}</div>
                                         </div>
                                     </div>
                                 </div>
@@ -666,7 +690,7 @@
                     unique_asns: 0
                 });
 
-                const ALL_PROTOCOLS = ['ssh', 'telnet', 'http', 'redis', 'mysql', 'llm-api', 'mcp'];
+                const ALL_PROTOCOLS = ['ssh', 'telnet', 'http', 'redis', 'mysql', 'llm-api', 'mcp', 'imap'];
                 const timeOptions = [
                     { label: '1H', value: 1 },
                     { label: '24H', value: 24 },

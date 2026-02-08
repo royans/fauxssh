@@ -366,6 +366,32 @@ def main(argv=None):
         except Exception as e:
             log.error(f"[!] HTTP Service Failed to Start: {e}")
 
+    # Start IMAP Server (Optional)
+    if str(os.getenv("FAUXSSH_ENABLE_IMAP", "true")).lower() == "true" and config.get(
+        "imap", "enabled"
+    ):
+        i_port = int(
+            os.getenv("FAUXSSH_IMAP_PORT", config.get("imap", "port") or 15143)
+        )
+        try:
+            from ssh_honeypot.services.imap.server import start_imap_server
+
+            def start_imap_wrapper(port, db_instance, llm_instance):
+                try:
+                    # Asyncio event loop for this thread
+                    asyncio.run(start_imap_server(db_instance, llm_instance, port))
+                except Exception as ex:
+                    log.critical(f"[!] IMAP Thread CRASHED: {ex}", exc_info=True)
+
+            log.info(f"[IMAP] Attempting to start service on port {i_port}...")
+            imap_thread = threading.Thread(
+                target=start_imap_wrapper, args=(i_port, db, llm)
+            )
+            imap_thread.daemon = True
+            imap_thread.start()
+        except Exception as e:
+            log.error(f"[!] IMAP Service Failed to Start: {e}")
+
     # Start LLM API Services (Ollama/OpenAI)
     try:
         start_llm_api_service(db, llm)

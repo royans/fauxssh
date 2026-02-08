@@ -236,7 +236,7 @@ def handle_cisco_exit(cmd, context):
         updates["env"] = {"privilege_level": 1}
         return "", updates, {"source": "handler", "cached": False}
 
-    return "disconnect", {}, {"source": "handler", "cached": False}
+    return "logout\n", {"terminate": True}, {"source": "handler", "cached": False}
 
 
 def handle_cisco_write(cmd, context):
@@ -394,7 +394,7 @@ def handle_cisco_login(cmd, context):
 
 
 def handle_cisco_logout(cmd, context):
-    return "disconnect", {}, {"source": "handler", "cached": False}
+    return "logout\n", {"terminate": True}, {"source": "handler", "cached": False}
 
 
 def handle_cisco_systat(cmd, context):

@@ -1,17 +1,20 @@
 # Changelog
 
 
-## Weekly Changelog: Feb 6th 2026
+## Weekly Changelog: Feb 7th 2026
 
 ### New Features
+- **Safe Update Workflow**: Added `update.sh` to handle atomic application updates (Git/Zip), dependency refreshes, and database migrations via service restart.
 - **UI Integrity Testing**: Added `tests/core/test_ui_integrity.py` to validate HTML and Vue templates, catching syntax errors before deployment.
 - **Attribute Handlers**: Implemented `lsattr` and `lockrc` command simulation for enhanced realism.
 - **Advanced Dashboard**:
+    - **Active Filter Warning**: Added a prominent visual alert when dashboard filters are active to prevent "stale data" confusion.
     - **Risk Scoring Visualization**: Normalized 0-100 risk scores with color-coded indicators.
     - **Auto-Refresh**: Dashboard health checks and session lists now refresh every 5 minutes.
     - **Responsive Layout**: Improved table density for better readability on smaller screens.
 
 ### Reliability & Security
+- **Timezone Synchronization**: Resolved 8-hour analytics gap by standardizing naive timestamps to local context (`-08:00`) in API and frontend.
 - **Strict CSP**: Enforced Content Security Policy to prevent XSS.
 - **Trusted Proxies**: Configurable `TRUSTED_PROXIES` for `X-Forwarded-For` handling.
 - **MySQL Stability**: Fixed `AttributeError` crashes in `mysql-mimic` integration.
@@ -130,5 +133,5 @@
 - **Security**: Prompt Injection Hardening and increased input processing limits (50k chars).
 
 ### Reliability
-- **Startup**: Enhanced `startup.sh` with cron support.
+- **Startup**: Enhanced `start.sh` with cron support.
 - **UX**: Fixed `cd` behavior and session chaining.

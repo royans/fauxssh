@@ -1028,24 +1028,191 @@ class SQLiteBackend(DatabaseBackend):
 
         return [{"ip": r[0], "username": r[1], "path": r[2]} for r in to_delete]
 
-    def touch_user_file(self, ip, username, path):
-        """
-        Updates the last_accessed timestamp for a user file to prevent cleanup.
-        """
+    def get_email_mailboxes(self, ip, username):
+        conn = self._get_conn()
+        c = conn.cursor()
+        c.execute(
+            "SELECT id, name, uid_next, uid_validity, metadata FROM email_mailboxes WHERE ip=? AND username=?",
+            (ip, username),
+        )
+        rows = c.fetchall()
+        conn.close()
+        return [
+            {
+                "id": r[0],
+                "name": r[1],
+                "uid_next": r[2],
+                "uid_validity": r[3],
+                "metadata": json.loads(r[4]) if r[4] else {},
+            }
+            for r in rows
+        ]
+
+    def get_email_mailbox(self, ip, username, name):
+        conn = self._get_conn()
+        c = conn.cursor()
+        c.execute(
+            "SELECT id, name, uid_next, uid_validity, metadata FROM email_mailboxes WHERE ip=? AND username=? AND name=?",
+            (ip, username, name),
+        )
+        row = c.fetchone()
+        conn.close()
+        if row:
+            return {
+                "id": row[0],
+                "name": row[1],
+                "uid_next": row[2],
+                "uid_validity": row[3],
+                "metadata": json.loads(row[4]) if row[4] else {},
+            }
+        return None
+
+    def create_email_mailbox(self, ip, username, name, uid_validity, metadata=None):
+        conn = self._get_conn()
         try:
-            conn = self._get_conn()
-            conn.execute(
+            c = conn.cursor()
+            c.execute(
                 """
-                UPDATE user_filesystem 
-                SET last_accessed = CURRENT_TIMESTAMP 
-                WHERE ip=? AND username=? AND path=?
+                INSERT INTO email_mailboxes (ip, username, name, uid_validity, metadata)
+                VALUES (?, ?, ?, ?, ?)
             """,
+                (ip, username, name, uid_validity, json.dumps(metadata or {})),
+            )
+            mailbox_id = c.lastrowid
+            conn.commit()
+            return mailbox_id
+        finally:
+            conn.close()
+
+    def get_email_messages(self, mailbox_id, ip, username, include_deleted=False):
+        conn = self._get_conn()
+        c = conn.cursor()
+        query = "SELECT id, uid, internal_date, flags, size, header_content, body_content, template_path, payload_id, is_deleted FROM email_messages WHERE mailbox_id=? AND ip=? AND username=?"
+        if not include_deleted:
+            query += " AND is_deleted = 0"
+        c.execute(query, (mailbox_id, ip, username))
+        rows = c.fetchall()
+        conn.close()
+        return [
+            {
+                "id": r[0],
+                "uid": r[1],
+                "internal_date": r[2],
+                "flags": json.loads(r[3]) if r[3] else [],
+                "size": r[4],
+                "header": r[5],
+                "body": r[6],
+                "template_path": r[7],
+                "payload_id": r[8],
+                "is_deleted": bool(r[9]),
+            }
+            for r in rows
+        ]
+
+    def add_email_message(
+        self,
+        ip,
+        username,
+        mailbox_id,
+        uid,
+        internal_date,
+        flags,
+        size,
+        header,
+        body,
+        template_path=None,
+        payload_id=None,
+    ):
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            c.execute(
+                """
+                INSERT INTO email_messages 
+                (ip, username, mailbox_id, uid, internal_date, flags, size, header_content, body_content, template_path, payload_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    ip,
+                    username,
+                    mailbox_id,
+                    uid,
+                    internal_date,
+                    json.dumps(flags or []),
+                    size,
+                    header,
+                    body,
+                    template_path,
+                    payload_id,
+                ),
+            )
+            msg_id = c.lastrowid
+            # Update uid_next in mailbox
+            c.execute(
+                "UPDATE email_mailboxes SET uid_next = ? WHERE id = ?",
+                (uid + 1, mailbox_id),
+            )
+            conn.commit()
+            return msg_id
+        finally:
+            conn.close()
+
+    def update_email_flags(self, message_id, flags):
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE email_messages SET flags = ? WHERE id = ?",
+                (json.dumps(flags), message_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_email_message(self, message_id):
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE email_messages SET is_deleted = 1 WHERE id = ?", (message_id,)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def prune_emails(self, days=30):
+        cutoff_time = datetime.datetime.now() - datetime.timedelta(days=days)
+        conn = self._get_conn()
+        try:
+            c = conn.cursor()
+            # Prune messages
+            c.execute(
+                "SELECT id, payload_id FROM email_messages WHERE COALESCE(last_accessed, created_at) < ? AND is_deleted = 0",
+                (cutoff_time,),
+            )
+            to_delete = c.fetchall()
+            c.execute(
+                "DELETE FROM email_messages WHERE COALESCE(last_accessed, created_at) < ? AND is_deleted = 0",
+                (cutoff_time,),
+            )
+            # Prune mailboxes if empty? (Maybe not necessary, but keeps DB clean)
+            # Actually, let's just prune messages for now.
+            conn.commit()
+            return to_delete
+        finally:
+            conn.close()
+
+    def touch_user_file(self, ip, username, path):
+        """Updates the last_accessed timestamp for a user filesystem node."""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE user_filesystem SET last_accessed = CURRENT_TIMESTAMP WHERE ip = ? AND username = ? AND path = ?",
                 (ip, username, path),
             )
             conn.commit()
-            conn.close()
         except Exception as e:
-            log.error(f"[DB] Failed to touch user file {path}: {e}")
+            log.error(f"[DB] Error touching user file {path}: {e}")
+        finally:
+            conn.close()
 
     def delete_user_file(self, ip, username, path):
         # Tombstone deletion: Mark as deleted instead of removing row
@@ -1742,7 +1909,6 @@ class SQLiteBackend(DatabaseBackend):
         Validates login against anti-harvesting rules.
         Returns: (passed: bool, failure_reason: str)
         """
-        # Test Mode Check
         if os.getenv("FAUXSSH_TEST_MODE"):
             # In test mode, use in-memory DB or special logic if needed
             # For now, just allow all in test mode.
@@ -1751,7 +1917,6 @@ class SQLiteBackend(DatabaseBackend):
         try:
             existing_creds = self.get_unique_creds_last_24h(ip)
 
-            # Allow exactly same credentials if previously successful
             if (username, password) in existing_creds:
                 return True, None
 

@@ -734,6 +734,202 @@ class PostgresBackend(DatabaseBackend):
         finally:
             conn.close()
 
+    def get_email_mailboxes(self, ip, username):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(
+                "SELECT id, name, uid_next, uid_validity, metadata FROM email_mailboxes WHERE ip=%s AND username=%s",
+                (ip, username),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "id": r["id"],
+                    "name": r["name"],
+                    "uid_next": r["uid_next"],
+                    "uid_validity": r["uid_validity"],
+                    "metadata": (
+                        json.loads(r["metadata"])
+                        if isinstance(r["metadata"], str)
+                        else r["metadata"]
+                    )
+                    or {},
+                }
+                for r in rows
+            ]
+        finally:
+            conn.close()
+
+    def get_email_mailbox(self, ip, username, name):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(
+                "SELECT id, name, uid_next, uid_validity, metadata FROM email_mailboxes WHERE ip=%s AND username=%s AND name=%s",
+                (ip, username, name),
+            )
+            r = cursor.fetchone()
+            if r:
+                return {
+                    "id": r["id"],
+                    "name": r["name"],
+                    "uid_next": r["uid_next"],
+                    "uid_validity": r["uid_validity"],
+                    "metadata": (
+                        json.loads(r["metadata"])
+                        if isinstance(r["metadata"], str)
+                        else r["metadata"]
+                    )
+                    or {},
+                }
+            return None
+        finally:
+            conn.close()
+
+    def create_email_mailbox(self, ip, username, name, uid_validity, metadata=None):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO email_mailboxes (ip, username, name, uid_validity, metadata)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+            """,
+                (ip, username, name, uid_validity, Json(metadata or {})),
+            )
+            mailbox_id = cursor.fetchone()[0]
+            conn.commit()
+            return mailbox_id
+        finally:
+            conn.close()
+
+    def get_email_messages(self, mailbox_id, ip, username, include_deleted=False):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            query = "SELECT id, uid, internal_date, flags, size, header_content, body_content, template_path, payload_id, is_deleted FROM email_messages WHERE mailbox_id=%s AND ip=%s AND username=%s"
+            if not include_deleted:
+                query += " AND is_deleted = FALSE"
+            cursor.execute(query, (mailbox_id, ip, username))
+            rows = cursor.fetchall()
+            return [
+                {
+                    "id": r["id"],
+                    "uid": r["uid"],
+                    "internal_date": r["internal_date"],
+                    "flags": (
+                        json.loads(r["flags"])
+                        if isinstance(r["flags"], str)
+                        else r["flags"]
+                    )
+                    or [],
+                    "size": r["size"],
+                    "header": r["header_content"],
+                    "body": r["body_content"],
+                    "template_path": r["template_path"],
+                    "payload_id": r["payload_id"],
+                    "is_deleted": r["is_deleted"],
+                }
+                for r in rows
+            ]
+        finally:
+            conn.close()
+
+    def add_email_message(
+        self,
+        ip,
+        username,
+        mailbox_id,
+        uid,
+        internal_date,
+        flags,
+        size,
+        header,
+        body,
+        template_path=None,
+        payload_id=None,
+    ):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO email_messages 
+                (ip, username, mailbox_id, uid, internal_date, flags, size, header_content, body_content, template_path, payload_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """,
+                (
+                    ip,
+                    username,
+                    mailbox_id,
+                    uid,
+                    internal_date,
+                    Json(flags or []),
+                    size,
+                    header,
+                    body,
+                    template_path,
+                    payload_id,
+                ),
+            )
+            msg_id = cursor.fetchone()[0]
+            # Update uid_next in mailbox
+            cursor.execute(
+                "UPDATE email_mailboxes SET uid_next = %s WHERE id = %s",
+                (uid + 1, mailbox_id),
+            )
+            conn.commit()
+            return msg_id
+        finally:
+            conn.close()
+
+    def update_email_flags(self, message_id, flags):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE email_messages SET flags = %s WHERE id = %s",
+                (Json(flags), message_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_email_message(self, message_id):
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE email_messages SET is_deleted = TRUE WHERE id = %s",
+                (message_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def prune_emails(self, days=30):
+        cutoff_time = datetime.datetime.now() - datetime.timedelta(days=days)
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            # Prune messages
+            cursor.execute(
+                "SELECT id, payload_id FROM email_messages WHERE COALESCE(last_accessed, created_at) < %s AND is_deleted = FALSE",
+                (cutoff_time,),
+            )
+            to_delete = cursor.fetchall()
+            cursor.execute(
+                "DELETE FROM email_messages WHERE COALESCE(last_accessed, created_at) < %s AND is_deleted = FALSE",
+                (cutoff_time,),
+            )
+            conn.commit()
+            return to_delete
+        finally:
+            conn.close()
+
     def record_api_usage(self, service, identifier):
         conn = self._get_conn()
         try:

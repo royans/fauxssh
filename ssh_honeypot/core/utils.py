@@ -81,12 +81,16 @@ def get_ignored_ips():
     Returns a list of IPs to ignore in analytics, parsed from ANALYTICS_IGNORE_IPS.
     """
     raw = os.getenv("ANALYTICS_IGNORE_IPS", "")
+    ips = [ip.strip() for ip in raw.split(",") if ip.strip()]
+
+    from ssh_honeypot.core.logging_setup import log
+
+    log.info(f"[UtilsDebug] get_ignored_ips() raw='{raw}' -> found {len(ips)} base IPs")
+
     if not raw:
         return []
 
-    ips = [ip.strip() for ip in raw.split(",") if ip.strip()]
     expanded_ips = []
-
     for ip in ips:
         expanded_ips.append(ip)
         # If it looks like an IPv4 address, also ignore the IPv6-mapped version

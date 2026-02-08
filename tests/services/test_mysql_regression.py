@@ -21,10 +21,8 @@ class TestMySQLRegression(unittest.TestCase):
         call_kwargs = mock_super_init.call_args[1]
 
         # Beekeeper Studio crash repro prevented if this is set
-        self.assertIn("server_version", call_kwargs)
-        self.assertIsNotNone(call_kwargs["server_version"])
-        self.assertTrue(len(call_kwargs["server_version"]) > 0)
-        print(f"Verified server_version is set to: {call_kwargs['server_version']}")
+        self.assertEqual(handler.server_version, "8.0.35-0ubuntu0.22.04.1")
+        print(f"Verified server_version is set to: {handler.server_version}")
 
 
 if __name__ == "__main__":

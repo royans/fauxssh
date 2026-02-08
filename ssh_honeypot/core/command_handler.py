@@ -276,6 +276,8 @@ class CommandHandler:
             "lockrc",
             "source",
             ".",
+            "exit",
+            "logout",
         }
 
         self.HONEYTOKENS = {"aws_keys.txt", "id_rsa_backup", "wallet.dat"}
@@ -317,6 +319,15 @@ class CommandHandler:
                 "type": "vfat",
             },
         ]
+
+    def handle_exit(self, cmd, context):
+        """
+        Signals session termination.
+        """
+        msg = "logout\n"
+        if context.get("protocol") == "telnet":
+            msg = "Connection closed by foreign host.\r\n"
+        return msg, {"terminate": True}, {"source": "handler", "cached": False}
 
     def _handle_known_recon(self, cmd, context):
         # Deterministic handler for frequent botnet recon script
@@ -796,6 +807,20 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         if parts and parts[0] == "nohup":
             return self.nohup_handler.handle(cmd, context, self.process_command)
 
+        # 0.1b Exit Dispatch
+        if parts and parts[0] in ["exit", "logout"]:
+            # Check for Cisco Exception
+            is_cisco = False
+            persona = context.get("persona_config") or {}
+            if persona and (
+                (persona.get("system") or {}).get("handler_type") == "cisco_ios"
+                or persona.get("handler_type") == "cisco_ios"
+            ):
+                is_cisco = True
+
+            if not is_cisco:
+                return self.handle_exit(cmd, context)
+
         # --- PERSONA DISPATCH ---
         persona = context.get("persona_config") or {}
         jailbroken = context.get("env", {}).get("cisco_jailbreak", False)
@@ -1038,6 +1063,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                                     final_updates["file_modifications"] = []
                                 if v:
                                     final_updates["file_modifications"].extend(v)
+                            elif k == "terminate":
+                                final_updates["terminate"] = v
+
+                    if final_updates.get("terminate"):
+                        break
 
                 num_cached = sum(1 for m in sub_metas if m and m.get("cached"))
                 source = "chain"
@@ -1092,6 +1122,11 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                                     final_updates["file_modifications"] = []
                                 if v:
                                     final_updates["file_modifications"].extend(v)
+                            elif k == "terminate":
+                                final_updates["terminate"] = v
+
+                    if final_updates.get("terminate"):
+                        break
 
                 num_cached = sum(1 for m in sub_metas if m and m.get("cached"))
                 executed_parts = len(sub_metas)
@@ -1122,6 +1157,10 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
                 for i, part in enumerate(parts):
                     out, updates, meta = self.process_command(part, current_context)
+
+                    if updates and updates.get("terminate"):
+                        final_updates = updates
+                        return out, final_updates, meta
 
                     # Heuristic for detecting failure
                     # Standard shells use exit codes 0 vs non-0.
