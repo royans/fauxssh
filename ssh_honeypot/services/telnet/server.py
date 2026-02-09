@@ -455,6 +455,7 @@ def handle_telnet_session(client_sock, addr, db, llm):
                         random_response_delay(0.5, 2.0)
 
                         start_time = time.time()
+                        updates = {}  # Initialize to prevent UnboundLocalError
                         # Resilient Unpacking
                         try:
                             res_obj = handler.process_command(cmd, context)

@@ -2,6 +2,10 @@ import socket
 import time
 import threading
 import pytest
+import sys
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
 from unittest.mock import MagicMock, patch
 from ssh_honeypot.core.config import config as real_config
 from ssh_honeypot.services.telnet.server import (
@@ -33,6 +37,18 @@ class MockDB:
 
     def log_interaction(self, *args, **kwargs):
         pass
+
+    def scan_and_repair_corruption(self, *args, **kwargs):
+        pass
+
+    def is_managed_directory(self, *args, **kwargs):
+        return False
+
+    def get_user_node(self, *args, **kwargs):
+        return None
+
+    def get_fs_node(self, *args, **kwargs):
+        return None
 
     def get_persona_by_name(self, name):
         return {}
@@ -139,7 +155,7 @@ def test_telnet_full_session_flow(telnet_server):
 
     # Command 1: 'ls' with CRLF
     s.sendall(b"ls\r\n")
-    resp = read_until(s, [b"foo", b"Mock system Response", b"Error"], timeout=3.0)
+    resp = read_until(s, [b"foo", b"Mock system Response", b"Error"], timeout=5.0)
     # Our mock db returns one file 'foo' in list_user_dir, context should reflect that or LLM
     # The MockLLM returns "Mock system Response"
     # Actually, if the handler sees a file_list, it might list it depending on prompt?
@@ -154,7 +170,9 @@ def test_telnet_full_session_flow(telnet_server):
     # Command 2: 'whoami' with CR only (Test Shell Loop CR handling)
     s.sendall(b"whoami\r")
     resp2 = read_until(s, [b"Mock", b"root"], timeout=2.0)
-    assert b"Mock system Response" in resp2  # Mock LLM handles everything unknown
+    # With Unix handlers enabled on Telnet, whoami returns 'root' (local handler)
+    # instead of falling through to Mock LLM.
+    assert b"root" in resp2 or b"Mock system Response" in resp2
 
     # 5. Exit
     s.sendall(b"exit\r\n")

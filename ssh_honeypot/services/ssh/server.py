@@ -249,11 +249,25 @@ class HoneypotServer(paramiko.ServerInterface):
         if node and node.get("type") == "file" and node.get("content"):
             content = node["content"]
             for line in content.splitlines():
-                if not line.strip() or line.strip().startswith("#"):
+                line = line.strip()
+                if not line or line.startswith("#"):
                     continue
+
+                # Standard SSH authorized_keys format: [options] keytype base64-key [comment]
                 parts = line.split()
-                if len(parts) >= 2:
-                    if parts[0] == key_type and parts[1] == key_b64:
+                # Skip options if present (detected by parts[0] not starting as a key type)
+                # Key types usually start with "ssh-", "ecdsa-", etc.
+                key_type_index = 0
+                while key_type_index < len(parts) and not (
+                    parts[key_type_index].startswith("ssh-")
+                    or parts[key_type_index].startswith("ecdsa-")
+                ):
+                    key_type_index += 1
+
+                if key_type_index + 1 < len(parts):
+                    l_type = parts[key_type_index]
+                    l_key = parts[key_type_index + 1]
+                    if l_type == key_type and l_key == key_b64:
                         authorized = True
                         break
 

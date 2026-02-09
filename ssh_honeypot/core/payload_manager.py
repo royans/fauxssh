@@ -179,7 +179,16 @@ class PayloadManager:
             logger.error(f"Error queuing payload {url}: {e}")
             return False
 
-    def queue_upload(self, filename, content, session_id, ip, timestamp=None):
+    def queue_upload(
+        self,
+        filename,
+        content,
+        session_id,
+        ip,
+        timestamp=None,
+        method="upload",
+        **kwargs,
+    ):
         """
         Integrates an uploaded file into the payload analysis system.
         Skips downloading since we already have the content.
@@ -197,7 +206,11 @@ class PayloadManager:
             size = len(content_bytes)
 
             # Use filename in the "URL" column to identify source
-            url = f"upload://{filename}"
+            if "://" not in filename:
+                url = f"{method.lower()}://{filename}"
+            else:
+                url = filename
+
             url_hash = hashlib.md5(url.encode()).hexdigest()
 
             # Save to payload directory
@@ -229,6 +242,9 @@ class PayloadManager:
                 snippet=snippet,
                 content=db_content,
                 is_binary=is_binary,
+                method=method,
+                command_text=kwargs.get("command_text"),
+                user_agent=kwargs.get("user_agent"),
             )
 
             if added:
@@ -245,9 +261,10 @@ class PayloadManager:
                         snippet=snippet,
                         content=db_content,
                         is_binary=is_binary,
+                        method=method,
                     )
                 logger.info(
-                    f"[PayloadManager] Queued uploaded file for analysis: {filename}"
+                    f"[PayloadManager] Queued {method} payload for analysis: {filename}"
                 )
                 return True
             return False
@@ -255,6 +272,59 @@ class PayloadManager:
         except Exception as e:
             logger.error(f"Error queuing upload {filename}: {e}")
             return False
+
+    def check_and_queue_text_payload(
+        self, content, session_id, ip, source="SSH-Command"
+    ):
+        """
+        Heuristically checks if a text block (long command, SQL, etc) is suspicious
+        enough to be treated as a payload.
+        """
+        if not content:
+            return False
+
+        # 1. Length Check
+        if len(content) > 1000:
+            return self.queue_upload(
+                f"large_input_{hashlib.md5(content.encode()).hexdigest()[:8]}",
+                content,
+                session_id,
+                ip,
+                method=source,
+                command_text=content[:5000],  # store original text
+            )
+
+        # 2. Keyword Check (Jailbreaks, Exploits)
+        suspicious_keywords = [
+            "ignore previous instructions",
+            "do anything now",
+            "DAN mode",
+            "system prompt",
+            "simulated terminal",
+            "encoded_payload",
+            "base64 -d",
+            "rm -rf /",
+            "wget http",
+            "curl http",
+            "DROP TABLE",
+            "UNION SELECT",
+            "eval" + "(",  # Split to avoid security scanner false positive
+            "exec" + "(",  # Split to avoid security scanner false positive
+        ]
+
+        lower_content = content.lower()
+        for kw in suspicious_keywords:
+            if kw.lower() in lower_content:
+                return self.queue_upload(
+                    f"suspicious_{hashlib.md5(content.encode()).hexdigest()[:8]}",
+                    content,
+                    session_id,
+                    ip,
+                    method=source if source != "SSH-Command" else "Exploit-Attempt",
+                    command_text=content[:5000],
+                )
+
+        return False
 
     def process_queue(self, limit=5):
         """

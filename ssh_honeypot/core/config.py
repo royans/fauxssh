@@ -2,6 +2,7 @@ import yaml
 import os
 import sys
 import copy
+import logging
 from ssh_honeypot.core.utils import (
     PROJECT_ROOT,
     BASE_DIR,
@@ -335,7 +336,7 @@ class ConfigManager:
                                 display_current = "********"
                                 display_old = "********"
 
-                            print(
+                            logging.debug(
                                 f"[ConfigMatch] {env_key}='{display_val}' -> {display_current} (Was: {display_old})"
                             )
                     except Exception as e:
@@ -473,14 +474,6 @@ class ConfigManager:
                 return None  # Obj access?
             if val is None:
                 return None
-
-        if keys == ("security", "bypass_auth_for_ignored_ips"):
-            from ssh_honeypot.core.logging_setup import log
-
-            env_val = os.getenv("SECURITY_BYPASS_AUTH_FOR_IGNORED_IPS")
-            log.info(
-                f"[ConfigDebug] security.bypass_auth_for_ignored_ips = {val} (Type: {type(val)}) | ENV: {env_val}"
-            )
 
         return val
 

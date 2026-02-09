@@ -362,8 +362,8 @@ class SQLiteBackend(DatabaseBackend):
                 conn.execute(
                     """
                     INSERT INTO interactions 
-                    (timestamp, session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size, duration_ms) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (timestamp, session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size, duration_ms, was_cached) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                     (
                         created_at,
@@ -377,14 +377,15 @@ class SQLiteBackend(DatabaseBackend):
                         response_head,
                         response_size,
                         duration_ms,
+                        1 if was_cached else 0,
                     ),
                 )
             else:
                 conn.execute(
                     """
                     INSERT INTO interactions 
-                    (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size, duration_ms) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size, duration_ms, was_cached) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                     (
                         session_id,
@@ -397,6 +398,7 @@ class SQLiteBackend(DatabaseBackend):
                         response_head,
                         response_size,
                         duration_ms,
+                        1 if was_cached else 0,
                     ),
                 )
             conn.commit()
@@ -980,7 +982,24 @@ class SQLiteBackend(DatabaseBackend):
                 return True
 
         # 4. Check Global DB
-        # TODO: Add global DB check if needed. For now Global is static /etc mostly.
+        try:
+            conn = self._get_conn()
+            c = conn.cursor()
+            c.execute(
+                "SELECT 1 FROM global_filesystem WHERE path = ? AND type = 'directory'",
+                (path,),
+            )
+            if c.fetchone():
+                return True
+
+            # Check if it has children in global
+            c.execute("SELECT 1 FROM global_filesystem WHERE parent_path = ?", (path,))
+            if c.fetchone():
+                return True
+        except:
+            pass
+        finally:
+            conn.close()
 
         return False
 
@@ -2889,100 +2908,6 @@ class SQLiteBackend(DatabaseBackend):
             conn.commit()
         except Exception as e:
             log.error(f"[DB] Error updating payload status: {e}")
-        finally:
-            conn.close()
-
-    def get_payload_summary(self, hours=24):
-        """Returns unique payloads by MD5 with server and attacker counts."""
-        conn = self._get_conn()
-        try:
-            conn.row_factory = sqlite3.Row
-            c = conn.cursor()
-            time_filter = f"datetime('now', '-{hours} hours')"
-            c.execute(
-                f"""
-                SELECT p.payload_md5, MAX(p.timestamp) as last_seen, 
-                       COUNT(DISTINCT p.id) as server_count,
-                       COUNT(DISTINCT pr.ip) as attacker_count,
-                       MAX(p.status) as status, MAX(p.analysis_stage) as analysis_stage,
-                       MAX(p.virustotal_result) as vt_res,
-                       MAX(p.payload_size) as size,
-                       MAX(p.url) as sample_url
-                FROM malicious_payloads p
-                LEFT JOIN payload_requests pr ON p.id = pr.payload_id
-                WHERE p.payload_md5 IS NOT NULL AND p.timestamp > {time_filter}
-                GROUP BY p.payload_md5
-                ORDER BY last_seen DESC
-            """
-            )
-            return [dict(row) for row in c.fetchall()]
-        except Exception as e:
-            log.error(f"[DB] Error fetching payload summary: {e}")
-            return []
-        finally:
-            conn.close()
-
-    def get_payload_details(self, md5):
-        """Returns detailed info for a specific MD5, including content and occurrences."""
-        conn = self._get_conn()
-        try:
-            conn.row_factory = sqlite3.Row
-            c = conn.cursor()
-            # Get the core payload info (from the oldest entry for this MD5)
-            c.execute(
-                "SELECT * FROM malicious_payloads WHERE payload_md5 = ? ORDER BY timestamp ASC LIMIT 1",
-                (md5,),
-            )
-            base = c.fetchone()
-            if not base:
-                return None
-
-            base_dict = dict(base)
-
-            # If content is missing, try to read it from disk
-            if (not base_dict.get("content")) and base_dict.get("file_path"):
-                try:
-                    fpath = base_dict["file_path"]
-                    from ssh_honeypot.core.utils import (
-                        get_data_dir,
-                        PROJECT_ROOT,
-                        get_storable_content,
-                    )
-
-                    actual_path = fpath.replace("<DATA_DIR>", get_data_dir()).replace(
-                        "<ROOT>", PROJECT_ROOT
-                    )
-
-                    if os.path.exists(actual_path):
-                        with open(actual_path, "rb") as f:
-                            raw_content = f.read(1024 * 1024)  # 1MB limit
-                            db_content, _ = get_storable_content(raw_content)
-                            base_dict["content"] = db_content
-                except Exception as e:
-                    # We can't use log here if not imported, but database.py usually has it
-                    pass
-
-            base_dict["occurrences"] = []
-
-            # Get all occurrences/requests
-            c.execute(
-                """
-                SELECT pr.timestamp, pr.ip, pr.session_id, s.protocol
-                FROM payload_requests pr
-                LEFT JOIN malicious_payloads p ON pr.payload_id = p.id
-                LEFT JOIN sessions s ON pr.session_id = s.session_id
-                WHERE p.payload_md5 = ?
-                ORDER BY pr.timestamp DESC
-            """,
-                (md5,),
-            )
-            occurrences = [dict(row) for row in c.fetchall()]
-            base_dict["occurrences"] = occurrences
-
-            return base_dict
-        except Exception as e:
-            log.error(f"[DB] Error fetching payload details: {e}")
-            return None
         finally:
             conn.close()
 

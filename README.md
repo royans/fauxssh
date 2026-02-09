@@ -23,7 +23,7 @@ FauxSSH deceptively emulates a realistic Linux server, engaging attackers in lon
 - **Dynamic Filesystem**: Persists user changes per session.
 - **🔒 Safe & Isolated**: All uploaded files are sandboxed. The "filesystem" is virtual and strictly isolated from the host.
 - **🚨 Real-Time Alerting**: Stream high-risk sessions live to Discord or Slack.
-- **📊 Built-in Analytics**: CLI tools to visualize sessions, inspect malware, and correlate threat actors.
+- **📊 Built-in Analytics**: CLI tools to visualize sessions, correlate threat actors, and inspect captured payloads (SFTP, SCP, SQL, Exploits).
 
 
 ## Recent Improvements (Feb 7)

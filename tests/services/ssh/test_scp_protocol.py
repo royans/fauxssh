@@ -1,9 +1,14 @@
+import os
+import sys
+
+os.environ["DATABASE_TYPE"] = "sqlite"
+os.environ["GOOGLE_API_KEY"] = ""
+os.environ["FAUXSSH_TEST_MODE"] = "1"
+
 import unittest
 import threading
 import time
 import socket
-import os
-import sys
 
 sys.path.append(os.getcwd())
 try:

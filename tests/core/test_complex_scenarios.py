@@ -1,14 +1,18 @@
-import paramiko
+import os
 import sys
+
+os.environ["DATABASE_TYPE"] = "sqlite"
+os.environ["GOOGLE_API_KEY"] = ""
+os.environ["FAUXSSH_TEST_MODE"] = "1"
+
+import paramiko
 import unittest
 from unittest.mock import MagicMock
 import threading
 import time
 import socket
-import os
 import random
 
-# Ensure we can import server
 # Ensure we can import server
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from ssh_honeypot.main import main as server_main
@@ -38,10 +42,7 @@ class TestComplexScenarios(unittest.TestCase):
         ssh_honeypot.services.ssh.server.PORT = TEST_PORT
         ssh_honeypot.services.ssh.server.ip_connection_counts.clear()
 
-        # 0. FORCE LLM OFFLINE (Critical)
-        # main.py re-initializes LLMInterface, so we must poison the environment
-        # to ensure it gets an empty key and falls back to deterministic static logic.
-        os.environ["GOOGLE_API_KEY"] = ""
+        pass
 
         # 1. Deterministic State: Clear Cache
         from ssh_honeypot.core.database import HoneyDB

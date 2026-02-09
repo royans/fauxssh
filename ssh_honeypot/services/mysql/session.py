@@ -153,6 +153,25 @@ class HoneyMySQLSession(MysqlSession):
         and multi-statement queries are supported.
         """
         log.debug(f"[MySQL] Handling query: {sql}")
+
+        # --- Payload Capture (MySQL) ---
+        try:
+            # We need to access payload_manager. Since it's not injected into session,
+            # we rely on it being available via `self.honey_db` or instantiate it.
+            # Ideally session receives it. But `HoneyMySQLSession` has `honey_db`.
+            from ssh_honeypot.core.payload_manager import PayloadManager
+
+            pm = PayloadManager(self.honey_db)
+            pm.check_and_queue_text_payload(
+                sql,
+                self.session_id,
+                self.client_address[0] if self.client_address else "unknown",
+                source="MySQL",
+            )
+        except Exception as e:
+            log.error(f"[MySQL] Payload Capture Error: {e}")
+        # -------------------------------
+
         expressions = self._parse(sql)
         if expressions is None:
             return await self._llm_query(sql)

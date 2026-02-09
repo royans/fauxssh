@@ -321,8 +321,8 @@ class PostgresBackend(DatabaseBackend):
                 cursor.execute(
                     """
                     INSERT INTO interactions 
-                    (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size, timestamp) 
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size, duration_ms, was_cached, timestamp) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                     (
                         session_id,
@@ -334,6 +334,8 @@ class PostgresBackend(DatabaseBackend):
                         response_md5,
                         self._clean_str(response_head),
                         response_size,
+                        duration_ms,
+                        was_cached,
                         created_at,
                     ),
                 )
@@ -362,8 +364,8 @@ class PostgresBackend(DatabaseBackend):
                         cursor = conn.cursor()
 
                 query = """
-                    INSERT INTO interactions (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size, duration_ms, timestamp)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO interactions (session_id, cwd, command, response, source, request_md5, response_md5, response_head, response_size, duration_ms, was_cached, timestamp)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """
                 cursor.execute(
                     query,
@@ -378,6 +380,7 @@ class PostgresBackend(DatabaseBackend):
                         self._clean_str(response_head),
                         response_size,
                         duration_ms,
+                        was_cached,
                         (
                             created_at
                             if created_at
@@ -811,7 +814,7 @@ class PostgresBackend(DatabaseBackend):
             cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             query = "SELECT id, uid, internal_date, flags, size, header_content, body_content, template_path, payload_id, is_deleted FROM email_messages WHERE mailbox_id=%s AND ip=%s AND username=%s"
             if not include_deleted:
-                query += " AND is_deleted = FALSE"
+                query += " AND is_deleted = 0"
             cursor.execute(query, (mailbox_id, ip, username))
             rows = cursor.fetchall()
             return [
@@ -903,7 +906,7 @@ class PostgresBackend(DatabaseBackend):
         try:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE email_messages SET is_deleted = TRUE WHERE id = %s",
+                "UPDATE email_messages SET is_deleted = 1 WHERE id = %s",
                 (message_id,),
             )
             conn.commit()
@@ -917,12 +920,12 @@ class PostgresBackend(DatabaseBackend):
             cursor = conn.cursor()
             # Prune messages
             cursor.execute(
-                "SELECT id, payload_id FROM email_messages WHERE COALESCE(last_accessed, created_at) < %s AND is_deleted = FALSE",
+                "SELECT id, payload_id FROM email_messages WHERE COALESCE(last_accessed, created_at) < %s AND is_deleted = 0",
                 (cutoff_time,),
             )
             to_delete = cursor.fetchall()
             cursor.execute(
-                "DELETE FROM email_messages WHERE COALESCE(last_accessed, created_at) < %s AND is_deleted = FALSE",
+                "DELETE FROM email_messages WHERE COALESCE(last_accessed, created_at) < %s AND is_deleted = 0",
                 (cutoff_time,),
             )
             conn.commit()
@@ -1157,7 +1160,7 @@ class PostgresBackend(DatabaseBackend):
                 (ip, username, path),
             )
             if cursor.fetchone():
-                return True
+                return 1
             cursor.execute(
                 "SELECT 1 FROM user_filesystem WHERE ip=%s AND username=%s AND parent_path=%s AND is_deleted=0",
                 (ip, username, path),
@@ -1491,21 +1494,21 @@ class PostgresBackend(DatabaseBackend):
         try:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT count(*) FROM auth_events WHERE client_ip = %s AND success = TRUE AND username != 'root' AND protocol = 'ssh'",
+                "SELECT count(*) FROM auth_events WHERE client_ip = %s AND success = 1 AND username != 'root' AND protocol = 'ssh'",
                 (ip,),
             )
             if cursor.fetchone()[0] > 0:
                 return "BLOCK"
 
             cursor.execute(
-                "SELECT count(*) FROM auth_events WHERE client_ip = %s AND username = 'root' AND success = FALSE AND protocol = 'ssh'",
+                "SELECT count(*) FROM auth_events WHERE client_ip = %s AND username = 'root' AND success = 0 AND protocol = 'ssh'",
                 (ip,),
             )
             failures = cursor.fetchone()[0]
 
             if failures == 2:
                 cursor.execute(
-                    "SELECT count(*) FROM auth_events WHERE client_ip = %s AND username = 'root' AND success = TRUE AND protocol = 'ssh'",
+                    "SELECT count(*) FROM auth_events WHERE client_ip = %s AND username = 'root' AND success = 1 AND protocol = 'ssh'",
                     (ip,),
                 )
                 if cursor.fetchone()[0] == 0:

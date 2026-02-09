@@ -84,10 +84,6 @@ def get_ignored_ips():
     raw = os.getenv("ANALYTICS_IGNORE_IPS", "")
     ips = [ip.strip() for ip in raw.split(",") if ip.strip()]
 
-    from ssh_honeypot.core.logging_setup import log
-
-    log.info(f"[UtilsDebug] get_ignored_ips() raw='{raw}' -> found {len(ips)} base IPs")
-
     if not raw:
         return []
 

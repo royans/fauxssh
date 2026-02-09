@@ -32,6 +32,7 @@ TABLE_SCHEMAS = {
         "response_head": "TEXT",
         "response_size": "INTEGER",
         "duration_ms": "INTEGER",
+        "was_cached": "BOOLEAN DEFAULT FALSE",
     },
     "auth_events": {
         "id": "SERIAL_PRIMARY_KEY",

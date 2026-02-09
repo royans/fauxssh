@@ -967,3 +967,205 @@ class AnalyticsEngine:
             return []
         finally:
             conn.close()
+
+    def get_recent_payloads(self, limit=50, anon=False):
+        """
+        Fetches recent malicious payloads with analysis details.
+        """
+        # 1. Check Cache
+        cache_key = self._get_cache_key("get_recent_payloads", limit=limit, anon=anon)
+        cached = self._get_cached(cache_key, ttl_seconds=300)
+        if cached:
+            return cached
+
+        conn, ph = self._get_conn_and_ph()
+        try:
+            cursor = conn.cursor()
+
+            # Base Query
+            query = f"""
+                SELECT 
+                    mp.id,
+                    mp.url,
+                    mp.timestamp,
+                    mp.status,
+                    mp.payload_size,
+                    mp.payload_md5,
+                    mp.error_message,
+                    pa.virustotal_result,
+                    pa.risk_score,
+                    pa.analysis_summary
+                FROM malicious_payloads mp
+                LEFT JOIN payload_analysis pa ON mp.payload_md5 = pa.payload_md5
+                ORDER BY mp.id DESC
+                LIMIT {ph}
+            """
+
+            cursor.execute(query, (limit,))
+            # Handle row factory differences
+            if cursor.description:
+                columns = [col[0] for col in cursor.description]
+                rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+            else:
+                rows = []
+
+            # Enrich with IPs (separate query to avoid massive join/group_concat issues across DBs)
+            for row in rows:
+                p_id = row["id"]
+                # Get associated IPs
+                cursor.execute(
+                    f"SELECT DISTINCT ip FROM payload_requests WHERE payload_id = {ph}",
+                    (p_id,),
+                )
+                # Filter out None values and "unknown" placeholders (handle whitespace too)
+                ips = [
+                    r[0]
+                    for r in cursor.fetchall()
+                    if r[0] and r[0].strip().lower() != "unknown"
+                ]
+
+                # Anonymize
+                if anon:
+                    ips = [self._clean_ip(ip, True) for ip in ips]
+
+                row["ip_list"] = ips
+                self._standardize_dates([row])
+
+            self._set_cache(cache_key, rows)
+            return rows
+
+        except Exception as e:
+            log.error(f"[AnalyticsEngine] Error in get_recent_payloads: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_payload_summary(self, hours=24):
+        """
+        Returns summary of payloads seen in the last N hours.
+        Moved from database.py to AnalyticsEngine.
+        """
+        cache_key = self._get_cache_key("get_payload_summary", hours=hours)
+        cached = self._get_cached(cache_key, ttl_seconds=300)
+        if cached:
+            return cached
+
+        conn, ph = self._get_conn_and_ph()
+        try:
+            cursor = conn.cursor()
+
+            # Timestamp calculation
+            if self.db.is_postgres:
+                time_filter = f"mp.timestamp > NOW() - INTERVAL '{hours} hours'"
+            else:
+                time_filter = f"mp.timestamp > datetime('now', '-{hours} hours')"
+
+            query = f"""
+                SELECT 
+                    mp.url,
+                    mp.payload_md5,
+                    COUNT(pr.id) as request_count,
+                    MAX(mp.timestamp) as last_seen,
+                    pa.risk_score,
+                    pa.virustotal_result
+                FROM malicious_payloads mp
+                LEFT JOIN payload_requests pr ON mp.id = pr.payload_id
+                LEFT JOIN payload_analysis pa ON mp.payload_md5 = pa.payload_md5
+                WHERE {time_filter}
+                GROUP BY mp.url, mp.payload_md5
+                ORDER BY request_count DESC
+                LIMIT 50
+            """
+
+            cursor.execute(query)
+            data = self._to_list_of_dicts(cursor)
+
+            # Parse VT result for quick stats
+            for row in data:
+                row["vt_stats"] = "Not Scanned"
+                if row.get("virustotal_result"):
+                    try:
+                        vt = json.loads(row["virustotal_result"])
+                        if "stats" in vt:
+                            stats = vt["stats"]
+                            row["vt_stats"] = (
+                                f"{stats.get('malicious', 0)}/{sum(stats.values())}"
+                            )
+                    except:
+                        pass
+                self._standardize_dates([row])
+
+            self._set_cache(cache_key, data)
+            return data
+        except Exception as e:
+            log.error(f"[AnalyticsEngine] Error in get_payload_summary: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_payload_details(self, md5):
+        """
+        Returns full details for a specific payload MD5.
+        Moved from database.py to AnalyticsEngine.
+        """
+        cache_key = self._get_cache_key("get_payload_details", md5=md5)
+        cached = self._get_cached(cache_key, ttl_seconds=300)
+        if cached:
+            return cached
+
+        conn, ph = self._get_conn_and_ph()
+        try:
+            cursor = conn.cursor()
+
+            # 1. Main payload info
+            cursor.execute(
+                f"SELECT * FROM malicious_payloads WHERE payload_md5 = {ph}", (md5,)
+            )
+            payloads = self._to_list_of_dicts(cursor)
+
+            if not payloads:
+                return None
+
+            # Use the most recent entry if multiple URLs point to same MD5 (or aggregate)
+            # For now, take the first one but maybe list all URLs
+            result = payloads[0]
+
+            # 2. Analysis info
+            cursor.execute(
+                f"SELECT * FROM payload_analysis WHERE payload_md5 = {ph}", (md5,)
+            )
+            analysis = self._to_list_of_dicts(cursor)
+            if analysis:
+                # Merge analysis into result
+                # Avoid overwriting id/timestamp from payload
+                for k, v in analysis[0].items():
+                    if k not in result:
+                        result[k] = v
+
+            # 3. Occurrences (Requests)
+            cursor.execute(
+                f"""
+                SELECT pr.timestamp, pr.ip, pr.session_id 
+                FROM payload_requests pr
+                JOIN malicious_payloads mp ON pr.payload_id = mp.id
+                WHERE mp.payload_md5 = {ph}
+                ORDER BY pr.timestamp DESC
+                LIMIT 50
+            """,
+                (md5,),
+            )
+
+            occurrences = self._to_list_of_dicts(cursor)
+            result["occurrences"] = occurrences
+            result["total_occurrences"] = len(occurrences)  # Approximate (limited)
+
+            self._standardize_dates([result])
+            self._standardize_dates(occurrences)
+
+            self._set_cache(cache_key, result)
+            return result
+        except Exception as e:
+            log.error(f"[AnalyticsEngine] Error in get_payload_details: {e}")
+            return None
+        finally:
+            conn.close()

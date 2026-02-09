@@ -241,7 +241,7 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                         return
 
                     hours = int(query.get("hours", [24])[0])
-                    data = self.server.honey_db.get_payload_summary(hours=hours)
+                    data = self.server.analytics_engine.get_payload_summary(hours=hours)
 
                     from ssh_honeypot.core.utils import obfuscate_ip
 
@@ -290,7 +290,7 @@ class HoneyHTTPHandler(http.server.BaseHTTPRequestHandler):
                     query = parse_qs(urlparse(self.path).query)
                     md5 = query.get("md5", [None])[0]
                     if md5:
-                        data = self.server.honey_db.get_payload_details(md5)
+                        data = self.server.analytics_engine.get_payload_details(md5)
                         if data:
                             # Hide sensitive info
                             from ssh_honeypot.core.utils import obfuscate_ip

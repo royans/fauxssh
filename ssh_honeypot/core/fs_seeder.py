@@ -46,10 +46,20 @@ def get_skeleton_data(json_path=None):
             logging.error(f"FS Seeder: Failed to load JSON: {e}")
 
     # 2. Append Dynamic User Defaults
-    # Note: These are now handled by the persona overlay in fs/home/USER/
-    home_defaults = []
-    nodes.extend(home_defaults)
-
+    # Standard SSH paths to ensure they exist for auth and visibility
+    home_defaults = [
+        {
+            "path": "~/.ssh",
+            "type": "dir",
+            "metadata": {"permissions": "drwx------", "owner": "USER", "group": "USER"},
+        },
+        {
+            "path": "~/.ssh/authorized_keys",
+            "type": "file",
+            "metadata": {"permissions": "-rw-------", "owner": "USER", "group": "USER"},
+            "content": "# Placeholder for public key authentication\n",
+        },
+    ]
     nodes.extend(home_defaults)
 
     # 2.5 Load Common FS Overlay (Honeytokens)

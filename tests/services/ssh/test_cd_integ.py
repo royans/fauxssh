@@ -1,11 +1,16 @@
-import paramiko
+import os
 import sys
+
+os.environ["DATABASE_TYPE"] = "sqlite"
+os.environ["GOOGLE_API_KEY"] = ""
+os.environ["FAUXSSH_TEST_MODE"] = "1"
+
+import paramiko
 import unittest
 from unittest.mock import MagicMock
 import threading
 import time
 import socket
-import os
 
 # Ensure we can import server
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -54,7 +59,6 @@ class TestCDIntegreation(unittest.TestCase):
 
         if not is_server_running(TEST_PORT):
             print(f"[*] Starting Test Server on {TEST_PORT}")
-            os.environ["FAUXSSH_TEST_MODE"] = "1"
             os.environ["FAUXSSH_PORT"] = str(TEST_PORT)
 
             # Disable other services to avoid port conflicts during deployment

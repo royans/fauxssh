@@ -157,7 +157,7 @@ class UniversalCache:
             return False
 
         # 1. Guard: Do not cache internal resource errors
-        if output_text and "Error: System resources exhausted" in str(output_text):
+        if output_text and "system resources exhausted" in str(output_text).lower():
             log.warning(
                 f"[UniversalCache] Preventing cache of resource exhaustion error for key {key}"
             )

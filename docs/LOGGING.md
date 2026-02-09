@@ -28,9 +28,27 @@ A structured log file ideal for ingestion into ELK/Splunk/Graylog.
 }
 ```
 
-### 3. Uploaded Files
-Files uploaded via SCP/SFTP are quarantined in `data/uploaded_files/<session_id>/`.
-They are stripped of execution permissions but should still be handled with care.
+### 3. Payload Capture
+FauxSSH automatically captures and analyzes malicious payloads delivered via various protocols.
+captured content is stored in `data/payloads/` and metadata in the database.
+
+**Captured Vectors:**
+- **SFTP/SCP:** Any file uploaded via SSH file transfer protocols.
+- **Wget/Curl:** URLs downloaded via shell commands (standard honeypot behavior).
+- **MySQL:** Suspiciously long SQL queries or multi-statement attacks.
+- **SSH Commands:** Extremely long commands (>1000 chars) or known jailbreak/exploit attempts.
+
+**View Captured Payloads:**
+You can list and inspect payloads using the CLI tool:
+```bash
+# List recent payloads with protocol source
+python3 tools/payload.py list
+
+# Dump content of a specific payload
+python3 tools/payload.py dump <MD5>
+```
+
+Files are stripped of execution permissions but should still be handled with care.
 
 ## Analytics Tools
 

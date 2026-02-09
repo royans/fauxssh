@@ -17,6 +17,7 @@ from rich.table import Table
 from rich import box
 from rich.text import Text
 from rich.rule import Rule
+from rich.panel import Panel
 
 console = Console()
 
@@ -618,6 +619,160 @@ def reset_failed_analysis(db_path=None):
     conn.close()
 
 
+def report_efficiency(db_path=None, duration_seconds=None):
+    """
+    Reports on LLM call efficiency and captures redundant analysis detection.
+    """
+    engine = get_engine()
+    conn = engine.db._get_conn()
+    c = conn.cursor()
+
+    title_suffix = ""
+    where_clause = ""
+    where_clause_was_cached = ""
+    params = []
+    params_was_cached = []
+
+    if duration_seconds:
+        title_suffix = f" (Last {duration_seconds}s)"
+        where_clause = "AND timestamp > (CURRENT_TIMESTAMP - INTERVAL '%s seconds')"
+        where_clause_base = (
+            "WHERE timestamp > (CURRENT_TIMESTAMP - INTERVAL '%s seconds')"
+        )
+
+        if engine.db.is_postgres:
+            where_clause = "AND timestamp > (CURRENT_TIMESTAMP - INTERVAL '%s seconds')"
+            where_clause_base = (
+                "WHERE timestamp > (CURRENT_TIMESTAMP - INTERVAL '%s seconds')"
+            )
+        else:
+            where_clause = "AND timestamp > datetime('now', '-%s seconds')"
+            where_clause_base = "WHERE timestamp > datetime('now', '-%s seconds')"
+
+        params = [duration_seconds]
+        params_was_cached = [duration_seconds]
+
+    console.print(
+        Rule(f"LLM EFFICIENCY & REDUNDANCY REPORT{title_suffix}", style="cyan")
+    )
+
+    # 1. Total Interactions vs Analysis
+    count_query = "SELECT COUNT(*) FROM interactions"
+    if duration_seconds:
+        count_query += " " + where_clause_base % duration_seconds
+
+    c.execute(count_query)
+    total_cmds = c.fetchone()[0]
+
+    if total_cmds == 0:
+        console.print(
+            "[yellow]No interactions found to analyze efficiency in this period.[/yellow]"
+        )
+        conn.close()
+        return
+
+    analysis_count_query = "SELECT COUNT(*) FROM command_analysis"
+    if duration_seconds:
+        if engine.db.is_postgres:
+            analysis_count_query += f" WHERE analyzed_at > (CURRENT_TIMESTAMP - INTERVAL '{duration_seconds} seconds')"
+        else:
+            analysis_count_query += (
+                f" WHERE analyzed_at > datetime('now', '-{duration_seconds} seconds')"
+            )
+
+    c.execute(analysis_count_query)
+    total_analysis = c.fetchone()[0]
+
+    # 2. Redundant LLM Interactions
+    # To detect redundancy, we look for identical command strings from 'llm' source.
+    redundancy_query = f"""
+        SELECT command, COUNT(*) as freq 
+        FROM interactions 
+        WHERE source = 'llm'
+        {where_clause % duration_seconds if duration_seconds else ""}
+        GROUP BY command 
+        HAVING COUNT(*) > 1
+        ORDER BY freq DESC 
+        LIMIT 20
+    """
+    c.execute(redundancy_query)
+    redundant_cmds = c.fetchall()
+
+    table = Table(title="Top Redundant LLM Interactions", box=box.SIMPLE)
+    table.add_column("Command", style="yellow")
+    table.add_column("LLM Calls", justify="right")
+
+    saved_calls = 0
+    for cmd, freq in redundant_cmds:
+        table.add_row(cmd[:50], str(freq))
+        saved_calls += freq - 1
+
+    console.print(table)
+
+    # 3. Cache Hits
+    cache_hits_query = "SELECT COUNT(*) FROM interactions WHERE was_cached"
+    if duration_seconds:
+        cache_hits_query += (
+            f" AND timestamp > (CURRENT_TIMESTAMP - INTERVAL '{duration_seconds} seconds')"
+            if engine.db.is_postgres
+            else f" AND timestamp > datetime('now', '-{duration_seconds} seconds')"
+        )
+
+    c.execute(cache_hits_query)
+    cache_hits = c.fetchone()[0]
+
+    coarse_hits_query = "SELECT COUNT(*) FROM interactions WHERE source = 'llm-coarse'"
+    if duration_seconds:
+        coarse_hits_query += (
+            f" AND timestamp > (CURRENT_TIMESTAMP - INTERVAL '{duration_seconds} seconds')"
+            if engine.db.is_postgres
+            else f" AND timestamp > datetime('now', '-{duration_seconds} seconds')"
+        )
+
+    c.execute(coarse_hits_query)
+    coarse_hits = c.fetchone()[0]
+
+    # 4. Summary Stats
+    llm_gen_query = "SELECT COUNT(*) FROM interactions WHERE source = 'llm'"
+    if duration_seconds:
+        if engine.db.is_postgres:
+            llm_gen_query += f" AND timestamp > (CURRENT_TIMESTAMP - INTERVAL '{duration_seconds} seconds')"
+        else:
+            llm_gen_query += (
+                f" AND timestamp > datetime('now', '-{duration_seconds} seconds')"
+            )
+
+    c.execute(llm_gen_query)
+    llm_gens = c.fetchone()[0]
+
+    total_effective = cache_hits + coarse_hits
+    efficiency = (total_effective / total_cmds * 100) if total_cmds > 0 else 0
+
+    summary_table = Table(show_header=False, box=box.ROUNDED)
+    summary_table.add_column("Statistic")
+    summary_table.add_column("Value")
+    summary_table.add_row("Total Commands", f"{total_cmds}")
+    summary_table.add_row(
+        "LLM Generations",
+        f"{llm_gens} ({ (llm_gens/total_cmds*100 if total_cmds>0 else 0):.1f}%)",
+        style="magenta",
+    )
+    summary_table.add_row(
+        "Total Cache Hits",
+        f"{cache_hits} ({ (cache_hits/total_cmds*100 if total_cmds>0 else 0):.1f}%)",
+    )
+    summary_table.add_row(
+        "Coarse Hits (New)",
+        f"{coarse_hits} ({ (coarse_hits/total_cmds*100 if total_cmds>0 else 0):.1f}%)",
+    )
+    summary_table.add_row(
+        "Redundant LLM Contexts", f"{saved_calls} (Potential for Optimization)"
+    )
+
+    console.print(Panel(summary_table, title="Efficiency Summary", expand=False))
+    conn.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="FauxSSH Analytics")
     group = parser.add_mutually_exclusive_group(required=False)
@@ -631,6 +786,11 @@ def main():
     )
     group.add_argument(
         "--payloads", action="store_true", help="List captured malicious payloads"
+    )
+    group.add_argument(
+        "--redundancy",
+        action="store_true",
+        help="Report LLM call redundancy and efficiency",
     )
     parser.add_argument(
         "--all", action="store_true", help="Show all payloads (include failed/small)"
@@ -707,6 +867,9 @@ def main():
         list_payloads(
             limit=args.limit, anon=args.anon, db_path=args.db, show_all=args.all
         )
+    elif args.redundancy:
+        duration_secs = parse_duration(args.duration) if args.duration else None
+        report_efficiency(db_path=args.db, duration_seconds=duration_secs)
 
     else:
         if args.ip or args.session_id:

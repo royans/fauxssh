@@ -83,6 +83,11 @@ class CommandHandler:
         "nproc",
         "false",
         "true",
+        "chattr",
+        "lsattr",
+        "shell",
+        "bash",
+        "sh",
     }
 
     CACHABLE_CISCO_HANDLERS = {
@@ -693,8 +698,20 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         Input: cmd (str), context (dict)
         Output: (response_text_for_user, updates_dict, metadata)
         updates_dict = {'new_cwd': str, 'file_modifications': list}
-        metadata = {'source': 'llm'|'llm-cache'|'handler'|'handler-cache'|'chain', 'cached': bool}
+        metadata = {'source': 'llm'|'llm-cache'|'handler'|'handler-cache'|'chain', 'cached': bool, 'duration_ms': int}
         """
+        start_time = time.perf_counter()
+        res_text, updates, meta = self._process_command_impl(cmd, context)
+
+        # Calculate duration
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+        if meta is None:
+            meta = {}
+        meta["duration_ms"] = duration_ms
+
+        return res_text, updates, meta
+
+    def _process_command_impl(self, cmd, context=None):
         if context is None:
             context = {}
 
@@ -731,6 +748,15 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                         datetime.datetime.now(),
                         command_text=cmd,
                     )
+
+            # --- Extended Payload Capture (Long Cmds / Jailbreaks) ---
+            self.payload_manager.check_and_queue_text_payload(
+                cmd,
+                context.get("session_id", "unknown"),
+                context.get("ip", "unknown"),
+                source="SSH-Command",
+            )
+
         except Exception as e:
             log.error(f"[PayloadManager] Extraction error: {e}")
 
@@ -1645,17 +1671,14 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             )
 
         # 4. Dispatch to Specific Handlers (or generic LLM)
-        # SKIP Unix Handlers if Cisco Persona
-        persona = context.get("persona_config") or {}
-        system_cfg = persona.get("system") or {}
-        if system_cfg.get("handler_type") == "cisco_ios" and not context.get(
-            "force_unix_handlers"
-        ):
-            handler_name = None  # Force fallback to generic (LLM) which will simulate Cisco behavior
-        else:
-            # Normalize command name (replace - with _)
-            safe_base_cmd = base_cmd.replace("-", "_")
-            handler_name = f"handle_{safe_base_cmd}"
+        # SKIP Unix Handlers if Cisco Persona - REMOVED to allow mix
+        # persona = context.get("persona_config") or {}
+        # system_cfg = persona.get("system") or {}
+        # if system_cfg.get("handler_type") == "cisco_ios" and not context.get("force_unix_handlers"):
+        #    handler_name = None
+        # else:
+        safe_base_cmd = base_cmd.replace("-", "_")
+        handler_name = f"handle_{safe_base_cmd}"
 
         log.debug(
             f"Dispatching '{base_cmd}' -> '{handler_name}'. HasAttr: {hasattr(self, str(handler_name))}"
@@ -1701,44 +1724,53 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                     log.debug(f"[Cache] Handler store error: {e}")
 
             # Allow handlers to return custom metadata (esp. for hybrid handlers like cat)
-            if res and len(res) == 3:
-                return res[0], (res[1] or {}), (res[2] or {})
-            elif res and len(res) == 2:
-                return res[0], (res[1] or {}), {"source": "handler", "cached": False}
-            else:
-                log.warning(f"Handler {handler_name} returned invalid format: {res}")
-                return "", {}, {"source": "error", "cached": False}
-        else:
-            # Fallback: Try basename (e.g. /bin/ls -> ls, /bin/./uname -> uname)
-            normalized_base = os.path.basename(base_cmd)
-            safe_normalized_base = normalized_base.replace("-", "_")
-            handler_name_norm = f"handle_{safe_normalized_base}"
-
-            # Skip fallback too if Cisco
-            use_fallback = True
-            persona = context.get("persona_config") or {}
-            system_cfg = persona.get("system") or {}
-            if system_cfg.get("handler_type") == "cisco_ios" and not context.get(
-                "force_unix_handlers"
-            ):
-                use_fallback = False
-
-            if use_fallback and hasattr(self, handler_name_norm):
-                if not os.getenv("SSHPOT_TEST_MODE"):
-                    random_response_delay(0.5, 1.5)
-                # We pass the ORIGINAL cmd to the handler, it must handle parsing if needed.
-                res = getattr(self, handler_name_norm)(cmd, context)
-                if res and len(res) == 3:
+            if res is not None:
+                if len(res) == 3:
                     return res[0], (res[1] or {}), (res[2] or {})
-                elif res and len(res) == 2:
+                elif len(res) == 2:
                     return (
                         res[0],
                         (res[1] or {}),
                         {"source": "handler", "cached": False},
                     )
-                return "", {}, {"source": "handler", "cached": False}
+                else:
+                    log.warning(
+                        f"Handler {handler_name} returned invalid format: {res}"
+                    )
+                    return "", {}, {"source": "error", "cached": False}
 
-            return self.handle_generic(cmd, context)
+            # If primary handler returned None, fall through to fallback/generic
+
+        # Fallback: Try basename (e.g. /bin/ls -> ls, /bin/./uname -> uname)
+        normalized_base = os.path.basename(base_cmd)
+        safe_normalized_base = normalized_base.replace("-", "_")
+        handler_name_norm = f"handle_{safe_normalized_base}"
+
+        # Skip fallback too if Cisco - REMOVED
+        use_fallback = True
+        # if system_cfg.get("handler_type") == "cisco_ios" and not context.get("force_unix_handlers"):
+        #    use_fallback = False
+
+        if use_fallback and hasattr(self, handler_name_norm):
+            if not os.getenv("SSHPOT_TEST_MODE"):
+                random_response_delay(0.5, 1.5)
+            # We pass the ORIGINAL cmd to the handler, it must handle parsing if needed.
+            res = getattr(self, handler_name_norm)(cmd, context)
+            if res is not None:
+                if len(res) == 3:
+                    return res[0], (res[1] or {}), (res[2] or {})
+                elif len(res) == 2:
+                    return (
+                        res[0],
+                        (res[1] or {}),
+                        {"source": "handler", "cached": False},
+                    )
+                else:
+                    return "", {}, {"source": "handler", "cached": False}
+
+            # If fallback handler also returned None, fall through to generic
+
+        return self.handle_generic(cmd, context)
 
     def _is_allowed(self, cmd):
         base_cmd = cmd.split()[0]
@@ -1886,6 +1918,8 @@ Sector size (logical/physical): 512 bytes / 512 bytes
             if (
                 "Resource temporarily unavailable" not in str(response_json)
                 and "Resource temporarily unavailable" not in response_text
+                and "system resources exhausted" not in str(response_json).lower()
+                and "system resources exhausted" not in response_text.lower()
             ):
                 log.debug(f"[Session: {session_id}] [Cache] HIT")
                 out, up, _ = self._process_llm_json(
@@ -1898,9 +1932,10 @@ Sector size (logical/physical): 512 bytes / 512 bytes
                 )
                 return out, up, {"source": "llm-cache", "cached": True}
             else:
-                log.debug(
-                    f"[Session: {session_id}] [Cache] HIT (but contains error status, ignoring)"
+                log.warning(
+                    f"[Session: {session_id}] [Cache] HIT but contains error status (Resource Exhaustion). Invalidating key {cache_key}."
                 )
+                universal_cache.delete("ssh_command", cache_key)
 
         cached_resp = (
             None  # Legacy variable for downstream if needed, but we used cached_item
@@ -2038,12 +2073,18 @@ Sector size (logical/physical): 512 bytes / 512 bytes
         parts = cmd.strip().split()
 
         # Default to correct user home if no args
+        user = context.get("user", "root")
+        home_dir = "/root" if user == "root" else f"/home/{user}"
+
         if len(parts) > 1:
             target_path = parts[1]
+            # Manual tilde expansion
+            if target_path == "~":
+                target_path = home_dir
+            elif target_path.startswith("~/"):
+                target_path = os.path.join(home_dir, target_path[2:])
         else:
-            # HOME determination logic
-            user = context.get("user", "root")
-            target_path = "/root" if user == "root" else f"/home/{user}"
+            target_path = home_dir
 
         # Resolve target path relative to CWD
         cwd = context.get("cwd", "/")
@@ -2419,6 +2460,15 @@ Sector size (logical/physical): 512 bytes / 512 bytes
 
     def handle_wc(self, cmd, context):
         return self.wc_handler.handle(cmd, context)
+
+    def handle_shell(self, cmd, context):
+        return self._handle_interpreter(cmd, context, "shell")
+
+    def handle_bash(self, cmd, context):
+        return self._handle_interpreter(cmd, context, "bash")
+
+    def handle_sh(self, cmd, context):
+        return self._handle_interpreter(cmd, context, "sh")
 
     def _handle_interpreter(self, cmd, context, interpreter_name="bash"):
         import hashlib  # Ensure hashlib is imported for this function
@@ -4228,6 +4278,7 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
                                 content,
                                 context.get("session_id", "unknown"),
                                 client_ip,
+                                method="SCP",
                             )
 
                     except Exception as e:
@@ -4245,6 +4296,12 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
     def _extract_json_or_text(self, raw):
         if not raw:
             return None, ""
+
+        if not isinstance(raw, str):
+            try:
+                raw = str(raw)
+            except:
+                return None, ""
 
         # 1. Try standard parse (fastest)
         try:
@@ -4362,6 +4419,14 @@ Generate realistic processes for a web server (blogofy.com). Include system serv
             )
 
     def handle_su(self, cmd, context):
+        # Specific check: if Cisco persona, we probably want to fall through to LLM
+        # or handle it as a Cisco command if applicable (unlikely).
+        # We return None to let it fall through to handle_generic.
+        persona = context.get("persona_config") or {}
+        system_cfg = persona.get("system") or {}
+        if system_cfg.get("handler_type") == "cisco_ios":
+            return None
+
         # Always fail authentication
         # Simulate delay
         time.sleep(1.5)

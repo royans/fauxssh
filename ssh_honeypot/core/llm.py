@@ -82,6 +82,21 @@ class LLMInterface:
             kwargs["client_ip"] = "Unknown"
         return self._call_api(prompt, protocol=protocol, **kwargs)
 
+    def _get_coarse_cache_key(self, command, cwd, user):
+        """
+        Generates a coarse cache key for repetitive commands, independent of
+        Client IP and Session History.
+        """
+        if not command:
+            return None
+
+        # Sanitize command for key (norm whitespace, lower)
+        clean_cmd = " ".join(command.lower().split())
+
+        # We include CWD and User to stay realistic, but skip IP and History
+        data = f"cmd:{clean_cmd}|cwd:{cwd}|user:{user}"
+        return hashlib.md5(data.encode()).hexdigest()
+
     def generate_response(
         self,
         command,
@@ -226,12 +241,16 @@ class LLMInterface:
                 return resp, "error"
             return resp
 
+        # 3. Generate Coarse Cache Key (Optimization for Redundancy)
+        coarse_key = self._get_coarse_cache_key(command, cwd, user)
+
         res, source = self._call_api(
             prompt,
             command=command,
             protocol=protocol,
             return_source=True,
             client_ip=client_ip,
+            coarse_key=coarse_key,
             **kwargs,
         )
         if "INTERNAL_ERROR" in res:
@@ -306,12 +325,19 @@ class LLMInterface:
         protocol="ssh",
         return_source=False,
         client_ip="Unknown",
+        coarse_key=None,
         **kwargs,
     ):
-        # 1. Check Global Cache
+        # 1. Check Global Cache (Specific Prompt)
         prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
 
         cached_item = universal_cache.get("llm", prompt_hash)
+        if not cached_item and coarse_key:
+            # Try Coarse Cache (Generic Command)
+            cached_item = universal_cache.get("llm-coarse", coarse_key)
+            if cached_item:
+                log.debug(f"[LLM] Coarse Cache Hit for {command} ({coarse_key[:8]})")
+
         if cached_item:
             output = cached_item["output_text"]
 
@@ -327,7 +353,7 @@ class LLMInterface:
                 return output
 
             # Validation: Check for cached resource errors (TAINTED CACHE)
-            if "System resources exhausted" in output:
+            if "system resources exhausted" in str(output).lower():
                 log.warning(
                     f"[LLM] Detected Resource Exhaustion error in cache. Invalidating key {prompt_hash} and retrying."
                 )
@@ -399,20 +425,23 @@ class LLMInterface:
         else:
             res = self._call_google(prompt, prompt_hash, command, is_command, protocol)
 
-        # Route to provider
-        if self.provider == "openai":
-            res = self._call_openai(prompt, prompt_hash, command, is_command, protocol)
-        elif self.provider == "ollama":
-            res = self._call_ollama(prompt, prompt_hash, command, is_command, protocol)
-        else:
-            res = self._call_google(prompt, prompt_hash, command, is_command, protocol)
-
         # Final Guard: Check for Resource Exhaustion in result (double check)
-        if res and "System resources exhausted" in res:
+        if res and "system resources exhausted" in str(res).lower():
             log.warning(
                 f"[LLM] Detected Resource Exhaustion in API result. Returning error state."
             )
             return '{"output": "INTERNAL_ERROR", "new_cwd": null}'
+
+        # 4. Save to Cache
+        try:
+            # Save to specific prompt cache
+            universal_cache.set("llm", prompt_hash, res)
+
+            # Save to coarse cache if applicable
+            if coarse_key:
+                universal_cache.set("llm-coarse", coarse_key, res)
+        except Exception as e:
+            log.error(f"[LLM] Failed to save to cache: {e}")
 
         if return_source:
             return res, "llm"
@@ -605,10 +634,31 @@ class LLMInterface:
 
             if is_command and command:
                 try:
-                    analysis = self.analyze_command(command)
-                    risk_score = analysis.get("risk", 0)
-                    attack_stage = f"{analysis.get('type', 'Unknown')} ({analysis.get('stage', 'Unknown')})"
-                    explanation = analysis.get("explanation")
+                    # Try to extract bundled analysis first (optimization)
+                    bundled_analysis = None
+                    try:
+                        bundled_json = json.loads(final_text)
+                        if (
+                            isinstance(bundled_json, dict)
+                            and "analysis" in bundled_json
+                        ):
+                            bundled_analysis = bundled_json["analysis"]
+                    except:
+                        pass
+
+                    if bundled_analysis:
+                        risk_score = int(bundled_analysis.get("risk", 0))
+                        attack_stage = f"{bundled_analysis.get('type', 'Unknown')} ({bundled_analysis.get('stage', 'Unknown')})"
+                        explanation = bundled_analysis.get("explanation")
+                        log.debug(
+                            f"[LLM] Using bundled 'free' analysis for '{command}'"
+                        )
+                    else:
+                        # Fallback to separate call if not bundled or failed parsing
+                        analysis = self.analyze_command(command)
+                        risk_score = analysis.get("risk", 0)
+                        attack_stage = f"{analysis.get('type', 'Unknown')} ({analysis.get('stage', 'Unknown')})"
+                        explanation = analysis.get("explanation")
                 except Exception as e:
                     log.warning(f"[LLM] Risk analysis failed: {e}")
 

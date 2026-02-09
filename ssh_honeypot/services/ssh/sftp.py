@@ -120,6 +120,7 @@ class HoneySFTPHandle(paramiko.SFTPHandle):
                                         content,
                                         self.server_obj.session_id,
                                         self.server_obj.client_ip,
+                                        method="SFTP",
                                     )
                                 except Exception as pm_e:
                                     log.error(f"[SFTP] Payload Queue Error: {pm_e}")

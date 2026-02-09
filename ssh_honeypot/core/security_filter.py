@@ -82,6 +82,12 @@ class SecurityFilter:
         if not llm_output:
             return llm_output
 
+        if not isinstance(llm_output, str):
+            try:
+                llm_output = str(llm_output)
+            except:
+                return llm_output
+
         # Common leaks to mask
         leaks = [
             "AI",
